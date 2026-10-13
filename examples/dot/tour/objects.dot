@@ -1,0 +1,50 @@
+// Objects and types in DOT: everything else is built from these.
+
+// 1. Records and width subtyping: an object has every type that asks for
+// fewer members.
+type Point = { val x: Int; val y: Int }
+val p = new { val x = 3; val y = 4; val label = "p" }
+def norm1(q: Point): Int = q.x + q.y
+println(norm1(p))
+
+// 2. Intersections combine types, the way mixins do: a value of `A & B`
+// has both.
+type Colored = { val color: String }
+def show(q: Point & Colored): String = q.color + " (" + q.x + ", " + q.y + ")"
+println(show(new { val x = 1; val y = 2; val color = "red" }))
+
+// 3. Recursive types: a type can refer to the value it describes, here to
+// say a stream's tail is another stream.
+type Stream = { s => val head: Int; def tail(): Stream }
+def from(n: Int): Stream = new { val head = n; def tail(): Stream = from(n + 1) }
+def take(s: Stream, n: Int): String = if (n == 0) "" else s.head + " " + take(s.tail(), n - 1)
+println(take(from(10), 4))
+
+// 4. Family polymorphism: a type member that varies with the object, so
+// that each animal only eats its own kind of food, and the checker knows
+// which that is from which animal it is.
+type Animal = { a =>
+  type Food
+  val name: String
+  def eat(f: a.Food): String
+}
+val cow = new { type Food = { val grass: Int }; val name = "cow"; def eat(f: Food): String = name + " eats " + f.grass + " grass" }
+val owl = new { type Food = { val mice: Int }; val name = "owl"; def eat(f: Food): String = name + " eats " + f.mice + " mice" }
+def feed(x: Animal, f: x.Food): String = x.eat(f)
+println(feed(cow, new { val grass = 3 }))
+println(feed(owl, new { val mice = 2 }))
+// `feed(owl, new { val grass = 3 })` is a type error: that's cow food.
+
+// 5. A self type: inside the object, `self` is known to be a `Point`
+// already, while its members are being defined.
+val q = new { self: Point => val x = 5; val y = self.x * 2 }
+println(q.y)
+
+// 6. Abstract types with bounds: a counter whose type is only known to be
+// some kind of `Int`, so it can be used as one, but not made from one.
+val bounded: { type T <: Int; val start: T; def next(n: T): T } = new { type T = Int; val start: T = 1; def next(n: T): T = n * 2 }
+println(bounded.next(bounded.next(bounded.start)) + 100)
+
+// 7. Identity: objects are compared by which object they are.
+println(p == p)
+println(p == new { val x = 3; val y = 4 })

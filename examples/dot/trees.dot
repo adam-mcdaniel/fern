@@ -1,0 +1,23 @@
+// Builds binary trees and counts their leaves, over and over: far more
+// trees than fit in memory at once, so the garbage collector has to free the
+// ones that are done with, while the one kept all along survives.
+
+type Tree = { val isLeaf: Bool; def left(): Tree; def right(): Tree }
+
+def leaf(): Tree = new {
+  val isLeaf = true
+  def left(): Tree = error("a leaf has no left")
+  def right(): Tree = error("a leaf has no right")
+}
+def node(l: Tree, r: Tree): Tree = new {
+  val isLeaf = false
+  def left(): Tree = l
+  def right(): Tree = r
+}
+def make(depth: Int): Tree = if (depth == 0) leaf() else node(make(depth - 1), make(depth - 1))
+def leaves(t: Tree): Int = if (t.isLeaf) 1 else leaves(t.left()) + leaves(t.right())
+def rounds(n: Int, total: Int): Int = if (n == 0) total else rounds(n - 1, total + leaves(make(5)))
+
+val kept = make(6)
+println(rounds(12, 0))
+println(leaves(kept))

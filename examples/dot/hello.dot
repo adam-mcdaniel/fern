@@ -1,0 +1,22 @@
+// Functions, objects, abstract types and strings.
+def fact(n: Int) = if (n <= 1) 1 else n * fact(n - 1)
+def twice(f: Int => Int, x: Int) = f(f(x))
+
+type Counter = { c =>
+  type T
+  def start(): c.T
+  def next(n: c.T): c.T
+  def show(n: c.T): String
+}
+val counter: Counter = new {
+  type T = Int
+  def start(): T = 0
+  def next(n: T): T = n + 1
+  def show(n: T): String = "counted to " + n
+}
+
+println("hello, world")
+println("7! = " + fact(7))
+println(twice(x => x * 3, 7))
+println(counter.show(counter.next(counter.next(counter.start()))))
+println(fact(5) == 120)

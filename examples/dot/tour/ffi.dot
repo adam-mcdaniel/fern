@@ -1,0 +1,21 @@
+// Calling out: `extern def` declares a function outside the program, which
+// it calls the way the VM calls any function it doesn't define, by label.
+// In the C backend that's a C function (ffi.c here)
+//
+//   void popcount(int64_t **tape, int64_t **ptr, int64_t *acc)
+//
+// that gets the machine's tape, pointer and accumulator: the arguments are
+// in the cells from the pointer on, and the result is what it leaves in the
+// accumulator. The interpreters take Rust functions that get the same (see
+// examples/dot_ffi.rs). Its type is trusted.
+//
+//   cargo run --example dot_ffi
+//   cargo run --example dot -- examples/dot/tour/ffi.dot --build ffi examples/dot/tour/ffi.c --via-c
+
+extern def popcount(n: Int): Int
+extern def checksum(s: String): Int
+extern def clamp(x: Int, low: Int, high: Int): Int
+
+println(popcount(255) + popcount(1024))
+println(checksum("hello"))
+println(clamp(-5, 0, 10) + clamp(50, 0, 10) + clamp(7, 0, 10))

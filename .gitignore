@@ -1,0 +1,6 @@
+/target
+/hw/build
+/hw/asic/runs
+/hw/schematic/build
+/hw/schematic/build-gates
+/share

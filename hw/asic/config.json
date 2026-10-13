@@ -1,0 +1,11 @@
+{
+    "DESIGN_NAME": "bf_chip",
+    "VERILOG_FILES": ["dir::../bf_chip.v", "dir::../bf_cpu.v", "dir::../uart.v"],
+    "SYNTH_PARAMETERS": ["XLEN=16", "CLKS_PER_BIT=217"],
+    "CLOCK_PORT": "clk",
+    "CLOCK_PERIOD": 40,
+    "FP_CORE_UTIL": 45,
+    "PL_TARGET_DENSITY_PCT": 55,
+    "RUN_POST_GRT_DESIGN_REPAIR": true,
+    "RUN_POST_GRT_RESIZER_TIMING": true
+}

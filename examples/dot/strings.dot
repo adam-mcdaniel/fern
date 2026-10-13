@@ -1,0 +1,27 @@
+// Reads lines until an empty one, and prints each backwards, with how many
+// words it has.
+
+def reverse(s: String) = {
+  def go(i: Int, done: String): String =
+    if (i == s.length) done else go(i + 1, s.substring(i, i + 1) + done)
+  go(0, "")
+}
+
+def words(s: String) = {
+  def go(i: Int, inWord: Bool, n: Int): Int =
+    if (i == s.length) n
+    else if (s.charAt(i) == 32) go(i + 1, false, n)
+    else go(i + 1, true, if (inWord) n else n + 1)
+  go(0, false, 0)
+}
+
+def lines(count: Int): Int = {
+  val line = readLine()
+  if (line == "") count
+  else {
+    println(reverse(line) + " (" + words(line) + " words)")
+    lines(count + 1)
+  }
+}
+
+println(lines(0) + " lines")

@@ -1,0 +1,41 @@
+// Generic lists, the DOT way: a list's element type is its type member `A`,
+// and generic functions take a type as an object with a type member `T`.
+
+val lists = new { m =>
+  type List = { l =>
+    type A
+    val isEmpty: Bool
+    def head(): l.A
+    def tail(): m.List & { type A <: l.A }
+  }
+  def nil(t: { type T }): m.List & { type A = t.T } = new { l =>
+    type A = t.T
+    val isEmpty = true
+    def head(): A = error("head of an empty list")
+    def tail(): m.List & { type A <: l.A } = error("tail of an empty list")
+  }
+  def cons(t: { type T }, x: t.T, xs: m.List & { type A <: t.T }): m.List & { type A = t.T } = new { l =>
+    type A = t.T
+    val isEmpty = false
+    def head(): A = x
+    def tail(): m.List & { type A <: l.A } = xs
+  }
+  def map(s: { type T }, t: { type T }, f: s.T => t.T, xs: m.List & { type A <: s.T }): m.List & { type A = t.T } =
+    if (xs.isEmpty) nil(t) else cons(t, f(xs.head()), map(s, t, f, xs.tail()))
+}
+
+val Ints = new { type T = Int }
+val Bools = new { type T = Bool }
+type Ints = lists.List & { type A <: Int }
+
+def range(lo: Int, hi: Int): lists.List & { type A = Int } =
+  if (lo >= hi) lists.nil(Ints) else lists.cons(Ints, lo, range(lo + 1, hi))
+def sum(xs: Ints) = if (xs.isEmpty) 0 else xs.head() + sum(xs.tail())
+def each(xs: lists.List & { type A <: Bool }, f: Bool => Unit): Unit =
+  if (xs.isEmpty) () else { f(xs.head()); each(xs.tail(), f) }
+
+val xs = range(1, 11)
+println(sum(xs))
+println(sum(lists.map(Ints, Ints, x => x * x, xs)))
+each(lists.map(Ints, Bools, x => x % 3 == 0, range(0, 6)), b => print(b + " "))
+println()

@@ -1,0 +1,36 @@
+// Algebraic data types, the DOT way: a value is an object that can fold
+// itself, given what to do with each case (a Church encoding, or the visitor
+// pattern). Here, arithmetic expressions, an evaluator and a printer.
+
+type Expr = {
+  def fold[R](num: Int => R, add: (R, R) => R, mul: (R, R) => R, neg: R => R): R
+}
+
+def num(n: Int): Expr = new { def fold[R](num: Int => R, add: (R, R) => R, mul: (R, R) => R, neg: R => R): R = num(n) }
+def add(a: Expr, b: Expr): Expr = new {
+  def fold[R](num: Int => R, add: (R, R) => R, mul: (R, R) => R, neg: R => R): R = add(a.fold(num, add, mul, neg), b.fold(num, add, mul, neg))
+}
+def mul(a: Expr, b: Expr): Expr = new {
+  def fold[R](num: Int => R, add: (R, R) => R, mul: (R, R) => R, neg: R => R): R = mul(a.fold(num, add, mul, neg), b.fold(num, add, mul, neg))
+}
+def neg(a: Expr): Expr = new {
+  def fold[R](num: Int => R, add: (R, R) => R, mul: (R, R) => R, neg: R => R): R = neg(a.fold(num, add, mul, neg))
+}
+
+// each function on expressions says what to do with each case
+def eval(e: Expr): Int = e.fold(n => n, (a, b) => a + b, (a, b) => a * b, a => 0 - a)
+def show(e: Expr): String = e.fold(n => "" + n, (a, b) => "(" + a + " + " + b + ")", (a, b) => a + " * " + b, a => "-" + a)
+def size(e: Expr): Int = e.fold(n => 1, (a, b) => a + b + 1, (a, b) => a + b + 1, a => a + 1)
+
+// (2 + 3) * -(4 + 1)
+val e = mul(add(num(2), num(3)), neg(add(num(4), num(1))))
+println(show(e) + " = " + eval(e))
+println(size(e))
+
+// The standard library's options and lists are written the same way.
+import std.list._
+import std.option._
+def describe(xs: List[Int]): String = xs.fold(() => "nothing", (h, t) => "" + h + " and " + length(t) + " more")
+println(describe(range(5, 9)))
+println(describe(nil()))
+println(some(7).fold(() => 0, x => x * 6))
