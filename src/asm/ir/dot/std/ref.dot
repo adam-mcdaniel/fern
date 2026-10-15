@@ -1,8 +1,0 @@
-// A mutable cell. `A` is a parameter without a sign: a `var` can be written
-// as well as read, so the type of what's in it can't change.
-
-type Ref[A] = { var value: A }
-
-def ref[A](x: A): Ref[A] = new Ref[A] { var value = x }
-
-def update[A](r: Ref[A], f: A => A): Unit = r.value = f(r.value)

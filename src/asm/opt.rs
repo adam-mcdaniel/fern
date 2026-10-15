@@ -1,7 +1,9 @@
-//! An optimizer for VM programs: [`opt`] takes ops and gives ones that
-//! print the same, in fewer steps. [`opt_with`] is told more about the
-//! program ([`Facts`]: cells no pointer leads to, and calls only to
-//! labels), and sees further for it; lowering gives it what it promises.
+//! An optimizer for VM programs: ops in, ops out, printing the same.
+//! [`opt_fast`] makes a program take as few steps as it can, whatever that
+//! does to its size; [`opt_size`] makes it as small as it can, whatever
+//! that does to its speed. [`opt_with`] is told more about the program
+//! ([`Facts`]: cells no pointer leads to, and calls only to labels), and
+//! sees further for it.
 //!
 //! It works on the program's structure, loops and functions, and runs these
 //! until nothing changes:
@@ -43,8 +45,9 @@
 //!   runs, so it goes; one entered with `acc` known not to be, whose body
 //!   always leaves it 0, runs once, so its brackets go; one whose body only
 //!   works out `acc`, leaving it 0, becomes `Set(0)`.
-//! - **Inlining**: small functions, and ones called once, are inlined, and
-//!   functions nothing refers to are removed.
+//! - **Inlining**: functions called once are inlined, and for speed, small
+//!   ones (up to 64 ops) wherever they're called; functions nothing refers
+//!   to are removed.
 //! - **Dead code**: an op that only sets `acc` goes if `acc` is set again
 //!   before anything reads it, and a store goes if its value is overwritten
 //!   before anything could read it on every path: liveness over each
@@ -53,6 +56,20 @@
 //!   call reads the private cells its callee reads before writing them, and
 //!   any others, as does a read through a pointer). The tape the program
 //!   leaves when it ends isn't kept, only what it prints.
+//!
+//! Then, for size, **outlining**: runs of ops (and whole loops) that recur
+//! become calls to a function of them, the run that saves most first, while
+//! any saves anything, including runs in the functions it makes.
+//!
+//! The routines `asm` writes for what the VM has no instructions for
+//! (multiplying, dividing, comparing, the bitwise operations, shifting) are
+//! about as fast as the VM allows, and targets that know them do them with
+//! the machine's instructions instead, if they can tell what they are. So
+//! each is optimized on its own, as if called from anywhere with everything
+//! it leaves read after ([`routine_forms`]: one form for speed, one for
+//! size), and a program's copy of one becomes the form for the goal and is
+//! otherwise left as it is: not inlined, and not changed for what its
+//! callers need of it. Targets know all its forms.
 //!
 //! Values mean the same at every cell width: only arithmetic that wraps
 //! (`+`, `-`) folds freely, `#` only folds on numbers small enough to have
@@ -66,31 +83,415 @@
 use crate::Op;
 use std::collections::{HashMap, HashSet};
 
-/// Optimizes a program.
-pub fn opt(ops: Vec<Op>) -> Vec<Op> {
-    opt_with(ops, &Facts::default())
+/// Optimizes a program for speed: fewest steps, whatever it costs in size.
+pub fn opt_fast(ops: Vec<Op>) -> Vec<Op> {
+    opt_with(ops, &Facts::default(), Goal::Fast)
 }
 
-/// Optimizes a program, given what's promised about it.
-pub fn opt_with(ops: Vec<Op>, facts: &Facts) -> Vec<Op> {
+/// Optimizes a program for size: fewest ops, whatever it costs in steps.
+pub fn opt_size(ops: Vec<Op>) -> Vec<Op> {
+    opt_with(ops, &Facts::default(), Goal::Size)
+}
+
+/// What to optimize for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Goal {
+    /// Fewest steps.
+    Fast,
+    /// Fewest ops.
+    Size,
+}
+
+/// Optimizes a program for `goal`, given what's promised about it.
+pub fn opt_with(ops: Vec<Op>, facts: &Facts, goal: Goal) -> Vec<Op> {
     let mut items = parse(ops);
+    // (routines as their form for the goal, which nothing changes after)
+    let kept = routines_in(&items);
+    fn swap(items: &mut [Item], kept: &HashSet<Label>, goal: Goal) {
+        for item in items {
+            match item {
+                Item::Func(l, body) if kept.contains(l) => {
+                    let forms = &routine_forms()[&name(l)];
+                    let form = match goal {
+                        Goal::Fast => &forms[1],
+                        Goal::Size => forms.iter().min_by_key(|f| f.len()).unwrap(),
+                    };
+                    *body = parse(form.clone());
+                }
+                Item::Func(_, body) | Item::Loop(body) => swap(body, kept, goal),
+                Item::Op(_) => {}
+            }
+        }
+    }
+    swap(&mut items, &kept, goal);
+    let mut items = optimize(items, facts, goal, &kept, &HashSet::new());
+    // (the routines as they were, after the last tidying up, which doesn't
+    // see into them)
+    let mut bodies = HashMap::new();
+    fn hollow(items: &mut [Item], kept: &HashSet<Label>, bodies: &mut HashMap<Label, Vec<Item>>) {
+        for item in items {
+            match item {
+                Item::Func(l, body) if kept.contains(l) => {
+                    bodies.insert(*l, std::mem::take(body));
+                }
+                Item::Func(_, body) | Item::Loop(body) => hollow(body, kept, bodies),
+                Item::Op(_) => {}
+            }
+        }
+    }
+    if goal == Goal::Size {
+        outline(&mut items, &kept);
+    }
+    hollow(&mut items, &kept, &mut bodies);
+    let mut out = vec![];
+    flatten(items, &mut out);
+    let mut out = cleanup(out).into_iter();
+    let mut ops = vec![];
+    while let Some(op) = out.next() {
+        ops.push(op);
+        if let (Op::Func, [.., Op::Label(l), Op::Func]) = (op, &ops[..]) {
+            if let Some(body) = bodies.remove(l) {
+                flatten(body, &mut ops);
+            }
+        }
+    }
+    ops
+}
+
+/// The optimizations, until nothing changes (or a dozen times), leaving
+/// `kept` functions as they are and not inlining `pinned` ones.
+fn optimize(mut items: Vec<Item>, facts: &Facts, goal: Goal, kept: &HashSet<Label>, pinned: &HashSet<Label>) -> Vec<Item> {
     for _ in 0..12 {
-        let mut changed = inline(&mut items);
-        changed |= dead_acc(&mut items, true);
+        let mut changed = inline(&mut items, goal, kept, pinned);
+        changed |= dead_acc(&mut items, true, kept);
         changed |= remove_unused(&mut items);
         let sums = Summaries::of(&items, facts);
-        let mut o = Optimizer { tokens: Tokens::default(), sums, changed: false };
+        let mut o = Optimizer { tokens: Tokens::default(), sums, kept, changed: false };
         items = o.program(items);
         changed |= o.changed;
         let sums = Summaries::of(&items, facts);
-        changed |= dead_stores(&mut items, &sums);
+        changed |= dead_stores(&mut items, &sums, kept);
         if !changed {
             break;
         }
     }
-    let mut out = vec![];
-    flatten(items, &mut out);
-    cleanup(out)
+    items
+}
+
+/// The longest run of items (ops and whole loops) `outline` looks at.
+const RUN: usize = 48;
+
+/// For size: replaces runs of items that recur with calls to a function of
+/// them, the run that saves most first, while any saves anything (a run of
+/// `n` ops found `k` times saves `k n - 2 k - n - 3`: each becomes `@f !`,
+/// and the function takes `@f : ;` as well). A run can be one only if what
+/// `acc` holds when it starts doesn't matter (in the function it's the
+/// function's address), it uses `*` and `&` evenly, it defines no functions,
+/// and it doesn't split a call from the label that says what it calls. The
+/// functions go at the end of the program, and their own runs are looked at
+/// too. `kept` functions are left as they are.
+fn outline(items: &mut Vec<Item>, kept: &HashSet<Label>) {
+    let mut taken = HashSet::new();
+    let mut uses = HashMap::new();
+    references(items, &mut uses);
+    taken.extend(uses.keys().copied());
+    let mut defs = HashMap::new();
+    functions(items, &mut defs);
+    taken.extend(defs.keys().copied());
+    let mut made = 0usize;
+
+    /// How a run of items treats `acc`, `*`/`&`, and whether it can be one.
+    fn flat(item: &Item) -> Vec<Op> {
+        let mut ops = vec![];
+        flatten(vec![item.clone()], &mut ops);
+        ops
+    }
+    fn hash(ops: &[Op], h: &mut u64) {
+        for op in ops {
+            let mut x = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&format!("{op:?}"), &mut x);
+            *h = h.rotate_left(5) ^ std::hash::Hasher::finish(&x);
+            *h = h.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+    }
+    /// Whether `*` and `&` are even in `ops`, never going below where they
+    /// start.
+    fn even(ops: &[Op]) -> bool {
+        let mut depth = 0i64;
+        for op in ops {
+            match op {
+                Op::Deref => depth += 1,
+                Op::Refer => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        depth == 0
+    }
+    // each block (a sequence of items) to look in, by a path of indices:
+    // the program's, its loops', and the functions' (but kept ones)
+    fn blocks(items: &[Item], path: &mut Vec<usize>, kept: &HashSet<Label>, out: &mut Vec<Vec<usize>>) {
+        out.push(path.clone());
+        for (i, item) in items.iter().enumerate() {
+            match item {
+                Item::Loop(body) => {
+                    path.push(i);
+                    blocks(body, path, kept, out);
+                    path.pop();
+                }
+                Item::Func(l, body) if !kept.contains(l) => {
+                    path.push(i);
+                    blocks(body, path, kept, out);
+                    path.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    fn block<'a>(items: &'a [Item], path: &[usize]) -> &'a [Item] {
+        match path.split_first() {
+            None => items,
+            Some((&i, rest)) => match &items[i] {
+                Item::Loop(body) | Item::Func(_, body) => block(body, rest),
+                Item::Op(_) => unreachable!(),
+            },
+        }
+    }
+    loop {
+        // the runs, by what they hash to: how many times they're found (not
+        // overlapping), how many ops, and one of them
+        let mut paths = vec![];
+        blocks(items, &mut vec![], kept, &mut paths);
+        struct Found {
+            count: usize,
+            ops: usize,
+            /// One of them: its block, start and length.
+            at: (usize, usize, usize),
+            /// The block the last one counted was in, and where it ended.
+            last: (usize, usize),
+        }
+        let mut found: HashMap<u64, Found> = HashMap::new();
+        for (b, path) in paths.iter().enumerate() {
+            let seq = block(items, path);
+            let flats: Vec<Vec<Op>> = seq.iter().map(flat).collect();
+            for start in 0..seq.len() {
+                if matches!(seq[start], Item::Op(Op::Call)) {
+                    continue;
+                }
+                let (mut h, mut n, mut written) = (0u64, 0usize, false);
+                let mut ops: Vec<Op> = vec![];
+                for len in 1..=RUN.min(seq.len() - start) {
+                    let item = &seq[start + len - 1];
+                    if matches!(item, Item::Func(..)) {
+                        break;
+                    }
+                    // (what acc holds at the start mustn't be read)
+                    if !written {
+                        let mut stop = false;
+                        for op in &flats[start + len - 1] {
+                            match op {
+                                Op::Set(_) | Op::Label(_) | Op::Load | Op::Where | Op::Read => {
+                                    written = true;
+                                    break;
+                                }
+                                Op::Move(_) | Op::Deref | Op::Refer => {}
+                                _ => {
+                                    stop = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if stop {
+                            break;
+                        }
+                    }
+                    hash(&flats[start + len - 1], &mut h);
+                    ops.extend_from_slice(&flats[start + len - 1]);
+                    n += flats[start + len - 1].len();
+                    if !written || n < 6 || matches!(item, Item::Op(Op::Label(_))) || !even(&ops) {
+                        continue;
+                    }
+                    let key = h ^ (len as u64).wrapping_mul(0x51_7cc1_b727_220a);
+                    let e = found.entry(key).or_insert(Found { count: 0, ops: n, at: (b, start, len), last: (usize::MAX, 0) });
+                    // (not overlapping one already counted in this block)
+                    if e.last.0 != b || start >= e.last.1 {
+                        e.count += 1;
+                        e.last = (b, start + len);
+                    }
+                }
+            }
+        }
+        let best = found
+            .values()
+            .filter(|f| f.count * f.ops > 2 * f.count + f.ops + 3)
+            .max_by_key(|f| ((f.count * f.ops) as i64 - (2 * f.count + f.ops + 3) as i64, std::cmp::Reverse(f.at)));
+        let Some(&Found { at: (b, start, len), .. }) = best else { break };
+        let run: Vec<Item> = block(items, &paths[b])[start..start + len].to_vec();
+        let mut want = vec![];
+        flatten(run.clone(), &mut want);
+        // a name nothing else has
+        let label = loop {
+            let mut l = [0u8; 16];
+            let name = format!("_o{made}");
+            made += 1;
+            l[..name.len()].copy_from_slice(name.as_bytes());
+            if !taken.contains(&l) {
+                taken.insert(l);
+                break l;
+            }
+        };
+        // every run that's the same (whole items, not overlapping), in every
+        // block, becomes a call
+        fn replace(items: &mut Vec<Item>, want: &[Op], len: usize, label: Label, kept: &HashSet<Label>) -> usize {
+            let mut count = 0;
+            let mut i = 0;
+            while i + len <= items.len() {
+                let mut ops = vec![];
+                flatten(items[i..i + len].to_vec(), &mut ops);
+                if ops == want {
+                    items.splice(i..i + len, [Item::Op(Op::Label(label)), Item::Op(Op::Call)]);
+                    count += 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            for item in items.iter_mut() {
+                match item {
+                    Item::Loop(body) => count += replace(body, want, len, label, kept),
+                    Item::Func(l, body) if !kept.contains(l) && *l != label => count += replace(body, want, len, label, kept),
+                    _ => {}
+                }
+            }
+            count
+        }
+        let count = replace(items, &want, len, label, kept);
+        if count == 0 {
+            break;
+        }
+        items.push(Item::Func(label, run));
+        if count < 2 {
+            // (one, after all: put it back)
+            let Some(Item::Func(_, run)) = items.pop() else { unreachable!() };
+            fn restore(items: &mut Vec<Item>, label: Label, run: &[Item]) -> bool {
+                for i in 0..items.len() {
+                    if matches!(items[i], Item::Op(Op::Label(l)) if l == label) {
+                        items.splice(i..i + 2, run.iter().cloned());
+                        return true;
+                    }
+                    if let Item::Loop(body) | Item::Func(_, body) = &mut items[i] {
+                        if restore(body, label, run) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            restore(items, label, &run);
+            break;
+        }
+    }
+}
+
+/// The routines `asm` writes, which targets may know and do with the
+/// machine's own instructions instead (multiplying, dividing, comparing,
+/// the bitwise operations, shifting), as they are: a function that is
+/// exactly one of them is left as it is, not inlined, so that a target can
+/// still tell what it is. (They're about as fast as the VM allows anyway.)
+///
+/// Each comes in forms that do just the same, by label: as `asm` writes it,
+/// then optimized for speed, then for size, on its own (called from
+/// anywhere, with everything it leaves read after), which these
+/// optimizations leave it in, and which targets that know it know.
+pub fn routine_forms() -> &'static HashMap<String, Vec<Vec<Op>>> {
+    static FORMS: std::sync::OnceLock<HashMap<String, Vec<Vec<Op>>>> = std::sync::OnceLock::new();
+    FORMS.get_or_init(|| {
+        let mut forms = HashMap::new();
+        for (label, body) in routines() {
+            // (called after and before calls to something not in the
+            // program: from anywhere, and then anything can be read)
+            let mut unknown = [0u8; 16];
+            unknown[..9].copy_from_slice(b"_anything");
+            let mut ops = vec![Op::Label(unknown), Op::Call, Op::Label(*label), Op::Call, Op::Label(unknown), Op::Call, Op::Label(*label), Op::Func];
+            ops.extend(body.iter().copied());
+            ops.push(Op::EndFunc);
+            let mut all = vec![body.clone()];
+            for goal in [Goal::Fast, Goal::Size] {
+                let items = optimize(parse(ops.clone()), &Facts::default(), goal, &HashSet::new(), &HashSet::from([*label]));
+                let mut defs = HashMap::new();
+                functions(&items, &mut defs);
+                let mut form = vec![];
+                flatten(defs.remove(label).unwrap_or_default(), &mut form);
+                all.push(form);
+            }
+            forms.insert(name(label), all);
+        }
+        forms
+    })
+}
+
+/// A label's name.
+fn name(l: &Label) -> String {
+    l.iter().take_while(|&&c| c != 0).map(|&c| c as char).collect()
+}
+
+fn routines() -> &'static HashMap<Label, Vec<Op>> {
+    static ROUTINES: std::sync::OnceLock<HashMap<Label, Vec<Op>>> = std::sync::OnceLock::new();
+    ROUTINES.get_or_init(|| {
+        use super::*;
+        let (x, y): (&Location, &Location) = (R1, R2);
+        let builds: [fn(&mut Vec<Op>, &Location, &Location); 16] = [
+            |o, x, y| mul_assign(o, x, y),
+            |o, x, y| lt_assign(o, x, y),
+            |o, x, y| ltu_assign(o, x, y),
+            |o, x, y| divu_assign(o, x, y),
+            |o, x, y| divu_small_assign(o, x, y),
+            |o, x, _| and_const(o, x, 255),
+            |o, x, _| rsh_const(o, x, 3),
+            |o, x, _| rshu_const(o, x, 3),
+            |o, x, _| lsh_const(o, x, 20),
+            |o, x, y| and_assign(o, x, y),
+            |o, x, y| or_assign(o, x, y),
+            |o, x, y| xor_assign(o, x, y),
+            |o, x, _| and_const(o, x, 5),
+            |o, x, _| or_const(o, x, 5),
+            |o, x, _| xor_const(o, x, 5),
+            |o, x, y| div_assign(o, x, y),
+        ];
+        let mut out = HashMap::new();
+        for build in builds {
+            let mut ops = vec![];
+            build(&mut ops, x, y);
+            let mut found = HashMap::new();
+            functions(&parse(ops), &mut found);
+            for (label, body) in found {
+                let mut ops = vec![];
+                flatten(body, &mut ops);
+                out.insert(label, ops);
+            }
+        }
+        out
+    })
+}
+
+/// The functions in `items` that are exactly routines `asm` writes, in
+/// one of their forms (see `routine_forms`).
+fn routines_in(items: &[Item]) -> HashSet<Label> {
+    let mut defs = HashMap::new();
+    functions(items, &mut defs);
+    let forms = routine_forms();
+    defs.into_iter()
+        .filter(|(l, body)| {
+            let mut ops = vec![];
+            flatten(body.clone(), &mut ops);
+            forms.get(&name(l)).is_some_and(|f| f.contains(&ops))
+        })
+        .map(|(l, _)| l)
+        .collect()
 }
 
 /// An op, a loop, or a function's definition.
@@ -232,6 +633,14 @@ fn calls_itself(label: &Label, body: &[Item]) -> bool {
     uses.contains_key(label)
 }
 
+fn has_loops(items: &[Item]) -> bool {
+    items.iter().any(|i| match i {
+        Item::Loop(_) => true,
+        Item::Func(_, body) => has_loops(body),
+        Item::Op(_) => false,
+    })
+}
+
 fn defines_functions(items: &[Item]) -> bool {
     items.iter().any(|i| match i {
         Item::Func(..) => true,
@@ -240,12 +649,19 @@ fn defines_functions(items: &[Item]) -> bool {
     })
 }
 
-/// The most ops a function can have to be inlined wherever it's called.
-const INLINE: usize = 24;
+/// The most ops a function can have to be inlined wherever it's called,
+/// for speed (for size, only ones of a single op, which take no more room
+/// than the call). For speed, only functions without loops are: a call
+/// costs a few steps, next to which a loop's are many, and targets can
+/// often tell what a function with a loop does (that its effect is linear,
+/// say) and do it another way, where they couldn't with it spread through
+/// its callers.
+const INLINE: usize = 64;
 
 /// Replaces `@f !` with `@f` and `f`'s body, for small functions and ones
 /// called once (keeping the label leaves `acc` as the call would have).
-fn inline(items: &mut Vec<Item>) -> bool {
+fn inline(items: &mut Vec<Item>, goal: Goal, kept: &HashSet<Label>, pinned: &HashSet<Label>) -> bool {
+    let most = if goal == Goal::Fast { INLINE } else { 1 };
     let mut defs = HashMap::new();
     functions(items, &mut defs);
     let mut uses = HashMap::new();
@@ -254,16 +670,19 @@ fn inline(items: &mut Vec<Item>) -> bool {
         .into_iter()
         .filter(|(l, body)| {
             let (refs, calls) = uses.get(l).copied().unwrap_or_default();
-            !calls_itself(l, body)
+            !kept.contains(l)
+                && !pinned.contains(l)
+                && !calls_itself(l, body)
                 && !defines_functions(body)
                 && calls > 0
-                && (size(body) <= INLINE || (refs == 1 && calls == 1))
+                && (goal == Goal::Size || !has_loops(body))
+                && (size(body) <= most || (refs == 1 && calls == 1))
         })
         .collect();
     if candidates.is_empty() {
         return false;
     }
-    fn walk(items: &mut Vec<Item>, inside: Option<Label>, candidates: &HashMap<Label, Vec<Item>>) -> bool {
+    fn walk(items: &mut Vec<Item>, inside: Option<Label>, candidates: &HashMap<Label, Vec<Item>>, kept: &HashSet<Label>) -> bool {
         let mut changed = false;
         let old = std::mem::take(items);
         let mut iter = old.into_iter().peekable();
@@ -276,11 +695,13 @@ fn inline(items: &mut Vec<Item>) -> bool {
                     changed = true;
                 }
                 Item::Loop(mut body) => {
-                    changed |= walk(&mut body, inside, candidates);
+                    changed |= walk(&mut body, inside, candidates, kept);
                     items.push(Item::Loop(body));
                 }
                 Item::Func(l, mut body) => {
-                    changed |= walk(&mut body, Some(l), candidates);
+                    if !kept.contains(&l) {
+                        changed |= walk(&mut body, Some(l), candidates, kept);
+                    }
                     items.push(Item::Func(l, body));
                 }
                 item => items.push(item),
@@ -288,12 +709,12 @@ fn inline(items: &mut Vec<Item>) -> bool {
         }
         changed
     }
-    walk(items, None, &candidates)
+    walk(items, None, &candidates, kept)
 }
 
 /// Drops ops that only set `acc` where nothing reads it before it's set
 /// again; `live` says whether it's read after `items`.
-fn dead_acc(items: &mut Vec<Item>, mut live: bool) -> bool {
+fn dead_acc(items: &mut Vec<Item>, mut live: bool, kept: &HashSet<Label>) -> bool {
     let mut changed = false;
     let mut keep = vec![true; items.len()];
     for (i, item) in items.iter_mut().enumerate().rev() {
@@ -307,11 +728,13 @@ fn dead_acc(items: &mut Vec<Item>, mut live: bool) -> bool {
             Item::Op(_) => live = true,
             Item::Loop(body) => {
                 // `]` looks at acc, and `[` does
-                changed |= dead_acc(body, true);
+                changed |= dead_acc(body, true, kept);
                 live = true;
             }
-            Item::Func(_, body) => {
-                changed |= dead_acc(body, true);
+            Item::Func(l, body) => {
+                if !kept.contains(l) {
+                    changed |= dead_acc(body, true, kept);
+                }
                 live = true;
             }
         }
@@ -642,7 +1065,7 @@ fn liveness(items: &[Item], end: &Live, absolute: bool, sums: &Summaries, reads:
 /// returns is what's live after the calls to it (found together, for
 /// recursion); a call reads the private cells its callee reads, and
 /// anything else, as does a read through a pointer.
-fn dead_stores(items: &mut Vec<Item>, sums: &Summaries) -> bool {
+fn dead_stores(items: &mut Vec<Item>, sums: &Summaries, kept: &HashSet<Label>) -> bool {
     // every sequence to look at: the program, and each function's body
     fn bodies<'a>(items: &'a [Item], out: &mut Vec<(Label, &'a [Item])>) {
         for item in items {
@@ -776,7 +1199,7 @@ fn dead_stores(items: &mut Vec<Item>, sums: &Summaries) -> bool {
         }
     }
     let (main, each) = found;
-    let dead: HashMap<Label, HashSet<usize>> = funcs.iter().map(|(l, _)| *l).zip(each.into_iter().map(|e| e.dead)).collect();
+    let dead: HashMap<Label, HashSet<usize>> = funcs.iter().map(|(l, _)| *l).zip(each.into_iter().map(|e| e.dead)).filter(|(l, _)| !kept.contains(l)).collect();
     let changed = !main.dead.is_empty() || dead.values().any(|d| !d.is_empty());
     fn apply(items: &mut Vec<Item>, dead: &HashMap<Label, HashSet<usize>>) {
         for item in items.iter_mut() {
@@ -1362,13 +1785,15 @@ impl State {
     }
 }
 
-struct Optimizer {
+struct Optimizer<'a> {
     tokens: Tokens,
     sums: Summaries,
+    /// The functions it leaves as they are (see `routines`).
+    kept: &'a HashSet<Label>,
     changed: bool,
 }
 
-impl Optimizer {
+impl Optimizer<'_> {
     fn program(&mut self, items: Vec<Item>) -> Vec<Item> {
         let mut start = State::fresh(&mut self.tokens);
         start.absolute = true;
@@ -1476,6 +1901,11 @@ impl Optimizer {
         for (index, item) in items.into_iter().enumerate() {
             let op = match item {
                 Item::Op(op) => op,
+                Item::Func(label, body) if self.kept.contains(&label) => {
+                    out.push(Item::Func(label, body));
+                    s.acc = self.tokens.fresh(false);
+                    continue;
+                }
                 Item::Func(label, body) => {
                     let mut fresh = State::fresh(&mut self.tokens);
                     fresh.absolute = self.sums.call(Some(label)).absolute;
@@ -2103,14 +2533,14 @@ mod tests {
 
     /// Whether `ops` works on `machine` and prints something else (or fails)
     /// once optimized with `facts` (which it keeps).
-    fn breaks(ops: &[Op], machine: &Machine, facts: &Facts) -> bool {
+    fn breaks(ops: &[Op], machine: &Machine, facts: &Facts, goal: Goal) -> bool {
         let Ok(want) = machine.run(ops, INPUT) else { return false };
-        keeps(ops, facts) && machine.run(&opt_with(ops.to_vec(), facts), INPUT).map_or(true, |got| got.output != want.output)
+        keeps(ops, facts) && machine.run(&opt_with(ops.to_vec(), facts, goal), INPUT).map_or(true, |got| got.output != want.output)
     }
 
     /// The smallest program found by removing ops from `ops` (keeping its
     /// brackets matched) that `breaks` still.
-    fn minimize(mut ops: Vec<Op>, machine: &Machine, facts: &Facts) -> Vec<Op> {
+    fn minimize(mut ops: Vec<Op>, machine: &Machine, facts: &Facts, goal: Goal) -> Vec<Op> {
         let balanced = |ops: &[Op]| {
             // calls only go to labels, and functions have them
             for (i, op) in ops.iter().enumerate() {
@@ -2143,7 +2573,7 @@ mod tests {
                 while i + len <= ops.len() {
                     let mut candidate = ops.clone();
                     candidate.drain(i..i + len);
-                    if balanced(&candidate) && breaks(&candidate, machine, facts) {
+                    if balanced(&candidate) && breaks(&candidate, machine, facts, goal) {
                         ops = candidate;
                         smaller = true;
                     } else {
@@ -2163,43 +2593,94 @@ mod tests {
         let count = std::env::var("FUZZ").ok().and_then(|n| n.parse().ok()).unwrap_or(6000);
         let seed = std::env::var("FUZZ_SEED").ok().and_then(|n| n.parse().ok()).unwrap_or(0x9e3779b97f4a7c15);
         let mut rng = Rng(seed);
-        let (mut compared, mut shorter) = (0, 0);
+        let (mut compared, mut shorter, mut smaller) = (0, 0, 0);
         // with no promises, and promising that no pointer leads to some of
         // the cells the programs work with (which they keep, mostly)
         let promises = [Facts::default(), Facts { private: 30..38, labels_only: true }];
         for _ in 0..count {
             let ops = program(&mut rng);
-            for facts in &promises {
+            for (facts, goal) in promises.iter().flat_map(|f| [(f, Goal::Fast), (f, Goal::Size)]) {
                 if !keeps(&ops, facts) {
                     continue;
                 }
-                let optimized = opt_with(ops.clone(), facts);
+                let optimized = opt_with(ops.clone(), facts, goal);
+                if goal == Goal::Size {
+                    assert!(optimized.len() <= ops.len(), "optimizing for size made {} ops {}", ops.len(), optimized.len());
+                    smaller += (optimized.len() < ops.len()) as usize;
+                }
                 for machine in [Machine::cpu(), Machine::cpu_xlen(16), Machine::c()] {
                     let machine = Machine { max_steps: 100_000, ..machine };
                     // programs that fail (a pointer out of range, say) prove
                     // nothing; ones that work must work the same optimized
                     let Ok(want) = machine.run(&ops, INPUT) else { continue };
-                    if breaks(&ops, &machine, facts) {
-                        let small = minimize(ops.clone(), &machine, facts);
+                    if breaks(&ops, &machine, facts, goal) {
+                        let small = minimize(ops.clone(), &machine, facts, goal);
                         let show = |ops: &[Op]| ops.iter().map(|o| format!("{o:?}")).collect::<Vec<_>>().join(" ");
-                        let (a, b) = (machine.run(&small, INPUT), machine.run(&opt_with(small.clone(), facts), INPUT));
+                        let (a, b) = (machine.run(&small, INPUT), machine.run(&opt_with(small.clone(), facts, goal), INPUT));
                         panic!(
-                            "\nwith {facts:?}\n{}\n=>\n{}\nprints {:?}, then {:?}",
+                            "\nwith {facts:?}, for {goal:?}\n{}\n=>\n{}\nprints {:?}, then {:?}",
                             show(&small),
-                            show(&opt_with(small.clone(), facts)),
+                            show(&opt_with(small.clone(), facts, goal)),
                             a.map(|h| h.output),
                             b.map(|h| h.output)
                         );
                     }
                     let got = machine.run(&optimized, INPUT).unwrap();
-                    compared += 1;
-                    shorter += (got.steps < want.steps) as usize;
+                    if goal == Goal::Fast {
+                        compared += 1;
+                        shorter += (got.steps < want.steps) as usize;
+                    }
                 }
             }
         }
-        eprintln!("{compared} programs compared, {shorter} faster");
+        eprintln!("{compared} programs compared, {shorter} faster; {smaller} smaller");
         assert!(compared > count / 2, "only {compared} programs ran");
         assert!(shorter * 2 > compared, "only {shorter} of {compared} got faster");
+    }
+
+    #[test]
+    fn routine_forms_do_what_the_routines_do() {
+        // each routine, as `asm` writes it and in its other forms, called
+        // with all sorts of values in the cells near the pointer (mostly
+        // small, sometimes not, and the counts some count down small), from
+        // a cell other than the first: the tape and acc after are the same
+        let mut rng = Rng(77);
+        let forms = routine_forms();
+        let mut labels: Vec<&String> = forms.keys().collect();
+        labels.sort();
+        let mut compared = 0;
+        for name in labels {
+            let all = &forms[name];
+            assert!(all.len() == 3, "{name}");
+            for _ in 0..60 {
+                let mut setup = vec![Op::Move(5)];
+                for c in 0..20 {
+                    let v = match rng.below(4) {
+                        0 => rng.below(4),
+                        1 => rng.below(300),
+                        2 => rng.next(),
+                        _ => rng.below(1 << 20).wrapping_neg(),
+                    };
+                    let v = if c == 7 && rng.below(2) == 0 { rng.below(70) } else { v };
+                    setup.extend([Op::Set(v), Op::Store, Op::Move(1)]);
+                }
+                setup.push(Op::Move(-20));
+                let run = |body: &[Op]| {
+                    let mut ops = setup.clone();
+                    ops.extend([Op::Label(label(name)), Op::Call, Op::Move(30), Op::Store, Op::Move(-35)]);
+                    ops.extend([Op::Label(label(name)), Op::Func]);
+                    ops.extend(body.iter().copied());
+                    ops.push(Op::EndFunc);
+                    Machine { max_steps: 200_000, cells: 64, ..Machine::cpu() }.run(&ops, b"").map(|h| h.tape)
+                };
+                let Ok(want) = run(&all[0]) else { continue };
+                for (k, form) in all.iter().enumerate().skip(1) {
+                    assert_eq!(run(form), Ok(want.clone()), "{name}, form {k}");
+                }
+                compared += 1;
+            }
+        }
+        assert!(compared > 300, "only {compared} compared");
     }
 
     #[test]
@@ -2209,7 +2690,9 @@ mod tests {
         for _ in 0..300 {
             let ops = program(&mut rng);
             let facts = Facts { private: 30..38, labels_only: true };
-            assert_eq!(opt_with(ops.clone(), &facts), opt_with(ops.clone(), &facts));
+            for goal in [Goal::Fast, Goal::Size] {
+                assert_eq!(opt_with(ops.clone(), &facts, goal), opt_with(ops.clone(), &facts, goal));
+            }
         }
     }
 }
