@@ -1,4 +1,4 @@
-//! What the workloads share: building a program, checking that `ParallelC`
+//! What the workloads share: building a program, checking that `OptimizingC`
 //! makes it print what the same algorithm written in C by hand prints, and
 //! how long each takes. With `BF_BENCH` set, the C backend is checked and
 //! timed too; with `BF_OPT`, so are the program optimized for speed and for
@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use bf::asm::*;
-use bf::backends::{ParallelC, C};
+use bf::backends::{LiteralC, OptimizingC};
 use bf::{Op, Target};
 use std::path::{Path, PathBuf};
 use std::fmt::Write as _;
@@ -28,18 +28,27 @@ pub fn program(build: impl FnOnce(&mut Vec<Op>)) -> Vec<Op> {
     o
 }
 
-/// clang, with OpenMP if it has it.
+/// clang, with OpenMP if it has it. Found out once (in a directory that's
+/// gone after).
 fn clang() -> Option<(PathBuf, bool)> {
-    let dir = std::env::temp_dir().join(format!("bf-workloads-probe-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok()?;
-    let probe = dir.join("probe.c");
-    std::fs::write(&probe, "#include <omp.h>\nint main(void) { return omp_get_max_threads() > 0 ? 0 : 1; }\n").ok()?;
-    for cc in ["/opt/homebrew/opt/llvm/bin/clang", "clang"] {
-        if Command::new(cc).arg("-fopenmp").arg(&probe).arg("-o").arg(dir.join("probe")).output().is_ok_and(|o| o.status.success()) {
-            return Some((cc.into(), true));
-        }
-    }
-    Command::new("clang").arg("--version").output().ok().filter(|o| o.status.success()).map(|_| ("clang".into(), false))
+    static FOUND: std::sync::OnceLock<Option<(PathBuf, bool)>> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("bf-workloads-probe-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).ok()?;
+            let probe = dir.join("probe.c");
+            let found = std::fs::write(&probe, "#include <omp.h>\nint main(void) { return omp_get_max_threads() > 0 ? 0 : 1; }\n").ok().and_then(|()| {
+                for cc in ["/opt/homebrew/opt/llvm/bin/clang", "clang"] {
+                    if Command::new(cc).arg("-fopenmp").arg(&probe).arg("-o").arg(dir.join("probe")).output().is_ok_and(|o| o.status.success()) {
+                        return Some((cc.into(), true));
+                    }
+                }
+                Command::new("clang").arg("--version").output().ok().filter(|o| o.status.success()).map(|_| ("clang".into(), false))
+            });
+            let _ = std::fs::remove_dir_all(&dir);
+            found
+        })
+        .clone()
 }
 
 /// Builds `code` (in `dir`, as `name`), and runs it: the best time of a few
@@ -68,7 +77,7 @@ fn build_and_run(cc: &Path, dir: &Path, name: &str, code: &str, flags: &[&str]) 
     best
 }
 
-/// Checks that `ops`, compiled with `ParallelC`, prints what `by_hand` (C)
+/// Checks that `ops`, compiled with `OptimizingC`, prints what `by_hand` (C)
 /// prints, and says how long each took.
 pub fn check(name: &str, ops: &[Op], by_hand: &str) {
     let Some((cc, omp)) = clang() else {
@@ -79,31 +88,31 @@ pub fn check(name: &str, ops: &[Op], by_hand: &str) {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(format!("{name}.bf")), to_source(ops)).unwrap();
     let start = Instant::now();
-    let code = ParallelC::default().compile(ops);
+    let code = OptimizingC { parallel: true, ..OptimizingC::default() }.compile(ops);
     let compiling = start.elapsed();
     let flags: &[&str] = if omp { &["-fopenmp"] } else { &[] };
     let (par, got) = build_and_run(&cc, &dir, "parallel", &code, flags);
     let (hand, want) = build_and_run(&cc, &dir, "hand", by_hand, &[]);
-    assert_eq!(got, want, "{name}: ParallelC prints something else than the C written by hand (see {})", dir.display());
+    assert_eq!(got, want, "{name}: OptimizingC prints something else than the C written by hand (see {})", dir.display());
     let ms = |t: Duration| t.as_secs_f64() * 1000.0;
-    let mut line = format!("{name}: ParallelC {:.1}ms, by hand {:.1}ms ({:.2}x), compiled in {:.0}ms", ms(par), ms(hand), par.as_secs_f64() / hand.as_secs_f64(), ms(compiling));
+    let mut line = format!("{name}: OptimizingC {:.1}ms, by hand {:.1}ms ({:.2}x), compiled in {:.0}ms", ms(par), ms(hand), par.as_secs_f64() / hand.as_secs_f64(), ms(compiling));
     if std::env::var("BF_OPT").is_ok() {
-        let (seq, out) = build_and_run(&cc, &dir, "c_backend", &C.compile(ops), &[]);
+        let (seq, out) = build_and_run(&cc, &dir, "c_backend", &LiteralC.compile(ops), &[]);
         assert_eq!(out, want, "{name}: the C backend prints something else");
         let _ = write!(line, "\n  as it is: {} ops, {:.1}ms with the C backend", ops.len(), ms(seq));
         for (goal, optimize) in [("fast", opt_fast as fn(Vec<Op>) -> Vec<Op>), ("size", opt_size)] {
             let start = Instant::now();
             let optimized = optimize(ops.to_vec());
             let took = start.elapsed();
-            let (t, out) = build_and_run(&cc, &dir, &format!("opt_{goal}"), &C.compile(&optimized), &[]);
+            let (t, out) = build_and_run(&cc, &dir, &format!("opt_{goal}"), &LiteralC.compile(&optimized), &[]);
             assert_eq!(out, want, "{name}: optimized for {goal}, it prints something else");
-            let (pt, pout) = build_and_run(&cc, &dir, &format!("opt_{goal}_parallel"), &ParallelC::default().compile(&optimized), flags);
-            assert_eq!(pout, want, "{name}: optimized for {goal}, with ParallelC, it prints something else");
-            let _ = write!(line, "\n  opt_{goal}: {} ops ({:.0}%), {:.1}ms with the C backend, {:.1}ms with ParallelC, optimized in {:.0}ms", optimized.len(), 100.0 * optimized.len() as f64 / ops.len() as f64, ms(t), ms(pt), ms(took));
+            let (pt, pout) = build_and_run(&cc, &dir, &format!("opt_{goal}_parallel"), &OptimizingC { parallel: true, ..OptimizingC::default() }.compile(&optimized), flags);
+            assert_eq!(pout, want, "{name}: optimized for {goal}, with OptimizingC, it prints something else");
+            let _ = write!(line, "\n  opt_{goal}: {} ops ({:.0}%), {:.1}ms with LiteralC, {:.1}ms with OptimizingC, optimized in {:.0}ms", optimized.len(), 100.0 * optimized.len() as f64 / ops.len() as f64, ms(t), ms(pt), ms(took));
         }
     }
     if std::env::var("BF_BENCH").is_ok() {
-        let (seq, out) = build_and_run(&cc, &dir, "c_backend", &C.compile(ops), &[]);
+        let (seq, out) = build_and_run(&cc, &dir, "c_backend", &LiteralC.compile(ops), &[]);
         assert_eq!(out, want, "{name}: the C backend prints something else");
         line += &format!(", C backend {:.1}ms ({:.1}x faster)", ms(seq), seq.as_secs_f64() / par.as_secs_f64());
     }

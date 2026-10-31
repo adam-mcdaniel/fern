@@ -1,0 +1,14 @@
+// THE AMAZING STELLA's parts (see stella.fern)
+pub mod gfx;
+pub mod font;
+pub mod fx;
+pub mod acts;
+pub mod body;
+pub mod bot;
+pub mod maker;
+pub mod scene;
+pub mod play;
+pub mod sound;
+pub mod save;
+pub mod ui;
+pub mod app;

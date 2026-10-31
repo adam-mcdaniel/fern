@@ -1,0 +1,145 @@
+// The land: a map of 256 by 256 cells that wraps round at its edges (fly
+// off one side and you're back on the other), each with a height and a
+// color. It's noise: random heights on a coarse grid, smoothly blended,
+// then finer and finer grids of smaller ones added on; stretched so the
+// valleys are broad and the peaks sharp, flooded up to a water level, then
+// colored by height (water, sand, grass, forest, rock, snow) and shaded as
+// the low western sun lights its slopes.
+
+use crate::math::{rng, random};
+
+// heights (0 to 255; water is level, at `water`, and land is higher), and
+// colors (0xRRGGBB)
+pub struct Terrain { height: Array<Int>, color: Array<Int>, water: Int }
+
+pub fn make(seed: Int) -> Terrain {
+    let r = rng(seed);
+    let raw = array(65536, 0);
+    add_octave(raw, r, 64, 256);
+    add_octave(raw, r, 32, 120);
+    add_octave(raw, r, 16, 60);
+    add_octave(raw, r, 8, 26);
+    add_octave(raw, r, 4, 11);
+    add_octave(raw, r, 2, 5);
+    // stretched to 0..255, then squared
+    let (lo, hi) = raw.fold((1 << 30, 0), |m, x| {
+        let (a, b) = m;
+        (a.min(x), b.max(x))
+    });
+    raw.update(|x| {
+        let v = (x - lo) * 255 / (hi - lo).max(1);
+        v * v / 255
+    });
+    let water = 52;
+    let height = array(65536, 0);
+    let color = array(65536, 0);
+    let mut i = 0;
+    while i < 65536 {
+        let v = array_get(raw, i);
+        array_set(height, i, if v <= water { water } else { v });
+        array_set(color, i, paint(raw, r, i, v, water));
+        i = i + 1;
+    }
+    Terrain { height: height, color: color, water: water }
+}
+
+// adds a grid of random heights `period` cells apart, from 0 to `amp`,
+// smoothly blended in between (each height a smoothstep of its four
+// nearest)
+fn add_octave(h: Array<Int>, r: Array<Int>, period: Int, amp: Int) {
+    let cells = 256 / period;
+    let grid = array(cells * cells, 0);
+    grid.update(|_| random(r, 256));
+    let mut y = 0;
+    while y < 256 {
+        let gy = y / period;
+        let ty = smooth((y % period) * 256 / period);
+        let mut x = 0;
+        while x < 256 {
+            let gx = x / period;
+            let tx = smooth((x % period) * 256 / period);
+            let a = array_get(grid, gy * cells + gx);
+            let b = array_get(grid, gy * cells + (gx + 1) % cells);
+            let c = array_get(grid, (gy + 1) % cells * cells + gx);
+            let d = array_get(grid, (gy + 1) % cells * cells + (gx + 1) % cells);
+            let top = a * 256 + (b - a) * tx;
+            let bottom = c * 256 + (d - c) * tx;
+            let v = (top * 256 + (bottom - top) * ty) >> 16;
+            let i = y * 256 + x;
+            array_set(h, i, array_get(h, i) + v * amp / 256);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// 3t² - 2t³, for t from 0 to 256
+fn smooth(t: Int) -> Int { t * t * (768 - 2 * t) >> 16 }
+
+fn mix(a: (Int, Int, Int), b: (Int, Int, Int), t: Int) -> (Int, Int, Int) {
+    let (ar, ag, ab) = a;
+    let (br, bg, bb) = b;
+    (ar + (br - ar) * t / 256, ag + (bg - ag) * t / 256, ab + (bb - ab) * t / 256)
+}
+
+// cell i's color: water by its depth; land by its height, a little
+// different from its neighbors, lit by how its slope faces the sun (low,
+// in the west)
+fn paint(raw: Array<Int>, r: Array<Int>, i: Int, v: Int, water: Int) -> Int {
+    if v <= water {
+        let (cr, cg, cb) = mix((70, 140, 185), (20, 55, 110), ((water - v) * 10).min(256));
+        cr * 65536 + cg * 256 + cb
+    } else {
+        let base = if v < water + 5 { (205, 190, 135) }
+            else if v < 110 { mix((95, 150, 60), (70, 125, 50), (v - water) * 256 / (110 - water)) }
+            else if v < 155 { (45, 95, 45) }
+            else if v < 200 { mix((110, 100, 90), (140, 135, 130), (v - 155) * 256 / 45) }
+            else { (235, 238, 245) };
+        let (br, bg, bb) = base;
+        let jitter = random(r, 21) - 10;
+        let (x, y) = (i % 256, i / 256);
+        let east = array_get(raw, y * 256 + (x + 1) % 256);
+        let west = array_get(raw, y * 256 + (x + 255) % 256);
+        let south = array_get(raw, (y + 1) % 256 * 256 + x);
+        let north = array_get(raw, (y + 255) % 256 * 256 + x);
+        let shade = (210 + (east - west) * 7 + (south - north) * 3).clamp(80, 340);
+        let ch = |c: Int| ((c + jitter) * shade / 256).clamp(0, 255);
+        ch(br) * 65536 + ch(bg) * 256 + ch(bb)
+    }
+}
+
+fn at(t: Terrain, x: Int, y: Int) -> Int { array_get(t.height, (y & 255) * 256 + (x & 255)) }
+
+// the ground's height (in 256ths) at (x, y) (in 256ths of a cell), blended
+// between the four nearest cells
+pub fn ground(t: Terrain, x: Int, y: Int) -> Int {
+    let (cx, cy) = (x >> 8, y >> 8);
+    let (fx, fy) = (x & 255, y & 255);
+    let a = at(t, cx, cy);
+    let b = at(t, cx + 1, cy);
+    let c = at(t, cx, cy + 1);
+    let d = at(t, cx + 1, cy + 1);
+    let top = a * 256 + (b - a) * fx;
+    let bottom = c * 256 + (d - c) * fx;
+    top + (bottom - top) * fy / 256
+}
+
+pub fn is_water(t: Terrain, x: Int, y: Int) -> Bool { at(t, x >> 8, y >> 8) <= t.water }
+
+// a place on land (in 256ths of a cell) at least `above` higher than the
+// water: the highest of a few tries
+pub fn land_spot(t: Terrain, r: Array<Int>, above: Int) -> (Int, Int) {
+    let mut best = (0, 0);
+    let mut best_h = -1;
+    let mut tries = 0;
+    while tries < 6 || best_h < t.water + above {
+        let (x, y) = (random(r, 256), random(r, 256));
+        let h = at(t, x, y);
+        if h > best_h {
+            best = (x * 256 + 128, y * 256 + 128);
+            best_h = h;
+        }
+        tries = tries + 1;
+    }
+    best
+}

@@ -1,0 +1,543 @@
+// BUMPER CROP. A pinball table that's a farm. Plant seeds in its plots;
+// every time the ball hits a plant it grows, and hit when it's ripe it's
+// harvested into your basket. Shoot the ball into the barn to bank the
+// basket, times your multiplier. Lose the ball first and the basket
+// spills. Lord Goose, the landlord, wants his rent every week.
+//
+// A year is four seasons of two weeks and a fair, each fair with a
+// visitor who changes the rules. Between weeks, the market: seeds to
+// plant (where on the table is up to you), tools that bend the rules
+// (thirty of them), improvements for the farm. Keep the farm through the
+// winter fair and it's yours; then the years go on, the rent with them.
+// Four farmers to play, four ribbons of difficulty, saved.
+//
+// Flippers: Shift, Z and /, the arrows, or a controller's shoulders and
+// triggers. The plunger: hold Space, Enter or Down (or A) and let go.
+// Nudge: Up or N (or Y). Pause: Escape or P (or Start). F11 fills the
+// screen.
+//
+// It's made of the parts in crop/: the physics and the tables (physics,
+// table), the week's play (play, fx), the year (run, seeds, tools,
+// market, save), the pictures (gfx, font, art, sprites, icons, scene,
+// hud, ui), the sound (sound), and the autopilot that plays the title
+// screen's table (bot); and a little C of its own for the keyboard,
+// the clock and the controller's rumble:
+//
+// links: crop/platform.c
+
+mod screen;
+mod draw;
+mod math;
+mod crop;
+
+use screen::*;
+use math::{sines, sin};
+use crop::gfx::*;
+use crop::font::{letters};
+use crop::table::*;
+use crop::art::*;
+use crop::run::*;
+use crop::fx::*;
+use crop::play::*;
+use crop::sprites::*;
+use crop::scene::*;
+use crop::hud::*;
+use crop::market::*;
+use crop::sound::*;
+use crop::ui::*;
+use crop::bot::*;
+use crop::icons::{load_icons};
+use crop::seeds::*;
+use crop::save;
+
+extern fn scan_down(code: Int) -> Bool;
+extern fn rumble(low: Int, high: Int, ms: Int);
+
+#[derive(Eq)]
+enum Scene { Title, Farmers, Play, Pause, Options, Howto, WeekEnd, Market, End, Almanac }
+
+// what the player's doing this frame
+struct Input {
+    // held: the flippers and the plunger; pressed: the nudge
+    left: Bool, right: Bool, launch: Bool, nudge: Bool,
+    // the menus
+    up: Bool, down: Bool, west: Bool, east: Bool, ok: Bool, back: Bool, pause: Bool, full: Bool,
+    mx: Int, my: Int, click: Bool, moved: Bool,
+}
+
+// the controller's stick, as last seen (0 at rest, 1 to 4 up, down,
+// left, right), to tell when it's pushed anew
+struct Stick { dir: Int, mx: Int, my: Int }
+
+fn read_input(st: Stick) -> Input with Io {
+    let ax = pad_axis(0);
+    let ay = pad_axis(1);
+    let dir = if ay < -16000 { 1 } else if ay > 16000 { 2 } else if ax < -16000 { 3 } else if ax > 16000 { 4 } else { 0 };
+    let fresh = dir != st.dir;
+    st.dir = dir;
+    let mx = mouse_x();
+    let my = mouse_y();
+    let moved = mx != st.mx || my != st.my;
+    st.mx = mx;
+    st.my = my;
+    Input {
+        left: scan_down(225) || scan_down(29) || scan_down(80) || scan_down(224) || pad_down(9) || pad_axis(4) > 8000 || pad_down(13),
+        right: scan_down(229) || scan_down(56) || scan_down(79) || scan_down(228) || scan_down(16) || pad_down(10) || pad_axis(5) > 8000 || pad_down(14),
+        launch: scan_down(44) || scan_down(40) || scan_down(81) || pad_down(0) || pad_down(12),
+        nudge: key_pressed(key_up()) || key_pressed(key("n")) || pad_pressed(3),
+        up: key_pressed(key_up()) || key_pressed(key("w")) || pad_pressed(11) || (fresh && dir == 1),
+        down: key_pressed(key_down_arrow()) || key_pressed(key("s")) || pad_pressed(12) || (fresh && dir == 2),
+        west: key_pressed(key_left()) || key_pressed(key("a")) || pad_pressed(13) || (fresh && dir == 3),
+        east: key_pressed(key_right()) || key_pressed(key("d")) || pad_pressed(14) || (fresh && dir == 4),
+        ok: key_pressed(key_enter()) || key_pressed(key_space()) || pad_pressed(0),
+        back: key_pressed(key_escape()) || key_pressed(key_backspace()) || pad_pressed(1),
+        pause: key_pressed(key_escape()) || key_pressed(key("p")) || pad_pressed(6),
+        full: key_pressed(key_f11()),
+        mx: mx, my: my, click: mouse_clicked(), moved: moved,
+    }
+}
+
+fn choice_of(inp: Input) -> Choice {
+    Choice { up: inp.up, down: inp.down, left: inp.west, right: inp.east, ok: inp.ok, back: inp.back, mx: inp.mx, my: inp.my, click: inp.click, moved: inp.moved }
+}
+
+// how hard the band should play: by what's at stake in the basket
+fn intensity(w: Week) -> Int {
+    let at_stake = w.basket * w.mult;
+    if w.phase != ph_play() { 0 } else if at_stake * 2 > w.rent { 3 } else if at_stake * 6 > w.rent { 2 } else if w.basket > 0 { 1 } else { 0 }
+}
+
+fn main() {
+    if !screen_open(sw(), sh(), 3, "BUMPER CROP") {
+        panic("couldn't open a window\n");
+    }
+    let data = save::load();
+    volumes(save::get(data, save::sv_music()), save::get(data, save::sv_sfx()));
+    if save::get(data, save::sv_full()) > 0 { screen_full(true) }
+    let tab = sines();
+    let g = gfx(letters());
+    load_icons(g);
+    // a frame to look at while the rest is made
+    rect(g, 0, 0, sw(), sh(), 0xf4ead6);
+    say_mid(g, "BUMPER CROP", 240, 120, 3, 0xffc820, 0x3a1a08);
+    show_frame(g);
+    let tables = Array::from_list([make_table(0, tab), make_table(1, tab)], make_table(0, tab));
+    let mut t = tables.get(0);
+    let a = art();
+    bake(a, t, 0, tab);
+    let sp = sprites(tab);
+    let m = music();
+    let f = fx();
+    // the title screen's table: a farm in full swing, played by the bot
+    let demo_run = new_run(0, 0, 0, 4242, t.n_plots);
+    demo_run.plot_seed.set(2, sunflower());
+    demo_run.plot_seed.set(3, tulip());
+    demo_run.plot_seed.set(4, pumpkin());
+    demo_run.plot_seed.set(5, strawberry());
+    demo_run.plot_seed.set(6, cabbage());
+    demo_run.plot_seed.set(7, chili());
+    demo_run.plots_open = 8;
+    demo_run.plot_level.set(0, 2);
+    let demo_fx = fx();
+    let mut demo = start_week(demo_run, t, tab, demo_fx);
+    nearly_ripe(demo);
+    let demo_bot = bot(99, 240);
+    calibrate(demo_bot, t);
+    let held = array(4, false);
+    let mut scene = Title;
+    let mut back_to = Title;
+    let mut sel = 0;
+    let mut anim = 0;
+    let mut frame = 0;
+    let mut r = demo_run;
+    let mut w = demo;
+    let mut mk = market(demo_run, t.n_plots);
+    let mut farmer = 0;
+    let mut farm = 0;
+    let mut ribbon = 0;
+    let mut howto_page = 0;
+    let mut news = [];
+    let mut won_year = false;
+    let mut season_t = 200;
+    let pay_names = array(8, "");
+    let pay_coins = array(8, 0);
+    let mut pay_n = 0;
+    let mut quit = false;
+    let stick = Stick { dir: 0, mx: 0, my: 0 };
+    // (a fade in, whenever the scene changes)
+    let mut shown_scene = Title;
+    let mut fade = 16;
+    loop {
+        let inp = read_input(stick);
+        frame = frame + 1;
+        anim = anim + 1;
+        if inp.full {
+            save::set(data, save::sv_full(), 1 - save::get(data, save::sv_full()));
+            screen_full(save::get(data, save::sv_full()) > 0);
+            save::store(data);
+        }
+        if season_t < 200 { season_t = season_t + 1 }
+        match scene {
+            Title => {
+                // the demo plays on behind the title
+                plan(demo_bot, demo);
+                think(demo_bot, t.p, held);
+                let launch = demo.phase == ph_serve() && plunge(demo_bot);
+                if demo.phase == ph_choice() { choose(demo, true) }
+                step(demo, Controls { left: held.get(0), right: held.get(1), launch: launch, nudge: false });
+                demo_fx.n_sounds = 0;
+                if demo.phase == ph_over() || demo.frame > 60 * 120 {
+                    demo = start_week(demo_run, t, tab, demo_fx);
+                    nearly_ripe(demo);
+                }
+                draw_table(g, a, sp, demo);
+                draw_title(g, data, frame, tab, (anim * 6).min(256));
+                let can_go_on = save::has_run(data);
+                let over = menu(g, ["New year", "Carry on", "The almanac", "How to play", "Options", "Quit"], [true, can_go_on, true, true, true, true], sel, 92, frame, inp.mx, inp.my, tab);
+                if inp.moved && over >= 0 && over != sel { sel = over; effect(m, sn_tick(), 0, 0); }
+                if inp.up { sel = (sel + 5) % 6; effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = (sel + 1) % 6; effect(m, sn_tick(), 0, 0); }
+                if inp.ok || (inp.click && over >= 0) {
+                    effect(m, sn_coin(), 0, 0);
+                    anim = 0;
+                    if sel == 0 { scene = Farmers; sel = farmer; }
+                    else if sel == 1 && can_go_on {
+                        r = save::restore_run(data, 8);
+                        t = tables.get(r.farm.clamp(0, farm_count() - 1));
+                        ensure(a, t, r.season, tab);
+                        mk = market(r, t.n_plots);
+                        scene = Market;
+                    } else if sel == 2 { scene = Almanac; sel = 0; }
+                    else if sel == 3 { scene = Howto; howto_page = 0; back_to = Title; }
+                    else if sel == 4 { scene = Options; back_to = Title; sel = 0; }
+                    else if sel == 5 { quit = true }
+                }
+                if inp.back { quit = true }
+                tick(m, s_title(), 0, 0);
+            }
+            Farmers => {
+                draw_farm(g, a, sp, t, demo_run, f, frame, 0, -1, tab);
+                rect_blend(g, 96, 0, 288, sh(), 0x1a1008, 60);
+                logo(g, 240, 16, frame, tab, 256);
+                // rows: the farmers (0 to 3), the farm (4), the ribbon (5), begin (6)
+                let row = if sel < 4 { 0 } else { sel - 3 };
+                if sel < 4 { farmer = sel }
+                draw_farmers(g, sp, data, farmer, farm, ribbon, row, frame, tab);
+                let open_ribbons = save::get(data, save::sv_ribbons_open()).max(1);
+                if inp.up { sel = (sel + 6) % 7; effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = (sel + 1) % 7; effect(m, sn_tick(), 0, 0); }
+                let turn = if inp.west { -1 } else if inp.east { 1 } else { 0 };
+                if sel == 4 && turn != 0 { farm = (farm + farm_count() + turn) % farm_count(); effect(m, sn_tick(), 1, 0); }
+                if sel == 5 && turn != 0 { ribbon = (ribbon + open_ribbons + turn) % open_ribbons; effect(m, sn_tick(), 1, 0); }
+                // (the mouse: a farmer's card, the farm, the ribbon, begin)
+                let over = if inp.mx >= 6 && inp.mx < 112 { if inp.my >= 28 && inp.my < 148 { (inp.my - 28) / 30 } else if inp.my >= 150 && inp.my < 178 { 4 } else if inp.my >= 182 && inp.my < 210 { 5 } else if inp.my >= 216 && inp.my < 242 { 6 } else { -1 } } else { -1 };
+                if inp.moved && over >= 0 && over != sel { sel = over; effect(m, sn_tick(), 0, 0); }
+                if inp.click && over == 4 { farm = (farm + 1) % farm_count(); effect(m, sn_tick(), 1, 0); }
+                if inp.click && over == 5 { ribbon = (ribbon + 1) % open_ribbons; effect(m, sn_tick(), 1, 0); }
+                // (the table shown is the farm chosen)
+                if t.farm != farm { t = tables.get(farm) }
+                ensure(a, t, 0, tab);
+                let begin = (inp.ok && sel == 6) || (inp.click && over == 6) || (inp.ok && sel < 4);
+                let can = save::has_bit(data, save::sv_farmers(), farmer) && save::has_bit(data, save::sv_farms(), farm);
+                if begin && can {
+                    effect(m, sn_rent(), 0, 0);
+                    r = new_run(farm, farmer, ribbon, screen_ticks() * 7919 + frame, t.n_plots);
+                    save::see_run(data, r);
+                    save::clear_run(data);
+                    save::store(data);
+                    w = start_week(r, t, tab, f);
+                    w.bonus_save = if save::get(data, save::sv_assist()) > 0 { 5 * 60 } else { 0 };
+                    w.teach = true;
+                    w.taught = save::get(data, save::sv_tips());
+                    if save::get(data, save::sv_taught()) == 0 {
+                        scene = Howto;
+                        howto_page = 0;
+                        back_to = Play;
+                    } else { scene = Play }
+                } else if begin {
+                    effect(m, sn_warn(), 0, 0);
+                }
+                if inp.back {
+                    scene = Title;
+                    sel = 0;
+                    anim = 60;
+                    t = tables.get(0);
+                    ensure(a, t, 0, tab);
+                }
+                tick(m, s_title(), 0, 0);
+            }
+            Play => {
+                let c = Controls { left: inp.left, right: inp.right, launch: inp.launch, nudge: inp.nudge && w.phase == ph_play() };
+                if w.phase == ph_choice() {
+                    if inp.west || inp.east || inp.up || inp.down { sel = 1 - sel; effect(m, sn_tick(), 0, 0); }
+                    let over = if inp.my >= 150 && inp.my < 170 { if inp.mx >= 160 && inp.mx < 236 { 0 } else if inp.mx >= 244 && inp.mx < 320 { 1 } else { -1 } } else { -1 };
+                    if inp.moved && over >= 0 { sel = over }
+                    if inp.ok || (inp.click && over >= 0) {
+                        choose(w, sel == 0);
+                        effect(m, sn_coin(), 0, 0);
+                    }
+                }
+                step(w, if w.phase == ph_choice() { Controls { left: false, right: false, launch: false, nudge: false } } else { c });
+                effects(m, f);
+                if f.shake >= 5 && save::get(data, save::sv_shake()) > 0 { rumble(20000, 30000, 120) }
+                if save::get(data, save::sv_shake()) == 0 { f.shake = 0 }
+                tick(m, if is_fair(r) { s_fair() } else { s_week() }, r.season, intensity(w));
+                draw_table(g, a, sp, w);
+                draw_hud(g, w);
+                draw_banner(g, f);
+                draw_tip(g, f);
+                if w.phase == ph_intro() { draw_week_intro(g, r, w.phase_t, tab) }
+                if w.phase == ph_choice() { choice_card(g, w, sel, frame) }
+                if w.taught != save::get(data, save::sv_tips()) {
+                    save::set(data, save::sv_tips(), w.taught);
+                    save::store(data);
+                }
+                if w.phase == ph_over() && w.phase_t > 70 {
+                    if w.banked >= w.rent {
+                        pay_n = payout(w, pay_names, pay_coins);
+                        scene = WeekEnd;
+                        anim = 0;
+                    } else {
+                        news = save::record_run(data, r, false);
+                        save::store(data);
+                        won_year = false;
+                        scene = End;
+                        sel = 0;
+                        anim = 0;
+                    }
+                }
+                if inp.pause && w.phase != ph_choice() { scene = Pause; sel = 0; }
+                if w.phase == ph_choice() && inp.pause { sel = 1 }
+            }
+            Pause => {
+                draw_table(g, a, sp, w);
+                draw_hud(g, w);
+                let over = draw_pause(g, sel, frame, tab, inp.mx, inp.my);
+                if inp.moved && over >= 0 { sel = over }
+                if inp.up { sel = (sel + 3) % 4; effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = (sel + 1) % 4; effect(m, sn_tick(), 0, 0); }
+                if inp.pause || inp.back { scene = Play }
+                else if inp.ok || (inp.click && over >= 0) {
+                    effect(m, sn_coin(), 0, 0);
+                    if sel == 0 { scene = Play }
+                    else if sel == 1 { scene = Options; back_to = Pause; sel = 0; }
+                    else if sel == 2 { scene = Howto; howto_page = 0; back_to = Pause; }
+                    else {
+                        scene = Title;
+                        sel = 0;
+                        anim = 0;
+                        t = tables.get(0);
+                        ensure(a, t, 0, tab);
+                        demo = start_week(demo_run, t, tab, demo_fx);
+                        nearly_ripe(demo);
+                    }
+                }
+                tick(m, s_silence(), 0, 0);
+            }
+            Options => {
+                if back_to == Pause { draw_table(g, a, sp, w); draw_hud(g, w); } else { draw_table(g, a, sp, demo); }
+                let over = draw_options(g, data, sel, frame, inp.mx, inp.my);
+                if inp.moved && over >= 0 { sel = over }
+                if inp.up { sel = (sel + option_count() - 1) % option_count(); effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = (sel + 1) % option_count(); effect(m, sn_tick(), 0, 0); }
+                let delta = if inp.west { -1 } else if inp.east || inp.ok || (inp.click && over >= 0) { 1 } else { 0 };
+                if delta != 0 {
+                    if sel == 0 { save::set(data, save::sv_music(), (save::get(data, save::sv_music()) + delta * 10).clamp(0, 100)) }
+                    else if sel == 1 { save::set(data, save::sv_sfx(), (save::get(data, save::sv_sfx()) + delta * 10).clamp(0, 100)) }
+                    else if sel == 2 {
+                        save::set(data, save::sv_full(), 1 - save::get(data, save::sv_full()));
+                        screen_full(save::get(data, save::sv_full()) > 0);
+                    }
+                    else if sel == 3 { save::set(data, save::sv_shake(), 1 - save::get(data, save::sv_shake())) }
+                    else if sel == 4 { save::set(data, save::sv_assist(), 1 - save::get(data, save::sv_assist())) }
+                    volumes(save::get(data, save::sv_music()), save::get(data, save::sv_sfx()));
+                    effect(m, sn_tick(), 2, 0);
+                    save::store(data);
+                }
+                if inp.back || ((inp.ok || (inp.click && over >= 0)) && sel == 5) {
+                    scene = back_to;
+                    sel = if back_to == Pause { 1 } else { 4 };
+                }
+                tick(m, if back_to == Pause { s_silence() } else { s_title() }, 0, 0);
+            }
+            Howto => {
+                if back_to == Title { draw_table(g, a, sp, demo) } else { draw_table(g, a, sp, w); draw_hud(g, w); }
+                draw_howto(g, howto_page, frame, tab);
+                if inp.ok || inp.click || inp.back {
+                    effect(m, sn_tick(), 1, 0);
+                    if howto_page == 0 && !inp.back { howto_page = 1 } else {
+                        save::set(data, save::sv_taught(), 1);
+                        save::store(data);
+                        scene = back_to;
+                        if back_to == Title { sel = 3 } else if back_to == Pause { sel = 2 }
+                    }
+                }
+                tick(m, if back_to == Title { s_title() } else { s_silence() }, 0, 0);
+            }
+            WeekEnd => {
+                step(w, Controls { left: false, right: false, launch: false, nudge: false });
+                effects(m, f);
+                draw_table(g, a, sp, w);
+                draw_hud(g, w);
+                draw_week_end(g, sp, r, w.banked, w.rent, pay_names, pay_coins, pay_n, anim, w.best_bank, frame, tab);
+                if anim > 30 && anim <= 30 + pay_n * 18 && (anim - 30) % 18 == 0 { effect(m, sn_coin(), 0, 0) }
+                if (inp.ok || inp.click) && anim > 30 + pay_n * 18 {
+                    let mut total = 0;
+                    let mut i = 0;
+                    while i < pay_n {
+                        total = total + pay_coins.get(i);
+                        i = i + 1;
+                    }
+                    r.money = r.money + total;
+                    if r.season == 3 && r.week == 2 && r.year == 0 {
+                        // the year's done: the farm's kept
+                        news = save::record_run(data, r, true);
+                        save::store(data);
+                        won_year = true;
+                        scene = End;
+                        sel = 0;
+                        anim = 0;
+                    } else {
+                        let before = r.season;
+                        advance(r);
+                        if r.season != before {
+                            bake(a, t, r.season, tab);
+                            season_t = 0;
+                        }
+                        mk = market(r, t.n_plots);
+                        save::keep_run(data, r);
+                        save::store(data);
+                        scene = Market;
+                        anim = 0;
+                    }
+                    effect(m, sn_coin(), 0, 0);
+                }
+                tick(m, s_market(), r.season, 0);
+            }
+            Market => {
+                if mk.frame == 0 {
+                    let mut q = 0;
+                    while q < 4 { save::see_seed(data, mk.seeds.get(q)); q = q + 1; }
+                    save::see_tool(data, mk.tools.get(0));
+                    save::see_tool(data, mk.tools.get(1));
+                    save::see_run(data, r);
+                    save::store(data);
+                }
+                step_market(mk, r, t, choice_of(inp), f);
+                tick_fx(f);
+                effects(m, f);
+                let mode = if mk.mode == mk_plant() { 1 } else if mk.mode == mk_feed() { 2 } else { 0 };
+                draw_farm(g, a, sp, t, r, f, frame, mode, mk.plot, tab);
+                draw_market(g, sp, mk, r, t, tab);
+                if season_t < 120 { draw_season_card(g, r.season, season_t) }
+                if mk.done {
+                    w = start_week(r, t, tab, f);
+                    w.bonus_save = if save::get(data, save::sv_assist()) > 0 { 5 * 60 } else { 0 };
+                    w.teach = true;
+                    w.taught = save::get(data, save::sv_tips());
+                    scene = Play;
+                }
+                if inp.pause && mk.mode == mk_browse() && !inp.back {
+                    scene = Title;
+                    sel = 1;
+                    anim = 0;
+                    t = tables.get(0);
+                    ensure(a, t, 0, tab);
+                    demo = start_week(demo_run, t, tab, demo_fx);
+                        nearly_ripe(demo);
+                }
+                tick(m, s_market(), r.season, 0);
+            }
+            Almanac => {
+                draw_table(g, a, sp, demo);
+                draw_almanac(g, sp, data, sel, frame);
+                let over = almanac_at(inp.mx, inp.my);
+                if inp.moved && over >= 0 && over != sel { sel = over; effect(m, sn_tick(), 0, 0); }
+                if inp.west { sel = almanac_move(sel, -1, 0); effect(m, sn_tick(), 0, 0); }
+                if inp.east { sel = almanac_move(sel, 1, 0); effect(m, sn_tick(), 0, 0); }
+                if inp.up { sel = almanac_move(sel, 0, -1); effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = almanac_move(sel, 0, 1); effect(m, sn_tick(), 0, 0); }
+                if inp.back || inp.ok || (inp.click && over < 0) { scene = Title; sel = 2; effect(m, sn_tick(), 1, 0); }
+                tick(m, s_title(), 0, 0);
+            }
+            End => {
+                step(w, Controls { left: false, right: false, launch: false, nudge: false });
+                effects(m, f);
+                draw_table(g, a, sp, w);
+                draw_hud(g, w);
+                draw_end(g, sp, r, won_year, w.banked, w.rent, news, anim, frame, tab, sel);
+                if won_year && frame % 20 == 0 { burst(f, p_confetti(), 140 + (frame * 37) % 200, 20, 20, 600, 80, 0xffd040) }
+                if inp.west || inp.east { sel = 1 - sel; effect(m, sn_tick(), 0, 0); }
+                let over = if inp.my >= 192 && inp.my < 210 { if inp.mx >= 154 && inp.mx < 236 { 0 } else if inp.mx >= 244 && inp.mx < 326 { 1 } else { -1 } } else { -1 };
+                if inp.moved && over >= 0 { sel = over }
+                if (inp.ok || (inp.click && over >= 0)) && anim > 30 {
+                    effect(m, sn_coin(), 0, 0);
+                    if sel == 0 && won_year {
+                        // on into the next year
+                        advance(r);
+                        bake(a, t, r.season, tab);
+                        season_t = 0;
+                        mk = market(r, t.n_plots);
+                        save::keep_run(data, r);
+                        save::store(data);
+                        scene = Market;
+                    } else if sel == 0 {
+                        r = new_run(r.farm, r.farmer, r.ribbon, screen_ticks() * 31 + frame, t.n_plots);
+                        ensure(a, t, 0, tab);
+                        w = start_week(r, t, tab, f);
+                        w.bonus_save = if save::get(data, save::sv_assist()) > 0 { 5 * 60 } else { 0 };
+                    w.teach = true;
+                    w.taught = save::get(data, save::sv_tips());
+                        scene = Play;
+                    } else {
+                        scene = Title;
+                        sel = 0;
+                        anim = 0;
+                        t = tables.get(0);
+                        ensure(a, t, 0, tab);
+                        demo = start_week(demo_run, t, tab, demo_fx);
+                        nearly_ripe(demo);
+                    }
+                }
+                tick(m, if won_year { s_victory() } else { s_lost() }, 0, 0);
+            }
+        }
+        if scene != shown_scene && !(scene == Pause || shown_scene == Pause || scene == Options || shown_scene == Options || scene == Howto || shown_scene == Howto || scene == Almanac || shown_scene == Almanac) { fade = 10 }
+        shown_scene = scene;
+        if fade > 0 {
+            rect_blend(g, 0, 0, sw(), sh(), 0xf4ead6, fade * 25);
+            fade = fade - 1;
+        }
+        if quit { break; }
+        if !show_frame(g) { break; }
+    }
+}
+
+fn show_frame(g: Gfx) -> Bool with Io { screen_show(g.px) }
+
+// rent paid and a ball lost: play on, or off to market?
+fn choice_card(g: Gfx, w: Week, sel: Int, frame: Int) {
+    let x = 150;
+    let y = 100;
+    round_blend(g, x + 3, y + 4, 180, 76, 6, 0x1a1008, 120);
+    round_rect(g, x, y, 180, 76, 6, 0x3a2a1a);
+    round_rect(g, x + 1, y + 1, 178, 74, 5, paper());
+    print_mid(g, "Rent's paid!", 240, y + 8, 1, leaf(), 0xe8dcc0);
+    text_mid(g, "Play on for more, or go to market", 240, y + 22, 1, ink());
+    text_mid(g, "with $2 for each ball left?", 240, y + 32, 1, ink());
+    let opts = ["Play on", "To market"];
+    let mut i = 0;
+    let mut rest = opts;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let bx = x + 10 + i * 84;
+                if sel == i { tag_card(g, bx, y + 50, 76, 20, 0x4aa04a) } else { card(g, bx, y + 50, 76, 20) }
+                text_mid(g, s, bx + 38, y + 56, 1, if sel == i { 0xffffff } else { ink() });
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+}

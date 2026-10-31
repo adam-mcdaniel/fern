@@ -1,0 +1,853 @@
+// What the robot fights with: eight weapons, each firing on its own, five
+// levels each and an evolution; six modules that make it stronger; what a
+// hit does, and what a creature leaves when it dies.
+
+use crate::math::{sin, cos, isqrt};
+use super::run::*;
+use super::light::{reach};
+use super::gfx::{rgb};
+
+// ---- the upgrades: 0 to 7 the weapons, 8 to 13 the modules
+
+pub fn rivets() -> Int { 0 }
+pub fn drones() -> Int { 1 }
+pub fn laser() -> Int { 2 }
+pub fn shockwave() -> Int { 3 }
+pub fn seekers() -> Int { 4 }
+pub fn spill() -> Int { 5 }
+pub fn tesla() -> Int { 6 }
+pub fn cargo() -> Int { 7 }
+pub fn floodlight() -> Int { 8 }
+pub fn overclock() -> Int { 9 }
+pub fn servos() -> Int { 10 }
+pub fn plating() -> Int { 11 }
+pub fn tractor() -> Int { 12 }
+pub fn coolant() -> Int { 13 }
+
+pub fn upgrades() -> Int { 14 }
+pub fn max_level() -> Int { 5 }
+pub fn is_weapon(u: Int) -> Bool { u < 8 }
+// how many of each the robot can carry
+pub fn slots() -> Int { 5 }
+
+pub fn name(u: Int) -> String {
+    if u == 0 { "RIVET GUN" } else if u == 1 { "SENTRY DRONES" } else if u == 2 { "CUTTING LASER" } else if u == 3 { "SHOCKWAVE" }
+    else if u == 4 { "SEEKERS" } else if u == 5 { "CLEANER SPILL" } else if u == 6 { "TESLA COIL" } else if u == 7 { "CARGO DROP" }
+    else if u == 8 { "FLOODLIGHT" } else if u == 9 { "OVERCLOCK" } else if u == 10 { "SERVOS" } else if u == 11 { "PLATING" }
+    else if u == 12 { "TRACTOR BEAM" } else { "COOLANT" }
+}
+
+// what a weapon becomes when it evolves, and the module it needs to
+pub fn evolved_name(u: Int) -> String {
+    if u == 0 { "RAILGUN" } else if u == 1 { "DRONE SWARM" } else if u == 2 { "PRISM ARRAY" } else if u == 3 { "OVERLOAD" }
+    else if u == 4 { "HUNTER-KILLERS" } else if u == 5 { "CAUSTIC FLOOD" } else if u == 6 { "STORM CORE" } else { "FREIGHT RAIN" }
+}
+
+pub fn partner(u: Int) -> Int {
+    if u == 0 { overclock() } else if u == 1 { floodlight() } else if u == 2 { coolant() } else if u == 3 { plating() }
+    else if u == 4 { tractor() } else if u == 5 { servos() } else if u == 6 { floodlight() } else { overclock() }
+}
+
+// what an upgrade does, for its card: (first line, second line), at the
+// level it'd go to
+pub fn describe(u: Int, level: Int) -> (String, String) {
+    if level == 1 {
+        if u == 0 { ("FIRES RIVETS", "AT THE NEAREST THREAT") }
+        else if u == 1 { ("DRONES CIRCLE YOU,", "BATTERING WHAT THEY HIT") }
+        else if u == 2 { ("A LASER SWEEPS ROUND", "YOU, CUTTING") }
+        else if u == 3 { ("AN EMP RING BURSTS", "OUT, HURLING THEM BACK") }
+        else if u == 4 { ("LITTLE BOTS THAT HUNT", "ON THEIR OWN") }
+        else if u == 5 { ("YOU LEAK CAUSTIC", "CLEANER WHERE YOU GO") }
+        else if u == 6 { ("LIGHTNING THAT LEAPS", "FROM ONE TO THE NEXT") }
+        else if u == 7 { ("CRATES FALL FROM THE", "CEILING ONTO THEM") }
+        else if u == 8 { ("+10% AREA", "+12% HEADLAMP") }
+        else if u == 9 { ("+10% DAMAGE", "") }
+        else if u == 10 { ("+8% SPEED", "") }
+        else if u == 11 { ("+20 INTEGRITY", "AND SELF-REPAIR") }
+        else if u == 12 { ("+30% REACH FOR", "SCRAP ON THE FLOOR") }
+        else { ("WEAPONS FIRE 6%", "MORE OFTEN") }
+    } else if u < 8 {
+        let more = if u == 0 { if level == 2 || level == 4 { "+1 RIVET" } else if level == 5 { "+DAMAGE, PIERCES MORE" } else { "+DAMAGE, PIERCES" } }
+            else if u == 1 { if level == 3 { "+DAMAGE, WIDER" } else { "+1 DRONE" } }
+            else if u == 2 { if level == 4 { "A SECOND BEAM" } else { "+DAMAGE, LONGER" } }
+            else if u == 3 { "+DAMAGE, WIDER, SOONER" }
+            else if u == 4 { if level == 2 || level == 4 { "+1 SEEKER" } else { "+DAMAGE" } }
+            else if u == 5 { "+DAMAGE, BIGGER, LONGER" }
+            else if u == 6 { "+1 LEAP, +DAMAGE" }
+            else { if level == 3 || level == 5 { "+1 CRATE" } else { "+DAMAGE, BIGGER IMPACT" } };
+        (more, "")
+    } else {
+        describe(u, 1)
+    }
+}
+
+pub fn evolved_text(u: Int) -> (String, String) {
+    if u == 0 { ("SLUGS THAT PUNCH", "THROUGH EVERYTHING") }
+    else if u == 1 { ("EIGHT DRONES,", "FASTER AND HARDER") }
+    else if u == 2 { ("THREE BEAMS, SPLIT", "THROUGH A PRISM") }
+    else if u == 3 { ("TWO RINGS, AND", "TWICE THE CHARGE") }
+    else if u == 4 { ("A PACK OF THEM THAT", "PASS RIGHT THROUGH") }
+    else if u == 5 { ("PUDDLES THE SIZE", "OF ROOMS") }
+    else if u == 6 { ("TWO ARCS THAT", "LEAP TEN TIMES") }
+    else { ("THE WHOLE HOLD,", "ALL AT ONCE") }
+}
+
+// a number for each level, 1 to 5
+fn at(level: Int, a: Int, b: Int, c: Int, d: Int, e: Int) -> Int {
+    if level <= 1 { a } else if level == 2 { b } else if level == 3 { c } else if level == 4 { d } else { e }
+}
+
+// ---- the characters and their stats
+
+pub fn characters() -> Int { 4 }
+
+pub fn char_name(c: Int) -> String {
+    if c == 0 { "MOP" } else if c == 1 { "HAULER" } else if c == 2 { "CUTTER" } else { "DISPATCH" }
+}
+
+pub fn char_text(c: Int) -> (String, String) {
+    if c == 0 { ("A CLEANING ROBOT. ON NIGHTS.", "STARTS WITH THE RIVET GUN.") }
+    else if c == 1 { ("A CARGO LOADER: SLOW, AND BUILT TO TAKE IT.", "STARTS WITH SENTRY DRONES. +40 INTEGRITY, 1 ARMOR.") }
+    else if c == 2 { ("A HULL WELDER: QUICK, AND FLIMSY.", "STARTS WITH THE CUTTING LASER. +15% SPEED, -20 INTEGRITY.") }
+    else { ("RUNS THE CARGO HOLD. HAS IDEAS.", "STARTS WITH CARGO DROP. +15% AREA, -5% SPEED.") }
+}
+
+pub fn first_weapon(c: Int) -> Int {
+    if c == 0 { rivets() } else if c == 1 { drones() } else if c == 2 { laser() } else { cargo() }
+}
+
+// the robot's paint: the stripe that tells them apart
+pub fn char_color(c: Int) -> Int {
+    if c == 0 { rgb(70, 210, 200) } else if c == 1 { rgb(250, 200, 50) } else if c == 2 { rgb(240, 80, 70) } else { rgb(170, 110, 250) }
+}
+
+// the workshop's upgrades, bought with credits between shifts
+pub fn shop_count() -> Int { 10 }
+
+pub fn shop_name(h: Int) -> String {
+    if h == 0 { "TORQUE" } else if h == 1 { "CHASSIS" } else if h == 2 { "WHEELS" } else if h == 3 { "OPTICS" }
+    else if h == 4 { "FIRMWARE" } else if h == 5 { "MAGNETS" } else if h == 6 { "ARMOR" } else if h == 7 { "OVERTIME" }
+    else if h == 8 { "PLANNER" } else { "BACKUP CELL" }
+}
+
+pub fn shop_text(h: Int) -> String {
+    if h == 0 { "+5% DAMAGE A LEVEL" } else if h == 1 { "+10 INTEGRITY A LEVEL" } else if h == 2 { "+4% SPEED A LEVEL" }
+    else if h == 3 { "+4% AREA A LEVEL" } else if h == 4 { "WEAPONS 3% QUICKER A LEVEL" } else if h == 5 { "+15% SCRAP REACH A LEVEL" }
+    else if h == 6 { "1 LESS DAMAGE FROM EACH HIT" } else if h == 7 { "+10% CREDITS A LEVEL" }
+    else if h == 8 { "A FOURTH CHOICE AT EACH LEVEL" } else { "BACK ONLINE ONCE A SHIFT" }
+}
+
+pub fn shop_max(h: Int) -> Int { if h == 8 || h == 9 { 1 } else if h == 6 { 3 } else { 5 } }
+
+pub fn shop_cost(h: Int, level: Int) -> Int {
+    if h == 8 { 400 } else if h == 9 { 500 } else { 30 + level * 45 + level * level * 15 }
+}
+
+// the stats, worked out again from the character, the workshop and the modules
+pub fn restat(r: Run) {
+    let c = r.char;
+    let m = r.meta;
+    let lv = r.lv;
+    let s = r.stat;
+    s.set(st_might(), 100 + m.get(0) * 5 + lv.get(overclock()) * 10);
+    s.set(st_area(), 100 + m.get(3) * 4 + lv.get(floodlight()) * 10 + (if c == 3 { 15 } else { 0 }));
+    s.set(st_speed(), 100 + m.get(2) * 4 + lv.get(servos()) * 8 + (if c == 1 { -10 } else if c == 2 { 15 } else if c == 3 { -5 } else { 0 }));
+    s.set(st_haste(), (100 - m.get(4) * 3 - lv.get(coolant()) * 6).max(40));
+    s.set(st_magnet(), 100 + m.get(5) * 15 + lv.get(tractor()) * 30);
+    s.set(st_maxhp(), 100 + m.get(1) * 10 + lv.get(plating()) * 20 + (if c == 1 { 40 } else if c == 2 { -20 } else { 0 }));
+    s.set(st_regen(), lv.get(plating()) * 2);
+    s.set(st_armor(), m.get(6) + (if c == 1 { 1 } else { 0 }));
+    s.set(st_amount(), if lv.get(coolant()) >= 5 { 1 } else { 0 });
+    s.set(st_greed(), 100 + m.get(7) * 10);
+    s.set(st_light(), 100 + lv.get(floodlight()) * 12);
+    s.set(st_choices(), 3 + m.get(8));
+}
+
+fn might(r: Run, x: Int) -> Int { x * stat(r, st_might()) / 100 }
+fn area(r: Run, x: Int) -> Int { x * stat(r, st_area()) / 100 }
+fn haste(r: Run, x: Int) -> Int { x * stat(r, st_haste()) / 100 }
+
+// ---- sparks, numbers, flashes
+
+pub fn spark(r: Run, x: Int, y: Int, vx: Int, vy: Int, life: Int, color: Int, kind: Int) {
+    let p = r.sparks;
+    let i = spawn(p);
+    if i >= 0 {
+        col(p, sp_x()).set(i, x);
+        col(p, sp_y()).set(i, y);
+        col(p, sp_vx()).set(i, vx);
+        col(p, sp_vy()).set(i, vy);
+        col(p, sp_life()).set(i, life);
+        col(p, sp_max()).set(i, life);
+        col(p, sp_color()).set(i, color);
+        col(p, sp_kind()).set(i, kind);
+    }
+}
+
+// n sparks bursting from (x, y), as fast as `speed` (16ths a frame)
+pub fn burst(r: Run, x: Int, y: Int, n: Int, color: Int, speed: Int, life: Int) {
+    let mut k = 0;
+    while k < n {
+        let a = roll(r, 1024);
+        let s = speed / 3 + roll(r, speed);
+        spark(r, x, y, (cos(r.table, a) * s) >> 16, (sin(r.table, a) * s) >> 16, life / 2 + roll(r, life), color, 0);
+        k = k + 1;
+    }
+}
+
+// motes drifting up, flickering out (spores, dust, sparks)
+pub fn motes(r: Run, x: Int, y: Int, n: Int, color: Int) {
+    let mut k = 0;
+    while k < n {
+        spark(r, x + roll(r, 96) - 48, y + roll(r, 64) - 32, roll(r, 13) - 6, -6 - roll(r, 14), 30 + roll(r, 40), color, 1);
+        k = k + 1;
+    }
+}
+
+pub fn number(r: Run, x: Int, y: Int, value: Int, color: Int) {
+    let p = r.nums;
+    let i = spawn(p);
+    if i >= 0 {
+        col(p, nu_x()).set(i, x + roll(r, 96) - 48);
+        col(p, nu_y()).set(i, y - 96);
+        col(p, nu_value()).set(i, value);
+        col(p, nu_life()).set(i, 36);
+        col(p, nu_color()).set(i, color);
+    }
+}
+
+// a burst of light at (x, y) (16ths), r pixels, fading over `life` frames
+pub fn flash(r: Run, x: Int, y: Int, radius: Int, life: Int, lamp: Int, bloom: Int) {
+    let p = r.flashes;
+    let i = spawn(p);
+    if i >= 0 {
+        col(p, fl_x()).set(i, x >> 4);
+        col(p, fl_y()).set(i, y >> 4);
+        col(p, fl_r()).set(i, radius);
+        col(p, fl_life()).set(i, life);
+        col(p, fl_max()).set(i, life);
+        col(p, fl_lamp()).set(i, lamp);
+        col(p, fl_bloom()).set(i, bloom);
+    }
+}
+
+pub fn shake(r: Run, amount: Int) { r.shake = r.shake.max(amount) }
+
+// ---- hits and deaths
+
+// the sounds' numbers (see sound.fern)
+pub fn s_hit() -> Int { 0 }
+pub fn s_pop() -> Int { 1 }
+pub fn s_scrap() -> Int { 2 }
+pub fn s_hurt() -> Int { 3 }
+pub fn s_rivet() -> Int { 4 }
+pub fn s_shock() -> Int { 5 }
+pub fn s_boom() -> Int { 6 }
+pub fn s_zap() -> Int { 7 }
+pub fn s_reboot() -> Int { 8 }
+pub fn s_crate() -> Int { 9 }
+pub fn s_level() -> Int { 10 }
+pub fn s_roar() -> Int { 11 }
+pub fn s_spit() -> Int { 12 }
+pub fn s_cut() -> Int { 13 }
+pub fn s_seeker() -> Int { 14 }
+pub fn s_heal() -> Int { 15 }
+pub fn s_big() -> Int { 16 }
+pub fn s_alarm() -> Int { 17 }
+pub fn s_coin() -> Int { 18 }
+
+// a creature hurt by a weapon, pushed (kx, ky) (16ths a frame)
+pub fn hurt(r: Run, i: Int, dmg: Int, kx: Int, ky: Int, weapon: Int) {
+    let f = r.foes;
+    let hp = f.hp.get(i);
+    if hp > 0 {
+        let d = dmg.max(1);
+        f.hp.set(i, hp - d);
+        f.flash.set(i, 6);
+        // (the heavy hardly move)
+        let kind = f.kind.get(i);
+        let heavy = if kind == boss() { 0 } else if f.elite.get(i) > 0 { 3 } else if kind == bloater() || kind == stalker() { 2 } else { 1 };
+        if heavy > 0 {
+            f.vx.set(i, f.vx.get(i) + kx / heavy);
+            f.vy.set(i, f.vy.get(i) + ky / heavy);
+        }
+        if weapon >= 0 && weapon < 8 { r.dealt.set(weapon, r.dealt.get(weapon) + d.min(hp)) }
+        number(r, f.x.get(i), f.y.get(i), d, if d >= 40 { rgb(255, 220, 90) } else { rgb(255, 245, 230) });
+        sound(r, s_hit(), kind, f.x.get(i));
+        if hp - d <= 0 { die(r, i) }
+    }
+}
+
+fn die(r: Run, i: Int) {
+    let f = r.foes;
+    let (x, y) = (f.x.get(i), f.y.get(i));
+    let kind = f.kind.get(i);
+    let elite = f.elite.get(i) > 0;
+    r.kills = r.kills + 1;
+    let color = if kind == sporeling() { rgb(230, 110, 210) } else if kind == flicker() { rgb(140, 240, 230) } else if kind == bloater() { rgb(240, 150, 170) }
+        else if kind == drifter() { rgb(255, 80, 70) } else if kind == spitter() { rgb(150, 255, 110) } else if kind == chewer() { rgb(220, 230, 240) }
+        else if kind == stalker() { rgb(255, 70, 110) } else { rgb(255, 230, 160) };
+    burst(r, x, y, if elite { 40 } else { 9 }, color, if elite { 70 } else { 40 }, 22);
+    motes(r, x, y, 3, rgb(255, 110, 230));
+    sound(r, s_pop(), kind, x);
+    if kind == boss() {
+        r.won = 1;
+    } else {
+        drop_thing(r, x, y, 0, f.xp.get(i));
+        if elite {
+            drop_thing(r, x + 160, y, 3, 1);
+            flash(r, x, y, 90, 30, 60, 255);
+            shake(r, 6);
+            r.freeze = 4;
+            sound(r, s_big(), 0, x);
+        } else {
+            let luck = roll(r, 1000);
+            if luck < 7 { drop_thing(r, x, y, 1, 30) }
+            else if luck < 9 { drop_thing(r, x, y, 2, 0) }
+            else if luck < 24 { drop_thing(r, x, y, 4, 1) }
+        }
+    }
+}
+
+// a thing dropped at (x, y): 0 scrap (worth value), 1 a repair kit, 2 a
+// magnet (pulls in all the scrap), 3 a supply crate, 4 a credit chip
+pub fn drop_thing(r: Run, x: Int, y: Int, kind: Int, value: Int) {
+    let p = r.drops;
+    // (when there are too many, scrap's worth goes to an old piece instead)
+    if kind == 0 && count(p) >= p.cap - 40 {
+        let j = roll(r, count(p));
+        if col(p, dr_kind()).get(j) == 0 {
+            col(p, dr_value()).set(j, col(p, dr_value()).get(j) + value);
+        }
+    } else {
+        let i = spawn(p);
+        if i >= 0 {
+            col(p, dr_x()).set(i, x);
+            col(p, dr_y()).set(i, y);
+            col(p, dr_kind()).set(i, kind);
+            col(p, dr_value()).set(i, value.max(1));
+            col(p, dr_t()).set(i, roll(r, 60));
+        }
+    }
+}
+
+// ---- the weapons, each frame
+
+pub fn run_weapons(r: Run) {
+    let mut u = 0;
+    while u < 8 {
+        let lv = r.lv.get(u);
+        if lv > 0 {
+            let evo = r.evo.get(u) > 0;
+            if u == drones() { spin_drones(r, lv, evo) }
+            else if u == laser() { sweep_beams(r, lv, evo) }
+            else {
+                let left = r.cd.get(u) - 1;
+                if left <= 0 {
+                    let fired = shoot(r, u, lv, evo);
+                    r.cd.set(u, if fired { cooldown(r, u, lv, evo) } else { 10 });
+                } else {
+                    r.cd.set(u, left);
+                }
+            }
+        }
+        u = u + 1;
+    }
+}
+
+fn cooldown(r: Run, u: Int, lv: Int, evo: Bool) -> Int {
+    let base = if u == rivets() { if evo { 24 } else { at(lv, 44, 40, 36, 32, 28) } }
+        else if u == shockwave() { if evo { 100 } else { at(lv, 170, 160, 148, 136, 120) } }
+        else if u == seekers() { if evo { 60 } else { at(lv, 110, 100, 92, 84, 76) } }
+        else if u == spill() { if evo { 14 } else { at(lv, 30, 27, 24, 21, 18) } }
+        else if u == tesla() { if evo { 44 } else { at(lv, 80, 74, 68, 62, 54) } }
+        else { if evo { 80 } else { at(lv, 140, 130, 120, 110, 96) } };
+    haste(r, base).max(6)
+}
+
+// a weapon fired: whether it did (some need something to aim at)
+fn shoot(r: Run, u: Int, lv: Int, evo: Bool) -> Bool {
+    let (px, py) = (r.x, r.y);
+    let amount = stat(r, st_amount());
+    if u == rivets() {
+        let target = nearest(r, px, py, 300);
+        let (ax, ay) = if target >= 0 { unit(r.foes.x.get(target) - px, r.foes.y.get(target) - py) }
+            else { ((cos(r.table, r.face) >> 8), (sin(r.table, r.face) >> 8)) };
+        let n = (if evo { 4 } else { at(lv, 1, 2, 2, 3, 3) }) + amount;
+        let dmg = might(r, if evo { 32 } else { at(lv, 12, 13, 16, 18, 22) });
+        let pierce = if evo { 8 } else { at(lv, 1, 1, 2, 2, 3) };
+        let speed = if evo { 100 } else { 82 };
+        let mut k = 0;
+        while k < n {
+            // (fanned out, a twentieth of a turn apart)
+            let a = (k * 2 - (n - 1)) * 26;
+            let (c, s) = (cos(r.table, a), sin(r.table, a));
+            let (dx, dy) = ((ax * c - ay * s) >> 16, (ax * s + ay * c) >> 16);
+            new_shot(r, 0, px, py, dx * speed / 256, dy * speed / 256, 70, dmg, pierce, if evo { 6 } else { 4 });
+            k = k + 1;
+        }
+        sound(r, s_rivet(), if evo { 1 } else { 0 }, px);
+        true
+    } else if u == shockwave() {
+        let rings = r.rings;
+        let n = if evo { 2 } else { 1 };
+        let mut k = 0;
+        while k < n {
+            let i = spawn(rings);
+            if i >= 0 {
+                r.shock = r.shock + 1;
+                col(rings, ri_x()).set(i, px);
+                col(rings, ri_y()).set(i, py);
+                col(rings, ri_r()).set(i, -k * 90);
+                col(rings, ri_max()).set(i, area(r, if evo { 150 } else { at(lv, 80, 88, 96, 104, 116) }));
+                col(rings, ri_dmg()).set(i, might(r, if evo { 70 } else { at(lv, 20, 25, 30, 36, 45) }));
+                col(rings, ri_id()).set(i, r.shock);
+                col(rings, ri_life()).set(i, 1);
+            }
+            k = k + 1;
+        }
+        sound(r, s_shock(), 0, px);
+        flash(r, px, py, 80, 16, 200, 0);
+        true
+    } else if u == seekers() {
+        let n = (if evo { 6 } else { at(lv, 1, 2, 2, 3, 3) }) + amount;
+        let dmg = might(r, if evo { 30 } else { at(lv, 12, 14, 17, 20, 24) });
+        let mut k = 0;
+        while k < n {
+            let a = roll(r, 1024);
+            new_shot(r, 1, px, py, (cos(r.table, a) * 30) >> 16, (sin(r.table, a) * 30) >> 16, if evo { 300 } else { 220 }, dmg, if evo { 3 } else { 1 }, 5);
+            k = k + 1;
+        }
+        sound(r, s_seeker(), 0, px);
+        true
+    } else if u == spill() {
+        // (only while moving: a puddle where the robot has just been)
+        if r.moving > 0 {
+            let puddles = r.puddles;
+            let i = spawn(puddles);
+            if i >= 0 {
+                let life = if evo { 300 } else { at(lv, 120, 150, 170, 190, 220) };
+                col(puddles, pu_x()).set(i, px);
+                col(puddles, pu_y()).set(i, py + 64);
+                col(puddles, pu_life()).set(i, life);
+                col(puddles, pu_max()).set(i, life);
+                col(puddles, pu_r()).set(i, area(r, if evo { 22 } else { at(lv, 12, 13, 14, 15, 17) }));
+                col(puddles, pu_dmg()).set(i, might(r, if evo { 14 } else { at(lv, 4, 5, 6, 7, 9) }));
+            }
+            true
+        } else { false }
+    } else if u == tesla() {
+        let casts = if evo { 2 } else { 1 };
+        let mut any = false;
+        let mut k = 0;
+        while k < casts {
+            if lightning(r, if evo { 10 } else { at(lv, 3, 4, 5, 6, 7) } + amount, might(r, if evo { 40 } else { at(lv, 16, 19, 22, 26, 30) }), area(r, 70)) { any = true }
+            k = k + 1;
+        }
+        if any { sound(r, s_zap(), 0, px) }
+        any
+    } else {
+        // crates: onto creatures near enough to see, or anywhere about
+        let n = (if evo { 6 } else { at(lv, 1, 1, 2, 2, 3) }) + amount;
+        let found = nearby(r, px, py, 220);
+        let mut k = 0;
+        while k < n {
+            let (tx, ty) = if found > 0 {
+                let j = r.near.get(roll(r, found));
+                (r.foes.x.get(j), r.foes.y.get(j))
+            } else { (px + (roll(r, 320) - 160) * 16, py + (roll(r, 200) - 100) * 16) };
+            let i = new_shot(r, 2, tx, ty, 0, 0, 40 + k * 8, might(r, if evo { 120 } else { at(lv, 40, 50, 60, 70, 90) }), 0, area(r, if evo { 44 } else { at(lv, 26, 28, 30, 32, 36) }));
+            if i >= 0 { col(r.shots, sh_t()).set(i, 40 + k * 8) }
+            k = k + 1;
+        }
+        true
+    }
+}
+
+// (dx, dy) as a direction 256 long
+pub fn unit(dx: Int, dy: Int) -> (Int, Int) {
+    let d = isqrt(dx * dx + dy * dy).max(1);
+    (dx * 256 / d, dy * 256 / d)
+}
+
+fn new_shot(r: Run, kind: Int, x: Int, y: Int, vx: Int, vy: Int, life: Int, dmg: Int, pierce: Int, radius: Int) -> Int {
+    let p = r.shots;
+    let i = spawn(p);
+    if i >= 0 {
+        col(p, sh_x()).set(i, x);
+        col(p, sh_y()).set(i, y);
+        col(p, sh_vx()).set(i, vx);
+        col(p, sh_vy()).set(i, vy);
+        col(p, sh_life()).set(i, life);
+        col(p, sh_kind()).set(i, kind);
+        col(p, sh_dmg()).set(i, dmg);
+        col(p, sh_pierce()).set(i, pierce);
+        col(p, sh_r()).set(i, radius);
+        col(p, sh_hit()).set(i, -1);
+    }
+    i
+}
+
+// lightning: at a creature near the robot, then leaping to the nearest
+// it hasn't struck yet, again and again
+fn lightning(r: Run, leaps: Int, dmg: Int, range: Int) -> Bool {
+    let f = r.foes;
+    let (px, py) = (r.x, r.y);
+    let found = nearby(r, px, py, 200);
+    if found == 0 { false } else {
+        let struck = array(16, -1);
+        let mut at_i = r.near.get(roll(r, found));
+        let mut fx = px;
+        let mut fy = py - 96;
+        let mut k = 0;
+        while k < leaps && at_i >= 0 {
+            let (tx, ty) = (f.x.get(at_i), f.y.get(at_i));
+            zap(r, fx, fy, tx, ty);
+            flash(r, tx, ty, 40, 10, 200, 30);
+            struck.set(k.min(15), f.id.get(at_i));
+            hurt(r, at_i, dmg, 0, 0, tesla());
+            fx = tx;
+            fy = ty;
+            // (the next: the nearest not struck yet)
+            let n = nearby(r, tx, ty, range);
+            let mut best = -1;
+            let mut best_d = 1 << 60;
+            let mut j = 0;
+            while j < n {
+                let c = r.near.get(j);
+                let id = f.id.get(c);
+                let mut seen = false;
+                let mut s = 0;
+                while s < 16 {
+                    if struck.get(s) == id { seen = true }
+                    s = s + 1;
+                }
+                let dx = f.x.get(c) - tx;
+                let dy = f.y.get(c) - ty;
+                if !seen && dx * dx + dy * dy < best_d {
+                    best_d = dx * dx + dy * dy;
+                    best = c;
+                }
+                j = j + 1;
+            }
+            at_i = best;
+            k = k + 1;
+        }
+        true
+    }
+}
+
+fn zap(r: Run, x0: Int, y0: Int, x1: Int, y1: Int) {
+    let p = r.zaps;
+    let i = spawn(p);
+    if i >= 0 {
+        col(p, za_x0()).set(i, x0 >> 4);
+        col(p, za_y0()).set(i, y0 >> 4);
+        col(p, za_x1()).set(i, x1 >> 4);
+        col(p, za_y1()).set(i, y1 >> 4);
+        col(p, za_life()).set(i, 12);
+        col(p, za_seed()).set(i, roll(r, 100000));
+    }
+}
+
+// the drones: circling, each hurting what it hits (each creature
+// at most every third of a second)
+pub fn drone_radius(r: Run) -> Int {
+    let lv = r.lv.get(drones());
+    area(r, if r.evo.get(drones()) > 0 { 56 } else { at(lv, 34, 36, 40, 42, 46) })
+}
+
+pub fn drone_count(r: Run) -> Int {
+    let lv = r.lv.get(drones());
+    if r.evo.get(drones()) > 0 { 8 } else { at(lv, 2, 3, 3, 4, 5) + stat(r, st_amount()) }
+}
+
+fn spin_drones(r: Run, lv: Int, evo: Bool) {
+    let f = r.foes;
+    r.drones = r.drones + (if evo { 12 } else { 9 });
+    let n = drone_count(r);
+    let radius = drone_radius(r);
+    let orb = area(r, if evo { 8 } else { 6 });
+    let dmg = might(r, if evo { 26 } else { at(lv, 8, 10, 12, 15, 18) });
+    let (px, py) = (r.x, r.y);
+    let mut k = 0;
+    while k < n {
+        let a = r.drones + k * 1024 / n;
+        let (ox, oy) = (px + ((cos(r.table, a) * radius) >> 12), py + ((sin(r.table, a) * radius) >> 12));
+        let found = nearby(r, ox, oy, orb + 10);
+        let mut j = 0;
+        while j < found {
+            let i = r.near.get(j);
+            let reach_px = orb + f.r.get(i);
+            let dx = f.x.get(i) - ox;
+            let dy = f.y.get(i) - oy;
+            if f.drone.get(i) == 0 && dx * dx + dy * dy < reach_px * reach_px * 256 {
+                f.drone.set(i, 20);
+                let (ux, uy) = unit(f.x.get(i) - px, f.y.get(i) - py);
+                hurt(r, i, dmg, ux / 8, uy / 8, drones());
+            }
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+}
+
+// the lasers: turning round the robot, stopped by what blocks light;
+// what's in one is cut a little every few frames
+pub fn beam_count(r: Run) -> Int {
+    if r.evo.get(laser()) > 0 { 3 } else { at(r.lv.get(laser()), 1, 1, 1, 2, 2) }
+}
+
+pub fn beam_length(r: Run) -> Int {
+    area(r, if r.evo.get(laser()) > 0 { 200 } else { at(r.lv.get(laser()), 110, 124, 138, 150, 166) })
+}
+
+pub fn beam_width(r: Run) -> Int { if r.evo.get(laser()) > 0 { 30 } else { 22 } }
+
+fn sweep_beams(r: Run, lv: Int, evo: Bool) {
+    let f = r.foes;
+    r.beam = r.beam + (if evo { 8 } else { 6 });
+    let n = beam_count(r);
+    let len = beam_length(r);
+    let half = beam_width(r) / 2;
+    let dmg = might(r, if evo { 16 } else { at(lv, 5, 6, 8, 9, 11) });
+    let (px, py) = (r.x, r.y);
+    let found = nearby(r, px, py, len + 10);
+    let mut b = 0;
+    while b < n {
+        let a = r.beam + b * 1024 / n;
+        let (bx, by) = (cos(r.table, a), sin(r.table, a));
+        let far = reach(r.w, px >> 4, py >> 4, a, len, r.table) * 16;
+        // (the beam's half width, as a slope: tan of half the angle, in 256ths)
+        let slope = sin(r.table, half) * 256 / cos(r.table, half);
+        let mut j = 0;
+        while j < found {
+            let i = r.near.get(j);
+            let dx = f.x.get(i) - px;
+            let dy = f.y.get(i) - py;
+            let along = (dx * bx + dy * by) >> 16;
+            let across = ((dx * by - dy * bx) >> 16).abs();
+            if along > 0 && along < far && across * 256 < along * slope + f.r.get(i) * 256 * 16 && f.beam.get(i) == 0 {
+                f.beam.set(i, 8);
+                hurt(r, i, dmg, bx >> 13, by >> 13, laser());
+            }
+            j = j + 1;
+        }
+        b = b + 1;
+    }
+}
+
+// ---- what the weapons made, each frame
+
+pub fn move_shots(r: Run) {
+    let p = r.shots;
+    let f = r.foes;
+    let (xs, ys, vxs, vys, life, kind) = (col(p, sh_x()), col(p, sh_y()), col(p, sh_vx()), col(p, sh_vy()), col(p, sh_life()), col(p, sh_kind()));
+    let n = count(p);
+    let mut i = 0;
+    while i < n {
+        let k = kind.get(i);
+        if k == 2 {
+            // a crate, falling: when it lands, it smashes
+            let t = col(p, sh_t()).get(i) - 1;
+            col(p, sh_t()).set(i, t);
+            if t <= 0 {
+                let (x, y) = (xs.get(i), ys.get(i));
+                let radius = col(p, sh_r()).get(i);
+                let found = nearby(r, x, y, radius + 8);
+                let mut j = 0;
+                while j < found {
+                    let c = r.near.get(j);
+                    let (ux, uy) = unit(f.x.get(c) - x, f.y.get(c) - y);
+                    hurt(r, c, col(p, sh_dmg()).get(i), ux / 6, uy / 6, cargo());
+                    j = j + 1;
+                }
+                burst(r, x, y, 26, rgb(255, 200, 120), 70, 26);
+                motes(r, x, y, 12, rgb(170, 160, 150));
+                flash(r, x, y, radius * 3, 24, 230, 0);
+                shake(r, 5);
+                sound(r, s_boom(), 0, x);
+                life.set(i, 0);
+            }
+        } else {
+            if k == 1 && (life.get(i) + i) % 8 == 0 {
+                // a seeker, turning toward the nearest creature
+                let target = nearest(r, xs.get(i), ys.get(i), 160);
+                if target >= 0 {
+                    let (ux, uy) = unit(f.x.get(target) - xs.get(i), f.y.get(target) - ys.get(i));
+                    let vx = vxs.get(i) + ux * 14 / 256;
+                    let vy = vys.get(i) + uy * 14 / 256;
+                    let (sx, sy) = unit(vx, vy);
+                    vxs.set(i, sx * 44 / 256);
+                    vys.set(i, sy * 44 / 256);
+                }
+            }
+            let x = xs.get(i) + vxs.get(i);
+            let y = ys.get(i) + vys.get(i);
+            xs.set(i, x);
+            ys.set(i, y);
+            life.set(i, life.get(i) - 1);
+            // (rivets and seekers both: stopped by machinery and walls)
+            if !walkable16(r, x, y) && super::world::occ_at(r.w, x >> 4, y >> 4) == super::world::walls() {
+                life.set(i, 0);
+                burst(r, x, y, 4, if k == 1 { rgb(120, 220, 255) } else { rgb(255, 210, 150) }, 30, 12);
+            }
+            let radius = col(p, sh_r()).get(i);
+            let found = nearby(r, x, y, radius + 10);
+            let mut j = 0;
+            while j < found && life.get(i) > 0 {
+                let c = r.near.get(j);
+                let reach_px = radius + f.r.get(c);
+                let dx = f.x.get(c) - x;
+                let dy = f.y.get(c) - y;
+                if dx * dx + dy * dy < reach_px * reach_px * 256 && f.id.get(c) != col(p, sh_hit()).get(i) {
+                    col(p, sh_hit()).set(i, f.id.get(c));
+                    hurt(r, c, col(p, sh_dmg()).get(i), vxs.get(i) / 3, vys.get(i) / 3, if k == 1 { seekers() } else { rivets() });
+                    burst(r, x, y, 3, if k == 1 { rgb(140, 230, 255) } else { rgb(255, 230, 170) }, 30, 10);
+                    let left = col(p, sh_pierce()).get(i) - 1;
+                    col(p, sh_pierce()).set(i, left);
+                    if left <= 0 { life.set(i, 0) }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    sweep(p, sh_life());
+}
+
+// shockwaves spreading: each creature they reach hurt once and thrown back
+pub fn spread_rings(r: Run) {
+    let p = r.rings;
+    let f = r.foes;
+    let n = count(p);
+    let mut i = 0;
+    while i < n {
+        let radius = col(p, ri_r()).get(i) + 5;
+        col(p, ri_r()).set(i, radius);
+        if radius > 0 {
+            let (x, y) = (col(p, ri_x()).get(i), col(p, ri_y()).get(i));
+            let id = col(p, ri_id()).get(i);
+            let found = nearby(r, x, y, radius + 6);
+            let mut j = 0;
+            while j < found {
+                let c = r.near.get(j);
+                if f.ring.get(c) != id {
+                    let dx = f.x.get(c) - x;
+                    let dy = f.y.get(c) - y;
+                    let inner = (radius - 14).max(0);
+                    if dx * dx + dy * dy >= inner * inner * 256 {
+                        f.ring.set(c, id);
+                        let (ux, uy) = unit(dx, dy);
+                        hurt(r, c, col(p, ri_dmg()).get(i), ux * 48 / 256, uy * 48 / 256, shockwave());
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        if radius >= col(p, ri_max()).get(i) { col(p, ri_life()).set(i, 0) }
+        i = i + 1;
+    }
+    sweep(p, ri_life());
+}
+
+// puddles of cleaner on the floor, eating at what stands in them
+pub fn corrode(r: Run) {
+    let p = r.puddles;
+    let f = r.foes;
+    let n = count(p);
+    let mut i = 0;
+    while i < n {
+        let life = col(p, pu_life()).get(i) - 1;
+        col(p, pu_life()).set(i, life);
+        let (x, y, radius) = (col(p, pu_x()).get(i), col(p, pu_y()).get(i), col(p, pu_r()).get(i));
+        if (life + i) % 3 == 0 {
+            spark(r, x + (roll(r, radius * 2) - radius) * 14, y + (roll(r, radius) - radius / 2) * 14, roll(r, 7) - 3, -10 - roll(r, 12), 16 + roll(r, 18), rgb(120, 230 + roll(r, 25), 110), 1);
+        }
+        let found = nearby(r, x, y, radius + 8);
+        let mut j = 0;
+        while j < found {
+            let c = r.near.get(j);
+            let reach_px = radius + f.r.get(c) / 2;
+            let dx = f.x.get(c) - x;
+            let dy = f.y.get(c) - y;
+            if f.wet.get(c) == 0 && dx * dx + dy * dy < reach_px * reach_px * 256 {
+                f.wet.set(c, 15);
+                hurt(r, c, col(p, pu_dmg()).get(i), 0, 0, spill());
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    sweep(p, pu_life());
+}
+
+// ---- levels
+
+// how much scrap the next level takes
+pub fn needed(level: Int) -> Int { 5 + level * 6 + level * level / 5 }
+
+// the upgrades offered at a level: n different ones the robot can take
+// (one it has, not at its last level, or a new one while it has room)
+pub fn offers(r: Run, n: Int) -> Array<Int> {
+    let can = array(14, 0);
+    let mut weapons_had = 0;
+    let mut modules_had = 0;
+    let mut u = 0;
+    while u < 14 {
+        if r.lv.get(u) > 0 { if is_weapon(u) { weapons_had = weapons_had + 1 } else { modules_had = modules_had + 1 } }
+        u = u + 1;
+    }
+    let mut total = 0;
+    u = 0;
+    while u < 14 {
+        let lv = r.lv.get(u);
+        let room = if is_weapon(u) { weapons_had < slots() } else { modules_had < slots() };
+        let ok = (lv > 0 && lv < max_level()) || (lv == 0 && room);
+        // (weapons the robot has are offered more often than the rest)
+        let weight = if !ok { 0 } else if lv > 0 && is_weapon(u) { 3 } else if lv > 0 { 2 } else { 2 };
+        can.set(u, weight);
+        total = total + weight;
+        u = u + 1;
+    }
+    let out = array(n, -1);
+    let mut k = 0;
+    while k < n && total > 0 {
+        let mut pick = roll(r, total);
+        let mut c = 0;
+        let mut chosen = -1;
+        while c < 14 && chosen < 0 {
+            let w = can.get(c);
+            if pick < w { chosen = c } else { pick = pick - w }
+            c = c + 1;
+        }
+        if chosen >= 0 {
+            out.set(k, chosen);
+            total = total - can.get(chosen);
+            can.set(chosen, 0);
+        }
+        k = k + 1;
+    }
+    out
+}
+
+pub fn take(r: Run, u: Int) {
+    if u >= 0 {
+        r.lv.set(u, (r.lv.get(u) + 1).min(max_level()));
+        let old_max = stat(r, st_maxhp());
+        restat(r);
+        // (more integrity to have comes repaired)
+        r.hp = r.hp + ((stat(r, st_maxhp()) - old_max).max(0) * 16);
+    }
+}
+
+// a weapon that could evolve now: at its last level, with its module
+pub fn evolvable(r: Run) -> Int {
+    let mut found = -1;
+    let mut u = 0;
+    while u < 8 && found < 0 {
+        if r.lv.get(u) >= max_level() && r.evo.get(u) == 0 && r.lv.get(partner(u)) > 0 { found = u }
+        u = u + 1;
+    }
+    found
+}

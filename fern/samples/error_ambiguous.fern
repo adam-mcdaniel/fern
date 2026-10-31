@@ -1,0 +1,11 @@
+// A requirement on a type nothing decides can't be met: which Show would
+// show the elements of an empty list of nothing in particular?
+
+fn describe() -> String {
+    Nil.show()
+}
+
+fn main() {
+    println(describe());
+}
+// error: describe needs Show<a>, but nothing says what type a is

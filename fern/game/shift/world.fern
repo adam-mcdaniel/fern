@@ -1,0 +1,835 @@
+// The deck: 1536 pixels square, laid out new each shift, in one of three
+// parts of the station. Each pixel is a color of the region's palette,
+// eight ramps of eight shades (see art::land_colors):
+//
+//   0 deck plating                  8 a second floor (soil beds, frost, tiles)
+//   16 grating (walkways)           24 what stands (plants, cryo pods, bulkheads)
+//   32 machinery                    40 spots of color (42 hazard yellow, 47 black)
+//   48 the relays' pads             56 water, slush or coolant (58 to 63 shimmer)
+//
+// and every 4 x 4 pixels a cell says what's there to walk on: open, slow
+// (slush, shallow water), blocking (deep water, coolant), or blocking light
+// too (machinery, plants, pods, walls), which is what throws shadows.
+//
+// A shift's deck is open bays joined by walkways, each bay with a power
+// relay in it, and the region's own fittings around them; the robot starts
+// in the middle one.
+
+use crate::math::{isqrt};
+
+pub fn size() -> Int { 1536 }
+// the cells: 4 pixels square
+pub fn cell() -> Int { 4 }
+pub fn cells() -> Int { 384 }
+
+pub fn open() -> Int { 0 }
+pub fn slow() -> Int { 1 }
+pub fn blocks() -> Int { 2 }
+pub fn walls() -> Int { 3 }
+
+pub struct World {
+    region: Int,
+    idx: Array<Int>,
+    occ: Array<Int>,
+    // where the relays are: x, y (pixels) for each
+    relays: Array<Int>,
+    // little lights that are always there: x, y, radius, lamp, bloom
+    glows: Array<Int>,
+    // where the player starts
+    start_x: Int,
+    start_y: Int,
+}
+
+pub fn relay_count(w: World) -> Int { w.relays.len() / 2 }
+
+// what's at (x, y), in pixels: outside the deck is wall
+pub fn occ_at(w: World, x: Int, y: Int) -> Int {
+    if x < 0 || y < 0 || x >= size() || y >= size() { walls() } else { w.occ.get((y >> 2) * cells() + (x >> 2)) }
+}
+
+pub fn walkable(w: World, x: Int, y: Int) -> Bool { occ_at(w, x, y) < blocks() }
+
+// ---- noise
+
+// a number 0 to 65535 that looks random, for each (x, y) and seed
+pub fn hash(x: Int, y: Int, s: Int) -> Int {
+    let mut h = x * 374761393 + y * 668265263 + s * 1442695041;
+    h = (h ^ (h >> 13)) * 1274126177;
+    (h ^ (h >> 16)) & 0xffff
+}
+
+// smooth noise, 0 to 255, changing over `cell` pixels: random values at
+// the corners of a grid, blended between with a smooth step
+fn value_noise(x: Int, y: Int, cell: Int, s: Int) -> Int {
+    let (gx, gy) = (x / cell, y / cell);
+    let fx = smooth((x % cell) * 256 / cell);
+    let fy = smooth((y % cell) * 256 / cell);
+    let a = hash(gx, gy, s) & 255;
+    let b = hash(gx + 1, gy, s) & 255;
+    let c = hash(gx, gy + 1, s) & 255;
+    let d = hash(gx + 1, gy + 1, s) & 255;
+    let top = a + (((b - a) * fx) >> 8);
+    let bottom = c + (((d - c) * fx) >> 8);
+    top + (((bottom - top) * fy) >> 8)
+}
+
+fn smooth(t: Int) -> Int { (t * t * (768 - 2 * t)) >> 16 }
+
+// noise at three scales together: big shapes with smaller detail
+fn fractal(x: Int, y: Int, s: Int) -> Int {
+    (value_noise(x, y, 96, s) * 4 + value_noise(x, y, 40, s + 1) * 2 + value_noise(x, y, 16, s + 2)) / 7
+}
+
+// a field of noise, one value a cell (4 pixels), stretched to 0 to 255
+fn field(s: Int) -> Array<Int> {
+    let n = cells();
+    let f = array(n * n, 0);
+    let mut lo = 255;
+    let mut hi = 0;
+    let mut y = 0;
+    while y < n {
+        let mut x = 0;
+        while x < n {
+            let v = fractal(x * 4, y * 4, s);
+            f.set(y * n + x, v);
+            lo = lo.min(v);
+            hi = hi.max(v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let span = (hi - lo).max(1);
+    let mut i = 0;
+    while i < n * n {
+        f.set(i, (f.get(i) - lo) * 255 / span);
+        i = i + 1;
+    }
+    f
+}
+
+// a field at a pixel, blended between its cells
+fn field_at(f: Array<Int>, x: Int, y: Int) -> Int {
+    let n = cells();
+    let (cx, cy) = ((x >> 2).min(n - 2), (y >> 2).min(n - 2));
+    let (fx, fy) = ((x & 3) * 64, (y & 3) * 64);
+    let a = f.get(cy * n + cx);
+    let b = f.get(cy * n + cx + 1);
+    let c = f.get(cy * n + n + cx);
+    let d = f.get(cy * n + n + cx + 1);
+    let top = a + (((b - a) * fx) >> 8);
+    let bottom = c + (((d - c) * fx) >> 8);
+    top + (((bottom - top) * fy) >> 8)
+}
+
+// ordered dithering: a threshold for each pixel of a 4 x 4 tile, 0 to 255,
+// so a ramp's shades blend into each other in a fine pattern
+fn bayer(x: Int, y: Int) -> Int {
+    // (the 4 x 4 Bayer matrix, a digit each, as one number in base 16)
+    let m = (y & 3) * 4 + (x & 3);
+    ((0x082AC4E63B19F7D5 >> ((15 - m) * 4)) & 15) * 16 + 8
+}
+
+// a shade of a ramp for a value 0 to 255, dithered
+fn shade_of(ramp: Int, v: Int, x: Int, y: Int) -> Int {
+    ramp + ((v * 7 + bayer(x, y)) >> 8).clamp(0, 7)
+}
+
+// ---- making a shift's deck
+
+pub fn make(region: Int, seed: Int) -> World {
+    let n = size();
+    let idx = array(n * n, 0);
+    let occ = array(cells() * cells(), open());
+    let tone = field(seed);
+    let patch = field(seed + 17);
+    let thick = field(seed + 41);
+    // the bays, each with a relay, and the walkways between
+    let clear = bays(seed);
+    let path = array(cells() * cells(), 0);
+    paths(clear, path, seed);
+    let glows = Glows { at: array(4000 * 5, 0), n: 0 };
+    let mut y = 0;
+    while y < n {
+        let mut x = 0;
+        while x < n {
+            let t = field_at(tone, x, y);
+            let p = field_at(patch, x, y);
+            let on_path = path.get((y >> 2) * cells() + (x >> 2)) > 0 && field_at(path, x, y) + (hash(x, y, seed + 6) & 63) > 150;
+            idx.set(y * n + x, ground(region, x, y, t, p, on_path, seed));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // slush and coolant: what's walked through slowly, or not at all
+    if region != 0 {
+        let mut cy = 0;
+        while cy < cells() {
+            let mut cx = 0;
+            while cx < cells() {
+                let p = patch.get(cy * cells() + cx);
+                let near = near_bay(clear, cx * 4, cy * 4, 24) || path.get(cy * cells() + cx) > 0;
+                if !near {
+                    if region == 1 && p > 150 { occ.set(cy * cells() + cx, if p > 190 { blocks() } else { slow() }) }
+                    if region == 2 && p > 196 { occ.set(cy * cells() + cx, blocks()) }
+                }
+                cx = cx + 1;
+            }
+            cy = cy + 1;
+        }
+        paint_water(idx, occ, region, seed);
+    }
+    // what stands: plants, pods, or bulkheads, and machinery
+    if region == 2 { bulkheads(idx, occ, clear, path, thick, seed, glows) } else { plants(idx, occ, clear, path, thick, region, seed, glows) }
+    // the deck's edge, all round: the hull
+    edge(idx, occ, region, seed);
+    // the relays: each on its pad, in the middle of its bay
+    let relays = array(clear.len() / 3 * 2, 0);
+    let mut i = 0;
+    while i < clear.len() / 3 {
+        let (bx, by) = (clear.get(i * 3), clear.get(i * 3 + 1));
+        pad(idx, occ, bx, by, seed);
+        relays.set(i * 2, bx);
+        relays.set(i * 2 + 1, by);
+        i = i + 1;
+    }
+    let count = glows.n;
+    let gl = array(count * 5, 0);
+    let mut j = 0;
+    while j < count * 5 {
+        gl.set(j, glows.at.get(j));
+        j = j + 1;
+    }
+    World { region: region, idx: idx, occ: occ, relays: relays, glows: gl, start_x: n / 2, start_y: n / 2 + 26 }
+}
+
+// what the floor is at a pixel: plating, the region's second floor where
+// the noise says, and grating where the walkways run
+fn ground(region: Int, x: Int, y: Int, t: Int, p: Int, on_path: Bool, seed: Int) -> Int {
+    let h = hash(x, y, seed + 5);
+    if on_path { grating(x, y, h) }
+    else if region == 0 && p > 160 {
+        // soil beds, with shoots coming up
+        if h & 1023 < 12 { 40 + 6 } else { shade_of(8, (t * 3 / 4 + (h & 31)).clamp(0, 255), x, y) }
+    }
+    else if region == 1 && p > 112 && p < 150 {
+        // frost, thickest in the middle of a patch
+        shade_of(8, (90 + (p - 112) * 3 + (h & 31) - 16).clamp(0, 255), x, y)
+    }
+    else if region == 2 && p > 128 && p < 190 {
+        // tiles, 16 pixels square, each its own shade
+        let (ix, iy) = (x & 15, y & 15);
+        if ix == 0 || iy == 0 { 8 + 1 } else {
+            let tile = hash(x / 16, y / 16, seed + 9) & 63;
+            shade_of(8, (tile + 80 + (h & 15) - (if iy == 15 || ix == 15 { 40 } else { 0 })).clamp(0, 255), x, y)
+        }
+    }
+    else { plate(x, y, t, h, seed) }
+}
+
+// deck plating: plates 32 pixels square, their seams, a bevel lit from the
+// top left, a rivet at each corner; each plate a little different, and
+// grime where the noise is low
+fn plate(x: Int, y: Int, t: Int, h: Int, seed: Int) -> Int {
+    let (ix, iy) = (x & 31, y & 31);
+    if ix == 0 || iy == 0 { 1 }
+    else if ix == 1 || iy == 1 { 5 }
+    else if ix == 31 || iy == 31 { 2 }
+    else if (ix == 4 || ix == 27) && (iy == 4 || iy == 27) { 6 }
+    else if (ix == 5 || ix == 28) && (iy == 5 || iy == 28) { 2 }
+    else {
+        let tone = hash(x / 32, y / 32, seed + 9) & 31;
+        shade_of(0, (60 + tone + t / 3 + (h & 15) - 8).clamp(0, 255), x, y)
+    }
+}
+
+// grating: slats with dark gaps between, the gaps' shadows below them
+fn grating(x: Int, y: Int, h: Int) -> Int {
+    let row = y & 3;
+    if row == 0 { 16 } else if row == 1 { 16 + 2 } else { 16 + 4 + (if (x + (y >> 2) * 3) % 11 == 0 { 1 } else { 0 }) + (h & 1) }
+}
+
+// the bays: x, y, radius for each, the first in the middle, the rest
+// spread over the deck, not too close to each other
+fn bays(seed: Int) -> Array<Int> {
+    let found = array(18 * 3, 0);
+    found.set(0, size() / 2);
+    found.set(1, size() / 2);
+    found.set(2, 74);
+    let mut count = 1;
+    let mut tries = 0;
+    while count < 18 && tries < 4000 {
+        let h = hash(tries, 77, seed);
+        let h2 = hash(tries, 91, seed);
+        let x = 140 + h * (size() - 280) / 65536;
+        let y = 140 + h2 * (size() - 280) / 65536;
+        let mut ok = true;
+        let mut i = 0;
+        while i < count {
+            let dx = x - found.get(i * 3);
+            let dy = y - found.get(i * 3 + 1);
+            if dx * dx + dy * dy < 250 * 250 { ok = false }
+            i = i + 1;
+        }
+        if ok {
+            found.set(count * 3, x);
+            found.set(count * 3 + 1, y);
+            found.set(count * 3 + 2, 44 + (h >> 4) % 30);
+            count = count + 1;
+        }
+        tries = tries + 1;
+    }
+    let out = array(count * 3, 0);
+    let mut j = 0;
+    while j < count * 3 {
+        out.set(j, found.get(j));
+        j = j + 1;
+    }
+    out
+}
+
+fn near_bay(clear: Array<Int>, x: Int, y: Int, margin: Int) -> Bool {
+    let mut i = 0;
+    let mut near = false;
+    while i < clear.len() / 3 && !near {
+        let dx = x - clear.get(i * 3);
+        let dy = y - clear.get(i * 3 + 1);
+        let r = clear.get(i * 3 + 2) + margin;
+        if dx * dx + dy * dy < r * r { near = true }
+        i = i + 1;
+    }
+    near
+}
+
+// paths from each bay to the two nearest, wandering a little: marked
+// in cells
+fn paths(clear: Array<Int>, path: Array<Int>, seed: Int) {
+    let count = clear.len() / 3;
+    let mut i = 0;
+    while i < count {
+        let (ax, ay) = (clear.get(i * 3), clear.get(i * 3 + 1));
+        // (the nearest two, by trying each)
+        let mut best = -1;
+        let mut best_d = 1 << 40;
+        let mut second = -1;
+        let mut second_d = 1 << 40;
+        let mut j = 0;
+        while j < count {
+            if j != i {
+                let dx = clear.get(j * 3) - ax;
+                let dy = clear.get(j * 3 + 1) - ay;
+                let d = dx * dx + dy * dy;
+                if d < best_d {
+                    second = best;
+                    second_d = best_d;
+                    best = j;
+                    best_d = d;
+                } else if d < second_d {
+                    second = j;
+                    second_d = d;
+                }
+            }
+            j = j + 1;
+        }
+        if best >= 0 { trail(path, ax, ay, clear.get(best * 3), clear.get(best * 3 + 1), seed + i) }
+        if second >= 0 { trail(path, ax, ay, clear.get(second * 3), clear.get(second * 3 + 1), seed + i * 7) }
+        i = i + 1;
+    }
+}
+
+fn trail(path: Array<Int>, ax: Int, ay: Int, bx: Int, by: Int, seed: Int) {
+    let len = isqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay)).max(1);
+    let mut s = 0;
+    while s <= len {
+        // (sideways by the noise along it, nothing at either end)
+        let bend = (value_noise(s, 0, 60, seed) - 128) * 30 / 128 * (len - s).min(s).min(80) / 80;
+        let x = ax + (bx - ax) * s / len + (-(by - ay)) * bend / len;
+        let y = ay + (by - ay) * s / len + (bx - ax) * bend / len;
+        let mut oy = -1;
+        while oy <= 1 {
+            let mut ox = -1;
+            while ox <= 1 {
+                let (cx, cy) = ((x >> 2) + ox, (y >> 2) + oy);
+                // (the middle full, the sides half: blended, a path about 8 pixels wide)
+                let v = if ox == 0 && oy == 0 { 255 } else if ox == 0 || oy == 0 { 140 } else { 60 };
+                if cx >= 0 && cy >= 0 && cx < cells() && cy < cells() && path.get(cy * cells() + cx) < v { path.set(cy * cells() + cx, v) }
+                ox = ox + 1;
+            }
+            oy = oy + 1;
+        }
+        s = s + 3;
+    }
+}
+
+// water's colors where the cells are wet: shallow and deep, a shimmer on it
+fn paint_water(idx: Array<Int>, occ: Array<Int>, region: Int, seed: Int) {
+    let n = size();
+    let mut y = 0;
+    while y < n {
+        let mut x = 0;
+        while x < n {
+            let o = occ.get((y >> 2) * cells() + (x >> 2));
+            if o == slow() || o == blocks() {
+                let h = hash(x, y, seed + 3);
+                let wave = value_noise(x + y / 3, y, 9, seed + 4);
+                let v = if o == blocks() { 0 + (h & 1) } else if wave > 150 { 2 + (h % 6) } else { 1 + (h & 1) };
+                idx.set(y * n + x, 56 + v.min(7));
+                // (floes of ice, in the cryo deck's slush)
+                if region == 1 && o == slow() && wave > 200 { idx.set(y * n + x, 8 + 6) }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// little lights that are always there, as they're found: x, y, radius,
+// lamp, bloom for each, and how many
+struct Glows { at: Array<Int>, n: Int }
+
+fn add_glow(glows: Glows, x: Int, y: Int, r: Int, lamp: Int, bloom: Int) {
+    let c = glows.n;
+    if c * 5 + 5 <= glows.at.len() {
+        glows.at.set(c * 5, x);
+        glows.at.set(c * 5 + 1, y);
+        glows.at.set(c * 5 + 2, r);
+        glows.at.set(c * 5 + 3, lamp);
+        glows.at.set(c * 5 + 4, bloom);
+        glows.n = c + 1;
+    }
+}
+
+// ---- what stands: plants and pods, and machinery
+
+// what stands scattered over a jittered grid, as thick as the noise says,
+// not in the bays or on the walkways: in hydroponics, great plants spilling
+// out of their planters, with the bloom's fungus at their feet; on the cryo
+// deck, cryo pods, and lamps set in the floor. Each with its shadow, then
+// each in turn from the top down so the nearer overlap the farther; and
+// machinery among them.
+fn plants(idx: Array<Int>, occ: Array<Int>, clear: Array<Int>, path: Array<Int>, thick: Array<Int>, region: Int, seed: Int, glows: Glows) {
+    let step = if region == 0 { 24 } else { 34 };
+    let spots = array(5000 * 3, 0);
+    let mut count = 0;
+    let mut gy = 1;
+    while gy * step < size() - step {
+        let mut gx = 1;
+        while gx * step < size() - step {
+            let h = hash(gx, gy, seed + 23);
+            let x = gx * step + (h & 15) - 8;
+            let y = gy * step + ((h >> 4) & 15) - 8;
+            let r = if region == 0 { 8 + (h >> 8) % 8 } else { 6 + (h >> 8) % 6 };
+            let density = thick.get((y >> 2) * cells() + (x >> 2));
+            let keep = (h >> 12) * 16 < (if region == 0 { 70 + density * 3 / 4 } else { density * 3 / 5 });
+            let wet = occ_cell(occ, x, y) != open();
+            if keep && !wet && !near_bay(clear, x, y, r + 10) && !near_path(path, x, y, r + 4) && count < 5000 {
+                spots.set(count * 3, x);
+                spots.set(count * 3 + 1, y);
+                spots.set(count * 3 + 2, r);
+                count = count + 1;
+            }
+            gx = gx + 1;
+        }
+        gy = gy + 1;
+    }
+    // shadows
+    let mut i = 0;
+    while i < count {
+        darken_disc(idx, spots.get(i * 3) + 3, spots.get(i * 3 + 1) + 4, spots.get(i * 3 + 2) + 1, 3);
+        i = i + 1;
+    }
+    i = 0;
+    while i < count {
+        let (x, y, r) = (spots.get(i * 3), spots.get(i * 3 + 1), spots.get(i * 3 + 2));
+        let h = hash(x, y, seed);
+        if h % 7 == 0 {
+            machine(idx, occ, x, y, r * 2 / 3 + 2, seed + i)
+        } else if region == 1 {
+            pod(idx, x, y, r, seed + i);
+            fill_occ(occ, x, y, r * 4 / 5, walls());
+        } else {
+            canopy(idx, x, y, r, seed + i);
+            fill_occ(occ, x, y, r * 4 / 5, walls());
+        }
+        // the bloom's fungus, glowing, at the feet of some of the plants
+        if region == 0 && h % 5 == 1 {
+            let (mx, my) = (x + (h >> 3) % (2 * r + 6) - r - 3, y + r + 2 + (h >> 7) % 4);
+            mushrooms(idx, mx, my, h);
+            add_glow(glows, mx, my, 20, 0, 70);
+        }
+        i = i + 1;
+    }
+    // and on the cryo deck, lamps in the floor still lit, here and there
+    if region == 1 {
+        let mut k = 0;
+        while k < 200 {
+            let h = hash(k, 3, seed + 61);
+            let x = 40 + h * (size() - 80) / 65536;
+            let y = 40 + hash(k, 4, seed + 61) * (size() - 80) / 65536;
+            if occ_cell(occ, x, y) == open() && !near_path(path, x, y, 4) {
+                set_px(idx, x, y, 43);
+                set_px(idx, x + 1, y, 43);
+                set_px(idx, x, y + 1, 41);
+                set_px(idx, x + 1, y + 1, 41);
+                add_glow(glows, x, y, 28, 46, 0);
+            }
+            k = k + 1;
+        }
+        frost(idx, occ, seed);
+    }
+}
+
+fn occ_cell(occ: Array<Int>, x: Int, y: Int) -> Int {
+    if x < 0 || y < 0 || x >= size() || y >= size() { walls() } else { occ.get((y >> 2) * cells() + (x >> 2)) }
+}
+
+fn near_path(path: Array<Int>, x: Int, y: Int, r: Int) -> Bool {
+    let mut near = false;
+    let mut cy = (y - r) >> 2;
+    while cy <= (y + r) >> 2 && !near {
+        let mut cx = (x - r) >> 2;
+        while cx <= (x + r) >> 2 && !near {
+            if cx >= 0 && cy >= 0 && cx < cells() && cy < cells() && path.get(cy * cells() + cx) > 0 { near = true }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    near
+}
+
+fn set_px(idx: Array<Int>, x: Int, y: Int, v: Int) {
+    if x >= 0 && y >= 0 && x < size() && y < size() { idx.set(y * size() + x, v) }
+}
+
+// a disc of the ground made darker, by k shades of its own ramp
+fn darken_disc(idx: Array<Int>, x: Int, y: Int, r: Int, k: Int) {
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            if dx * dx + dy * dy <= r * r {
+                let (px, py) = (x + dx, y + dy);
+                if px >= 0 && py >= 0 && px < size() && py < size() {
+                    let v = idx.get(py * size() + px);
+                    if v < 40 || (v >= 48 && v < 56) { idx.set(py * size() + px, (v & 0x78) + ((v & 7) - k).max(0)) }
+                }
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+fn fill_occ(occ: Array<Int>, x: Int, y: Int, r: Int, what: Int) {
+    let mut cy = (y - r) >> 2;
+    while cy <= (y + r) >> 2 {
+        let mut cx = (x - r) >> 2;
+        while cx <= (x + r) >> 2 {
+            let (dx, dy) = (cx * 4 + 2 - x, cy * 4 + 2 - y);
+            if dx * dx + dy * dy <= r * r && cx >= 0 && cy >= 0 && cx < cells() && cy < cells() { occ.set(cy * cells() + cx, what) }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+}
+
+// a plant from above: a round mass of leaves with a ragged edge, lit from
+// the top left, in clumps
+fn canopy(idx: Array<Int>, x: Int, y: Int, r: Int, seed: Int) {
+    let rr = r + 2;
+    let mut dy = -rr;
+    while dy <= rr {
+        let mut dx = -rr;
+        while dx <= rr {
+            let (px, py) = (x + dx, y + dy);
+            let h = hash(px, py, seed);
+            let d2 = dx * dx + dy * dy;
+            let edge = r * r + (h & 31) - 12;
+            let clumps = value_noise(px + 512, py + 512, 5, seed & 255);
+            if d2 <= edge && px >= 0 && py >= 0 && px < size() && py < size() {
+                let lit = 3 * 256 + (-dx - dy) * 2 * 256 / r - d2 * 256 / (r * r) + (clumps - 128) * 3;
+                let v = (lit + bayer(px, py) - 128) >> 8;
+                idx.set(py * size() + px, 24 + v.clamp(0, 7));
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// machinery: a block (a console, a pump, a crate of parts), its top lit,
+// a darker face below, panel lines and a light or two on it
+fn machine(idx: Array<Int>, occ: Array<Int>, x: Int, y: Int, r: Int, seed: Int) {
+    let (w, h) = (r * 2 + 2 + hash(1, 2, seed) % 6, r * 2);
+    let (x0, y0) = (x - w / 2, y - h / 2);
+    darken_box(idx, x0 + 3, y0 + 4, w, h, 3);
+    let mut dy = 0;
+    while dy < h {
+        let mut dx = 0;
+        while dx < w {
+            let face = dy >= h - 4;
+            let v = if dx == 0 || dy == 0 { 6 } else if dx == w - 1 { 2 }
+                else if face { if dy == h - 4 { 1 } else { 2 } }
+                else if dy % 7 == 3 && dx > 2 && dx < w - 3 { 3 }
+                else { 4 + (hash(x0 + dx, y0 + dy, seed) & 1) };
+            set_px(idx, x0 + dx, y0 + dy, 32 + v);
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    // (its lights)
+    let k = hash(3, 4, seed);
+    set_px(idx, x0 + 2 + k % (w - 4).max(1), y0 + 2, 40 + k % 2);
+    set_px(idx, x0 + w - 3, y0 + h - 2, 42);
+    let mut cy = y0;
+    while cy < y0 + h {
+        let mut cx = x0;
+        while cx < x0 + w {
+            if cx >= 0 && cy >= 0 && cx < size() && cy < size() { occ.set((cy >> 2) * cells() + (cx >> 2), walls()) }
+            cx = cx + 4;
+        }
+        cy = cy + 4;
+    }
+}
+
+fn darken_box(idx: Array<Int>, x: Int, y: Int, w: Int, h: Int, k: Int) {
+    let mut dy = 0;
+    while dy < h {
+        let mut dx = 0;
+        while dx < w {
+            let (px, py) = (x + dx, y + dy);
+            if px >= 0 && py >= 0 && px < size() && py < size() {
+                let v = idx.get(py * size() + px);
+                if v < 24 || (v >= 48 && v < 56) { idx.set(py * size() + px, (v & 0x78) + ((v & 7) - k).max(0)) }
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// a cryo pod from above: a ring of metal, the glass lid within, frosted,
+// a highlight across it; and someone, dimly, inside
+fn pod(idx: Array<Int>, x: Int, y: Int, r: Int, seed: Int) {
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            let d2 = dx * dx + dy * dy;
+            if d2 <= r * r {
+                let rim = d2 > (r - 2) * (r - 2);
+                let v = if rim { 32 + (if dx + dy < 0 { 5 } else { 2 }) }
+                    else if (dx + dy).abs() <= 1 && dx < 0 { 24 + 7 }
+                    else if dx * dx * 4 + dy * dy < (r - 3) * (r - 3) && hash(x, y, seed) % 3 != 0 { 24 + 2 }
+                    else { 24 + 4 + (hash(x + dx, y + dy, seed) & 1) - (if dx + dy > 0 { 1 } else { 0 }) };
+                set_px(idx, x + dx, y + dy, v);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+fn mushrooms(idx: Array<Int>, x: Int, y: Int, h: Int) {
+    let mut k = 0;
+    while k < 3 {
+        let (mx, my) = (x + (h >> (k * 3)) % 5 - 2, y + (h >> (k * 3 + 1)) % 3);
+        set_px(idx, mx, my, 44);
+        set_px(idx, mx + 1, my, 44);
+        set_px(idx, mx, my - 1, 45);
+        k = k + 1;
+    }
+}
+
+// frost crystals at the edges of the slush: little spikes of white
+fn frost(idx: Array<Int>, occ: Array<Int>, seed: Int) {
+    let mut k = 0;
+    while k < 9000 {
+        let x = 8 + hash(k, 5, seed + 71) * (size() - 16) / 65536;
+        let y = 8 + hash(k, 6, seed + 71) * (size() - 16) / 65536;
+        if occ_cell(occ, x, y) == open() && (occ_cell(occ, x + 6, y) == slow() || occ_cell(occ, x - 6, y) == slow() || occ_cell(occ, x, y + 6) == slow()) {
+            let h = hash(x, y, seed);
+            set_px(idx, x, y, 40);
+            set_px(idx, x, y - 1, 43);
+            if h & 1 == 0 { set_px(idx, x - 1, y, 41); set_px(idx, x + 1, y, 41) }
+        }
+        k = k + 1;
+    }
+}
+
+// ---- what stands: the reactor's bulkheads
+
+// the walls of rooms, breached, pipes standing, and coolant leaking in
+// glowing streams across the floor
+fn bulkheads(idx: Array<Int>, occ: Array<Int>, clear: Array<Int>, path: Array<Int>, thick: Array<Int>, seed: Int, glows: Glows) {
+    let mut k = 0;
+    while k < 70 {
+        let h = hash(k, 1, seed + 33);
+        let x = 60 + h * (size() - 220) / 65536;
+        let y = 60 + hash(k, 2, seed + 33) * (size() - 220) / 65536;
+        let w = 48 + hash(k, 3, seed) % 100;
+        let ht = 48 + hash(k, 4, seed) % 90;
+        if !near_bay(clear, x + w / 2, y + ht / 2, (w.max(ht)) / 2 + 20) {
+            room(idx, occ, path, clear, x, y, w, ht, seed + k);
+        }
+        k = k + 1;
+    }
+    // pillars
+    k = 0;
+    while k < 260 {
+        let x = 30 + hash(k, 8, seed + 35) * (size() - 60) / 65536;
+        let y = 30 + hash(k, 9, seed + 35) * (size() - 60) / 65536;
+        if occ_cell(occ, x, y) == open() && !near_bay(clear, x, y, 12) && !near_path(path, x, y, 8) {
+            darken_disc(idx, x + 2, y + 4, 6, 3);
+            pillar(idx, x, y, seed + k);
+            fill_occ(occ, x, y, 5, walls());
+        }
+        k = k + 1;
+    }
+    // the leaks: wandering streams of coolant, glowing
+    k = 0;
+    while k < 90 {
+        let mut x = 30 + hash(k, 10, seed + 37) * (size() - 60) / 65536;
+        let mut y = 30 + hash(k, 11, seed + 37) * (size() - 60) / 65536;
+        let mut dir = hash(k, 12, seed) % 8;
+        let mut s = 0;
+        let len = 30 + hash(k, 13, seed) % 60;
+        while s < len {
+            if occ_cell(occ, x, y) == open() {
+                set_px(idx, x, y, if s % 5 == 0 { 41 } else { 40 });
+                set_px(idx, x + 1, y, 42);
+                if s % 14 == 0 { add_glow(glows, x, y, 26, 44, 0) }
+            }
+            let h = hash(x, y, seed + s);
+            if h % 4 == 0 { dir = (dir + (if h & 16 == 0 { 1 } else { 7 })) % 8 }
+            x = x + (if dir == 0 || dir == 1 || dir == 7 { 1 } else if dir >= 3 && dir <= 5 { -1 } else { 0 });
+            y = y + (if dir >= 1 && dir <= 3 { 1 } else if dir >= 5 { -1 } else { 0 });
+            s = s + 1;
+        }
+        k = k + 1;
+    }
+}
+
+// a room's walls, 6 pixels thick, breached: some stretches gone, and a
+// doorway in each side; none across a walkway
+fn room(idx: Array<Int>, occ: Array<Int>, path: Array<Int>, clear: Array<Int>, x: Int, y: Int, w: Int, h: Int, seed: Int) {
+    let door_top = x + 10 + hash(1, 1, seed) % (w - 30).max(1);
+    let door_bottom = x + 10 + hash(2, 1, seed) % (w - 30).max(1);
+    let door_left = y + 10 + hash(3, 1, seed) % (h - 30).max(1);
+    let door_right = y + 10 + hash(4, 1, seed) % (h - 30).max(1);
+    let mut px = x;
+    while px < x + w {
+        let gap_t = (px >= door_top && px < door_top + 22) || hash(px / 12, 5, seed) % 5 == 0;
+        let gap_b = (px >= door_bottom && px < door_bottom + 22) || hash(px / 12, 6, seed) % 5 == 0;
+        if !gap_t { wall_column(idx, occ, path, clear, px, y, 6) }
+        if !gap_b { wall_column(idx, occ, path, clear, px, y + h - 6, 6) }
+        px = px + 1;
+    }
+    let mut py = y;
+    while py < y + h {
+        let gap_l = (py >= door_left && py < door_left + 22) || hash(py / 12, 7, seed) % 5 == 0;
+        let gap_r = (py >= door_right && py < door_right + 22) || hash(py / 12, 8, seed) % 5 == 0;
+        if !gap_l { wall_block(idx, occ, path, clear, x, py, 6) }
+        if !gap_r { wall_block(idx, occ, path, clear, x + w - 6, py, 6) }
+        py = py + 1;
+    }
+}
+
+// a column of wall t high at (x, y): its top lit, its face below in shade
+fn wall_column(idx: Array<Int>, occ: Array<Int>, path: Array<Int>, clear: Array<Int>, x: Int, y: Int, t: Int) {
+    let mut i = 0;
+    while i < t {
+        wall_px(idx, occ, path, clear, x, y + i, if i == 0 { 7 } else if i == t - 1 { 2 } else { 5 });
+        i = i + 1;
+    }
+    // (the wall's face, and its shadow on the ground below)
+    wall_face(idx, x, y + t);
+}
+
+fn wall_block(idx: Array<Int>, occ: Array<Int>, path: Array<Int>, clear: Array<Int>, x: Int, y: Int, t: Int) {
+    let mut i = 0;
+    while i < t {
+        wall_px(idx, occ, path, clear, x + i, y, if i == 0 { 6 } else if i == t - 1 { 3 } else { 5 });
+        i = i + 1;
+    }
+    wall_face(idx, x, y + 1);
+}
+
+fn wall_px(idx: Array<Int>, occ: Array<Int>, path: Array<Int>, clear: Array<Int>, x: Int, y: Int, v: Int) {
+    if x >= 0 && y >= 0 && x < size() && y < size() && path.get((y >> 2) * cells() + (x >> 2)) == 0 && !near_bay(clear, x, y, 6) {
+        let h = hash(x, y, 99);
+        // (the stones' courses: a darker line every few pixels)
+        let course = if (x + (y / 6) * 5) % 9 == 0 { 2 } else { 0 };
+        idx.set(y * size() + x, 24 + (v - course + (h & 1)).clamp(0, 7));
+        occ.set((y >> 2) * cells() + (x >> 2), walls());
+    }
+}
+
+fn wall_face(idx: Array<Int>, x: Int, y: Int) {
+    let mut i = 0;
+    while i < 3 {
+        let (px, py) = (x, y + i);
+        if px >= 0 && py >= 0 && px < size() && py < size() {
+            let v = idx.get(py * size() + px);
+            if v < 24 || (v >= 32 && v < 40) { idx.set(py * size() + px, (v & 0x78) + ((v & 7) - 3 + i).max(0)) }
+        }
+        i = i + 1;
+    }
+}
+
+fn pillar(idx: Array<Int>, x: Int, y: Int, seed: Int) {
+    let mut dy = -5;
+    while dy <= 5 {
+        let mut dx = -5;
+        while dx <= 5 {
+            let d2 = dx * dx + dy * dy;
+            if d2 <= 26 {
+                let lit = 5 * 256 + (-dx - dy) * 200 / 5 - d2 * 8 + (hash(x + dx, y + dy, seed) & 63);
+                set_px(idx, x + dx, y + dy, 48 + (lit >> 8).clamp(0, 7));
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// a relay's pad: plating ringed with hazard stripes, and the relay's
+// foot, which blocks
+fn pad(idx: Array<Int>, occ: Array<Int>, x: Int, y: Int, seed: Int) {
+    let mut dy = -16;
+    while dy <= 16 {
+        let mut dx = -16;
+        while dx <= 16 {
+            let d2 = dx * dx + dy * dy;
+            if d2 <= 256 {
+                let v = if d2 > 13 * 13 { if ((dx + dy + 64) / 3) % 2 == 0 { 42 } else { 47 } }
+                    else if d2 > 12 * 12 { 48 + 1 }
+                    else if dx == 0 || dy == 0 { 48 + 2 }
+                    else { 48 + 4 + (hash(x + dx, y + dy, seed) & 1) - (if dx + dy > 0 { 1 } else { 0 }) };
+                set_px(idx, x + dx, y + dy, v);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    fill_occ(occ, x, y + 2, 5, blocks());
+}
+
+// the edge of the deck: 40 pixels of the hull, its panels and ribs
+fn edge(idx: Array<Int>, occ: Array<Int>, region: Int, seed: Int) {
+    let n = size();
+    let mut y = 0;
+    while y < n {
+        let mut x = 0;
+        while x < n {
+            let d = x.min(y).min(n - 1 - x).min(n - 1 - y);
+            if d < 40 {
+                let rib = if (x.min(n - 1 - x) == d && y % 48 < 4) || (y.min(n - 1 - y) == d && x % 48 < 4) { 2 } else { 0 };
+                let v = if d == 39 { 6 } else if d == 38 { 1 } else { 3 + (hash(x / 8, y / 8, seed + 13) & 1) - rib };
+                idx.set(y * n + x, 32 + v.clamp(0, 7));
+                occ.set((y >> 2) * cells() + (x >> 2), walls());
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}

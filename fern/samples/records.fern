@@ -1,0 +1,27 @@
+// Anonymous records, with row polymorphism: a function that reads a
+// field takes any record that has it.
+
+// inferred: fn({ x: Int, y: Int, ..r }) -> Int
+fn manhattan(p) { abs(p.x) + abs(p.y) }
+
+fn abs(n: Int) -> Int { if n < 0 { -n } else { n } }
+
+// adds a field (or hides one of the same name)
+fn with_z(p, z: Int) { { ..p, z: z } }
+
+fn main() {
+    let a = { x: 3, y: -4 };
+    let b = { x: 1, y: 2, name: "b" };
+    println(manhattan(a).show() ++ " " ++ manhattan(b).show());
+    let c = with_z(a, 7);
+    println((c.x + c.y + c.z).show());
+    let moved = { ..b, x: 10 };
+    println(moved.x.show() ++ " " ++ moved.name);
+    // records hold anything, functions too
+    let ops = { double: |n| n * 2, square: |n| n * n };
+    println(ops.double(21).show() ++ " " ++ ops.square(9).show());
+}
+// expect: 7 3
+// expect: 6
+// expect: 10 b
+// expect: 42 81

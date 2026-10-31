@@ -1,0 +1,567 @@
+// The pictures of things on the table, made when the game starts.
+//
+// The plants are drawn by rule rather than by hand: each pixel of a
+// sprite knows how far it is from the middle and at what angle, and each
+// kind of plant is a shape in those terms (a rosette of leaves is a
+// radius that swells and narrows round the circle; a sunflower is
+// petals round a disc of seeds). So each plant can be drawn at every
+// stage of its growth, and all are lit alike, from the top left, with a
+// dark edge round each so it reads against the grass.
+//
+// The crows are pixel art written as text; the ball is a sphere of
+// polished steel, reflecting the sky above and the grass below.
+
+use crate::math::{sin, cos, isqrt};
+use super::gfx::*;
+use super::seeds::*;
+
+pub fn stages() -> Int { 5 }
+
+pub struct Sprites {
+    // each seed's plant at each stage (seed * 5 + stage; 4 is ripe)
+    plants: Array<Sprite>,
+    ball: Sprite,
+    crow_sit: Sprite,
+    crow_peck: Sprite,
+    crow_fly: Array<Sprite>,
+    hay: Sprite,
+    tree: Sprite,
+    tree_autumn: Sprite,
+    tree_bare: Sprite,
+    goose: Sprite,
+    coin: Sprite,
+    sines: Array<Int>,
+}
+
+pub fn sprites(sines: Array<Int>) -> Sprites {
+    let plants = array(seed_count() * stages(), blank(1, 1));
+    let mut s = 0;
+    while s < seed_count() {
+        let mut st = 0;
+        while st < stages() {
+            plants.set(s * stages() + st, plant(sines, s, st));
+            st = st + 1;
+        }
+        s = s + 1;
+    }
+    Sprites {
+        plants: plants,
+        ball: ball(),
+        crow_sit: crow_sitting(),
+        crow_peck: crow_pecking(),
+        crow_fly: Array::from_list([crow_wings_up(), crow_wings_down()], blank(1, 1)),
+        hay: hay_bale(),
+        tree: plant_sized(sines, apple(), 4, 11),
+        tree_autumn: autumn(plant_sized(sines, apple(), 3, 11)),
+        tree_bare: bare_tree(sines, 11),
+        goose: goose(),
+        coin: coin(),
+        sines: sines,
+    }
+}
+
+pub fn plant_sprite(sp: Sprites, seed: Int, stage: Int) -> Sprite { sp.plants.get(seed * stages() + stage.clamp(0, 4)) }
+
+// ---- angles
+
+// the angle from the middle to (dx, dy), 1024ths of a turn, clockwise from the right
+pub fn angle_of(t: Array<Int>, dx: Int, dy: Int) -> Int {
+    if dx == 0 && dy == 0 { 0 } else {
+        let ax = dx.abs();
+        let ay = dy.abs();
+        // (an eighth of a turn, by halves: the angle whose tangent is the smaller over the larger)
+        let lo = ax.min(ay);
+        let hi = ax.max(ay);
+        let mut a = 0;
+        let mut b = 128;
+        while b - a > 1 {
+            let m = (a + b) / 2;
+            // tan(m) > lo/hi ?
+            if sin(t, m) * hi > cos(t, m) * lo { b = m } else { a = m }
+        }
+        let oct = if ax >= ay { a } else { 256 - a };
+        if dx >= 0 && dy >= 0 { oct } else if dx < 0 && dy >= 0 { 512 - oct } else if dx < 0 { 512 + oct } else { (1024 - oct) & 1023 }
+    }
+}
+
+// |cos(n a / 2)|, 0 to 256: n bumps round the circle
+fn lobe(t: Array<Int>, a: Int, n: Int, phase: Int) -> Int {
+    (cos(t, (a * n) / 2 + phase).abs()) >> 8
+}
+
+// ---- the plants
+
+// a color lit: brighter toward the top left (dx, dy from the middle, r the radius)
+fn lit(c: Int, dx: Int, dy: Int, r: Int, depth: Int) -> Int {
+    let k = 256 - (dx + dy) * 70 / r.max(1) - depth;
+    scale(c, k.clamp(120, 330))
+}
+
+fn plant(t: Array<Int>, s: Int, stage: Int) -> Sprite {
+    let full = seed_size(s);
+    let r = if stage == 0 { 3 } else if stage == 1 { 4 + (full - 4) / 3 } else if stage == 2 { 4 + (full - 4) * 2 / 3 } else { full };
+    plant_sized(t, s, stage, r)
+}
+
+// a plant drawn at a stage, r pixels round
+fn plant_sized(t: Array<Int>, s: Int, stage: Int, r: Int) -> Sprite {
+    let size = r * 2 + 3;
+    let sp = blank(size, size);
+    let c = size / 2;
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            let dx = x - c;
+            let dy = y - c;
+            // (in sixteenths of a pixel, for smooth edges)
+            let d = isqrt((dx * dx + dy * dy) * 256);
+            let a = angle_of(t, dx, dy);
+            let col = plant_pixel(t, s, stage, r, dx, dy, d, a);
+            if col >= 0 { sp.px.set(y * size + x, col) }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    edge(sp);
+    sp
+}
+
+// a dark edge round what's drawn
+fn edge(sp: Sprite) {
+    let w = sp.w;
+    let h = sp.h;
+    let out = array(w * h, -1);
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let i = y * w + x;
+            if sp.px.get(i) < 0 {
+                let mut near = -1;
+                if x > 0 && sp.px.get(i - 1) >= 0 { near = sp.px.get(i - 1) }
+                if x < w - 1 && sp.px.get(i + 1) >= 0 { near = sp.px.get(i + 1) }
+                if y > 0 && sp.px.get(i - w) >= 0 { near = sp.px.get(i - w) }
+                if y < h - 1 && sp.px.get(i + w) >= 0 { near = sp.px.get(i + w) }
+                if near >= 0 { out.set(i, mix(scale(near, 90), 0x14200e, 140)) }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let mut i = 0;
+    while i < w * h {
+        if out.get(i) >= 0 { sp.px.set(i, out.get(i)) }
+        i = i + 1;
+    }
+}
+
+// the leaves' green for each sort of plant
+fn leaf_color(s: Int) -> Int {
+    if has_tag(s, tg_root()) { 0x5ec04a } else if has_tag(s, tg_flower()) { 0x48a840 } else if has_tag(s, tg_grain()) { 0x9cc44a }
+    else if s == cabbage() { 0x8ad468 } else if s == cactus() { 0x4aa65a } else { 0x3e9a3e }
+}
+
+// a rosette of n leaves out to r (sixteenths: d), or -1
+fn rosette(t: Array<Int>, s: Int, r: Int, dx: Int, dy: Int, d: Int, a: Int, n: Int, sharp: Int, phase: Int) -> Int {
+    let lb = lobe(t, a, n, phase);
+    let mut k = lb;
+    let mut i = 1;
+    while i < sharp {
+        k = k * lb >> 8;
+        i = i + 1;
+    }
+    let reach = r * 16 * (90 + k * 166 / 256) / 256;
+    if d <= reach {
+        // (a vein down each leaf, lighter; darker toward the middle, where they overlap)
+        let vein = lb > 245 && d > 24;
+        let base = leaf_color(s);
+        let c = if vein { mix(base, 0xe8ffc0, 90) } else { base };
+        lit(c, dx, dy, r, (r * 16 - d).max(0) * 40 / (r * 16).max(1))
+    } else { -1 }
+}
+
+fn plant_pixel(t: Array<Int>, s: Int, stage: Int, r: Int, dx: Int, dy: Int, d: Int, a: Int) -> Int {
+    if stage == 0 && s != cactus() && s != mushroom() {
+        // a sprout: two little leaves
+        let l = isqrt(((dx + 1) * (dx + 1) * 2 + (dy - 0) * (dy - 0) * 5) * 256) <= 40 && dx <= 0;
+        let rr = isqrt(((dx - 1) * (dx - 1) * 2 + (dy - 0) * (dy - 0) * 5) * 256) <= 40 && dx >= 0;
+        if l || rr { lit(0x7ad85a, dx, dy, 3, 0) } else if dx == 0 && dy == 1 { 0x5aa040 } else { -1 }
+    } else if s == turnip() || s == carrot() || s == potato() {
+        let n = if s == carrot() { 9 } else if s == potato() { 7 } else { 5 };
+        let sharp = if s == carrot() { 4 } else { 2 };
+        let core = r * 16 * 42 / 100;
+        if stage == 4 && d < core {
+            let top = if s == turnip() { mix(0xc05aa8, 0xf4ecdc, ((dx + dy + r) * 256 / (2 * r).max(1)).clamp(0, 256)) }
+                else if s == carrot() { 0xff8a2a } else { 0xd8b070 };
+            lit(top, dx, dy, r / 2, 0)
+        } else if s == potato() && stage == 4 && (d > r * 9 && d < r * 12) && lobe(t, a, 5, 0) > 240 {
+            0xfff8e0
+        } else { rosette(t, s, r, dx, dy, d, a, n, sharp, 0) }
+    } else if s == sunflower() {
+        if stage < 3 { rosette(t, s, r, dx, dy, d, a, 4, 2, 0) } else {
+            let disc = r * 16 * 45 / 100;
+            if d < disc {
+                // (seeds in a lattice, brown and darker brown)
+                let seedy = ((dx + 20) + (dy + 20) * 2) % 3 == 0;
+                lit(if stage == 4 { if seedy { 0x5a3218 } else { 0x7a4a24 } } else { 0x4a7a2a }, dx, dy, r, 0)
+            } else {
+                let petal = lobe(t, a, 13, 0);
+                let reach = r * 16 * (150 + petal * 106 / 256) / 256;
+                if d <= reach && stage == 4 { lit(mix(0xffc820, 0xfff070, petal), dx, dy, r, 0) }
+                else if d <= reach { lit(0x6ab040, dx, dy, r, 0) } else { -1 }
+            }
+        }
+    } else if s == tulip() || s == rose() {
+        if stage < 3 { rosette(t, s, r, dx, dy, d, a, 3, 2, 0) } else {
+            let bloom = if stage == 4 { r * 16 * 70 / 100 } else { r * 16 * 35 / 100 };
+            if d < bloom {
+                if s == rose() {
+                    // (rings of petals, each ring's five set between the
+                    // last ring's, cupped: dark where they overlap, bright
+                    // at their rims; a tight dark heart)
+                    let rings = 3;
+                    let ring = (d * rings / bloom.max(1)).min(rings - 1);
+                    let inner = bloom * ring / rings;
+                    let frac = ((d - inner) * 256 * rings / bloom.max(1)).clamp(0, 256);
+                    let petal = lobe(t, a, 5, ring * 70 + 30);
+                    let heart = d < bloom / 5;
+                    let c = if heart { 0x6a0a1a } else if petal < 70 { 0x8a1424 } else { mix(0xc81a34, 0xff7a8a, (frac * petal) >> 8) };
+                    lit(c, dx, dy, r, 0)
+                } else {
+                    let p = lobe(t, a, 3, 0);
+                    lit(if d < bloom / 3 { 0x7a1a30 } else { mix(0xff4a6a, 0xff90a8, p) }, dx, dy, r, 0)
+                }
+            } else { rosette(t, s, r, dx, dy, d, a, 5, 3, 100) }
+        }
+    } else if s == pumpkin() || s == watermelon() {
+        if stage < 3 { rosette(t, s, r, dx, dy, d, a, 5, 2, 0) } else {
+            let fr = if stage == 4 { r * 16 * 85 / 100 } else { r * 16 * 50 / 100 };
+            // (a little wider than tall)
+            let e = isqrt((dx * dx * 200 + dy * dy * 256) * 256 / 256);
+            if e < fr {
+                if s == pumpkin() {
+                    let rib = lobe(t, a, 8, 0);
+                    let stem = dx.abs() <= 0 && dy.abs() <= 1;
+                    if stem { 0x5a6a2a } else { lit(if rib < 60 { 0xc85a10 } else if stage == 4 { 0xff8a1a } else { 0x9ab040 }, dx, dy, r, 0) }
+                } else {
+                    let stripe = ((dx * 3 + 40) / 2) % 3 == 0;
+                    lit(if stripe { 0x1e6a2a } else { 0x4ab84a }, dx, dy, r, 0)
+                }
+            } else { rosette(t, s, r, dx, dy, d, a, 6, 2, 50) }
+        }
+    } else if s == strawberry() || s == blueberry() || s == chili() {
+        let berries = stage == 4;
+        let n = if s == chili() { 6 } else { 3 };
+        let rose = rosette(t, s, r, dx, dy, d, a, n, 2, 0);
+        if berries {
+            // (fruit set round the plant)
+            let mut col = rose;
+            let mut k = 0;
+            let count = if s == blueberry() { 6 } else { 3 };
+            while k < count {
+                let ang = k * 1024 / count + 120;
+                let bx = cos(t, ang) * r * 55 / 100 >> 16;
+                let by = sin(t, ang) * r * 55 / 100 >> 16;
+                let ddx = dx - bx;
+                let ddy = dy - by;
+                let rr = if s == chili() { ddx * ddx * 3 + ddy * ddy } else { ddx * ddx + ddy * ddy };
+                if rr <= (if s == blueberry() { 2 } else { 4 }) {
+                    let base = if s == strawberry() { 0xf03a4a } else if s == blueberry() { 0x4a5ae8 } else { 0xf0301a };
+                    col = if s == strawberry() && (ddx + ddy) % 2 == 0 && rr > 0 { 0xffe0a0 } else { lit(base, ddx, ddy, 2, 0) };
+                }
+                k = k + 1;
+            }
+            col
+        } else { rose }
+    } else if s == corn() || s == wheat() {
+        let n = if s == wheat() { 12 } else { 6 };
+        let lb = lobe(t, a, n, 0);
+        let k = lb * lb >> 8;
+        let k2 = k * k >> 8;
+        let reach = r * 16 * (60 + k2 * 196 / 256) / 256;
+        if stage == 4 && s == corn() && d < r * 16 * 35 / 100 { lit(if (dx + dy) % 2 == 0 { 0xffe050 } else { 0xf0c030 }, dx, dy, r, 0) }
+        else if d <= reach {
+            let base = if s == wheat() { if stage == 4 { 0xe8c060 } else { 0xb8c460 } } else { leaf_color(s) };
+            let grain = s == wheat() && stage == 4 && d > r * 8 && (d / 16) % 2 == 0;
+            lit(if grain { 0xf8e090 } else { base }, dx, dy, r, 0)
+        } else { -1 }
+    } else if s == mushroom() {
+        let cap = r * 16 * (if stage == 0 { 60 } else { 90 }) / 100;
+        if d < cap {
+            let base = if stage >= 3 { 0xe8402e } else if stage == 2 { 0xc06a3a } else { 0xb08a60 };
+            // (white spots: one in the middle, five round it)
+            let mut spot = false;
+            if stage >= 3 {
+                let sr2 = if r >= 7 { 2 } else { 1 };
+                if dx * dx + dy * dy <= sr2 { spot = true }
+                let mut k = 0;
+                while k < 5 {
+                    let ang = k * 205 + 60;
+                    let cx = cos(t, ang) * r * 58 / 100 >> 16;
+                    let cy = sin(t, ang) * r * 58 / 100 >> 16;
+                    if (dx - cx) * (dx - cx) + (dy - cy) * (dy - cy) <= sr2 { spot = true }
+                    k = k + 1;
+                }
+            }
+            lit(if spot { 0xfff8f0 } else { base }, dx, dy, r, 0)
+        } else { -1 }
+    } else if s == cactus() {
+        let body = r * 16 * 85 / 100;
+        if d < body {
+            let rib = lobe(t, a, 8, 0);
+            let spine = rib > 250 && (d / 20) % 2 == 1;
+            let flower = d < 24;
+            if flower { 0xff70b0 } else if spine { 0xfff8e0 } else { lit(if rib > 200 { 0x6ac87a } else { 0x3a9a50 }, dx, dy, r, 0) }
+        } else { -1 }
+    } else if s == clover() {
+        if stage == 4 && d < 26 { lit(0xfff4f8, dx, dy, 2, 0) } else {
+            let lb = lobe(t, a, 4, 128);
+            let reach = r * 16 * (lb * 230 / 256) / 256;
+            let notch = lobe(t, a, 8, 0) > 248 && d > r * 12;
+            if d <= reach && !notch { lit(if d < r * 6 { 0x3a9a3a } else { 0x5ad85a }, dx, dy, r, 0) } else { -1 }
+        }
+    } else if s == cabbage() {
+        let wav = lobe(t, a, 9, 0);
+        let reach = r * 16 * (200 + wav * 56 / 256) / 256;
+        if d <= reach {
+            let band = (d * 4 / (r * 16).max(1)) % 2 == 0;
+            let base = if stage == 4 { if band { 0xb8f090 } else { 0x88d468 } } else { if band { 0x8ad468 } else { 0x6ab850 } };
+            lit(base, dx, dy, r, 0)
+        } else { -1 }
+    } else {
+        // the apple tree: a lumpy canopy, apples on it when ripe
+        let lump = lobe(t, a, 7, 0);
+        let reach = r * 16 * (210 + lump * 46 / 256) / 256;
+        if d <= reach {
+            let apple = stage == 4 && ((dx * 5 + dy * 3 + 60) % 7 == 0) && ((dx * 2 - dy * 7 + 80) % 5 == 0) && d < reach - 20;
+            let leafy = hash3(dx, dy) < 60;
+            lit(if apple { 0xf03a3a } else if leafy { 0x2e7a34 } else { 0x3e9a3e }, dx, dy, r, (reach - d).max(0) / 8)
+        } else { -1 }
+    }
+}
+
+// a sprite's greens turned to autumn's oranges and reds
+fn autumn(sp: Sprite) -> Sprite {
+    let out = blank(sp.w, sp.h);
+    let mut i = 0;
+    while i < sp.w * sp.h {
+        let c = sp.px.get(i);
+        if c >= 0 {
+            let r = red(c);
+            let g = green(c);
+            let b = blue(c);
+            let leafy = g > r && g > b;
+            let lum = (r + g * 2 + b) / 4;
+            let hue = if (i * 7 + i / sp.w * 3) % 5 == 0 { 0xc83a20 } else if (i * 3) % 7 == 0 { 0xe8b030 } else { 0xe8702a };
+            out.px.set(i, if leafy { scale(hue, (lum * 2).clamp(90, 300)) } else { c });
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// a tree in winter: bare branches spreading from the trunk, snow along
+// their upper sides
+fn bare_tree(t: Array<Int>, r: Int) -> Sprite {
+    let size = r * 2 + 3;
+    let sp = blank(size, size);
+    let c = size / 2;
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            let dx = x - c;
+            let dy = y - c;
+            let d = isqrt((dx * dx + dy * dy) * 256);
+            let a = angle_of(t, dx, dy);
+            let main = lobe(t, a, 7, 40);
+            let twig = lobe(t, a, 17, 90);
+            let reach = r * 16;
+            let thick = 252 - (reach - d).max(0) * 30 / reach.max(1);
+            let branch = (main > thick && d < reach) || (twig > 250 && d > reach / 2 && d < reach - 8);
+            if d < 34 {
+                sp.px.set(y * size + x, if dx + dy < 0 { 0x8a5a34 } else { 0x5a3a20 });
+            } else if branch {
+                let snow = dx + dy < -2 && (x + y) % 3 != 0;
+                sp.px.set(y * size + x, if snow { 0xf4f8ff } else { 0x6a4428 });
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    edge(sp);
+    sp
+}
+
+fn hash3(x: Int, y: Int) -> Int {
+    let h = (x + 40) * 374761393 + (y + 40) * 668265263;
+    ((h ^ (h >> 13)) * 1274126177 >> 16) & 255
+}
+
+// ---- the ball: polished steel
+
+fn ball() -> Sprite {
+    let size = 11;
+    let sp = blank(size, size);
+    let c = 5;
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            let dx = x - c;
+            let dy = y - c;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= 20 {
+                // the sky in its upper half, the grass in its lower, a
+                // highlight where the sun is, darker toward its rim
+                let horizon = dy * 2 + dx / 2;
+                let env = if horizon < -2 { mix(0xe8f4ff, 0x9cc8f0, ((-horizon) * 30).min(256)) } else if horizon < 1 { 0xc8d0d0 } else { mix(0x8aa070, 0x4a6040, (horizon * 40).min(256)) };
+                let rim = if d2 > 13 { 150 } else { 230 };
+                let spec = (dx + 2) * (dx + 2) + (dy + 2) * (dy + 2) <= 1;
+                sp.px.set(y * size + x, if spec { 0xffffff } else { scale(env, rim) });
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    edge(sp);
+    sp
+}
+
+// ---- the crows
+
+fn crow_colors() -> List<Int> { [0x16161e, 0x34344a, 0x5a5a78, 0xf0b030, 0xffffff] }
+
+fn crow_sitting() -> Sprite {
+    sprite([
+        ".....kkk......",
+        "....kkkkkk....",
+        "....kkwkkyy...",
+        "....kkkkkyyy..",
+        "...kkkkkk.....",
+        "..kkkddkkk....",
+        ".kkkddddkkk...",
+        "kkkkkdddkkk...",
+        "kkk.kkkkkkk...",
+        ".k...kkkkk....",
+        ".....y..y.....",
+        "....yy.yy.....",
+    ], "kdlyw", crow_colors())
+}
+
+fn crow_pecking() -> Sprite {
+    sprite([
+        "..............",
+        "..............",
+        "......kkk.....",
+        "....kkkkkkk...",
+        "...kkkkkwkkk..",
+        "..kkkddkkkkyyy",
+        ".kkkddddkkkyy.",
+        "kkkkkdddkkk...",
+        "kkk.kkkkkkk...",
+        ".k...kkkkk....",
+        ".....y..y.....",
+        "....yy.yy.....",
+    ], "kdlyw", crow_colors())
+}
+
+fn crow_wings_up() -> Sprite {
+    sprite([
+        "kk.............kk",
+        "kkk...........kkk",
+        ".kddk.......kddk.",
+        "..kddk.....kddk..",
+        "...kddkkkkkddk...",
+        "....kkkkkkkkk....",
+        "......kkkkkwyy...",
+        ".......kkkkyy....",
+        "........kk.......",
+    ], "kdlyw", crow_colors())
+}
+
+fn crow_wings_down() -> Sprite {
+    sprite([
+        ".................",
+        ".................",
+        ".................",
+        "......kkkkk......",
+        "...kkkkkkkkkkk...",
+        ".kkddkkkkkkkddkk.",
+        "kkdd..kkkkwyyddkk",
+        "kk.....kkkyy...kk",
+        "k.......kk......k",
+    ], "kdlyw", crow_colors())
+}
+
+// ---- a round bale of hay, seen from above: straw wound in a spiral
+
+fn hay_bale() -> Sprite {
+    let size = 17;
+    let sp = blank(size, size);
+    let c = 8;
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            let dx = x - c;
+            let dy = y - c;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= 56 {
+                let d = isqrt(d2 * 256);
+                let ring = (d / 22) % 2 == 0;
+                let base = if ring { 0xe8c45a } else { 0xc89a38 };
+                let strand = hash3(dx * 3, dy) < 50;
+                let k = 256 - (dx + dy) * 9;
+                sp.px.set(y * size + x, scale(if strand { mix(base, 0xfff0b0, 120) } else { base }, k.clamp(150, 320)));
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    edge(sp);
+    sp
+}
+
+// Lord Goose, the landlord: a goose in a top hat, a monocle and a
+// waistcoat, looking down his beak at you
+fn goose() -> Sprite {
+    sprite([
+        ".......kkkkkk.......",
+        ".......knnnnk.......",
+        ".......knnnnk.......",
+        ".......knnnnk.......",
+        "......krrrrrrk......",
+        ".....kkkkkkkkkk.....",
+        "......kwwwwwwk......",
+        ".....kwwwwwwwwk.....",
+        ".....kwwgggwwwk.....",
+        ".....kwwgnkwwwkoo...",
+        ".....kwwgggwwwooooo.",
+        ".....kwwwwwwwwkooo..",
+        "......kwwwwwwk......",
+        ".......kwwwwk.......",
+        ".......kwwwwk.......",
+        "......kwwwwwwk......",
+        ".....kwwrrrrwwk.....",
+        "....kwwwrryrwwwk....",
+        "...kwwwwrrrrwwwwk...",
+        "...kwwwwrryrwwwwk...",
+        "....kwwwrrrrwwwk....",
+        ".....kkwwwwwwkk.....",
+        ".......oo..oo.......",
+        "......ooo..ooo......",
+    ], "kwgnroy", [0x2a1a10, 0xfaf6ec, 0xc8ccd0, 0x1a1a24, 0x8a2a3a, 0xf08a2a, 0xf8d040])
+}
+
+fn coin() -> Sprite {
+    sprite([
+        ".kkkk.",
+        "kyyyyk",
+        "kywyyk",
+        "kyyyok",
+        "kyyook",
+        ".kkkk.",
+    ], "kyow", [0x8a5a10, 0xffd23a, 0xe8a020, 0xfff8d0])
+}

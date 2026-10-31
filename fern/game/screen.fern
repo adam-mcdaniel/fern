@@ -1,0 +1,96 @@
+// A window to draw in, the keyboard, the mouse and a game controller, a
+// beep and a synthesizer, and files:
+// functions written in C (screen.c, with bf.h and SDL2). Calling one has
+// the Io effect.
+//
+// The framebuffer is an Array<Int> of width * height pixels, a row at a
+// time from the top left, each 0xRRGGBB (see `rgb`).
+
+// a window of width x height pixels, each drawn scale x scale; whether it opened
+pub extern fn screen_open(width: Int, height: Int, scale: Int, title: String) -> Bool;
+// shows the framebuffer, waits for the next frame (60 a second), and reads
+// the keyboard and mouse; false once the window's been closed
+pub extern fn screen_show(pixels: Array<Int>) -> Bool;
+// milliseconds since the window opened
+pub extern fn screen_ticks() -> Int;
+// starts or stops a beep
+pub extern fn screen_beep(on: Bool);
+
+// whether a key is held down, or went down since the last frame (keys are
+// below: letters and digits are their characters)
+pub extern fn key_down(key: Int) -> Bool;
+pub extern fn key_pressed(key: Int) -> Bool;
+
+// where the mouse is, in pixels of the framebuffer
+pub extern fn mouse_x() -> Int;
+pub extern fn mouse_y() -> Int;
+// whether the left button is held down, or went down since the last frame
+pub extern fn mouse_down() -> Bool;
+pub extern fn mouse_clicked() -> Bool;
+// whether the right button went down since the last frame
+pub extern fn mouse_right() -> Bool;
+
+// a game controller's: an axis (-32768 to 32767; 0 and 1 are the left
+// stick), and whether a button's held or went down since the last frame
+// (0 A, 1 B, 2 X, 3 Y, 4 back, 6 start, 11 to 14 the d-pad up, down, left,
+// right); all nothing with none plugged in
+pub extern fn pad_axis(n: Int) -> Int;
+pub extern fn pad_down(button: Int) -> Bool;
+pub extern fn pad_pressed(button: Int) -> Bool;
+
+// fills the screen, or goes back to a window
+pub extern fn screen_full(on: Bool);
+
+// a note: wave (0 sine, 1 triangle, 2 square, 3 saw, 4 noise, 5 a plucked
+// string, 6 a pad, 7 a narrow pulse), from hz16 to end_hz16 (in 16ths of a
+// hertz), starting at `at` (ms on sound_clock, or now), rising over attack
+// ms of its length ms; volume_pan is the volume (0 to 255) * 256 + the pan
+// (-100 to 100) + 128, cutoff the low-pass filter's in hertz (or, to sweep
+// it, where it starts + where it ends * 65536), reverb_bus the reverb (0
+// to 255) * 2 + the bus (0 music, 1 effects); see `note` and `note_swept`
+pub extern fn sound_play(wave: Int, hz16: Int, end_hz16: Int, at: Int, attack: Int, length: Int, volume_pan: Int, cutoff: Int, reverb_bus: Int) -> Int;
+
+// a note, its numbers unpacked (see sound_play)
+pub fn note(wave: Int, hz16: Int, end_hz16: Int, at: Int, attack: Int, length: Int, volume: Int, pan: Int, cutoff: Int, reverb: Int, bus: Int) with Io {
+    sound_play(wave, hz16, end_hz16, at, attack, length, volume.clamp(0, 255) * 256 + pan.clamp(-100, 100) + 128, cutoff.clamp(20, 65535), reverb.clamp(0, 255) * 2 + bus);
+}
+// a note whose filter sweeps, from cutoff to end_cutoff (hertz) over its length
+pub fn note_swept(wave: Int, hz16: Int, end_hz16: Int, at: Int, attack: Int, length: Int, volume: Int, pan: Int, cutoff: Int, end_cutoff: Int, reverb: Int, bus: Int) with Io {
+    sound_play(wave, hz16, end_hz16, at, attack, length, volume.clamp(0, 255) * 256 + pan.clamp(-100, 100) + 128, cutoff.clamp(20, 65535) + end_cutoff.clamp(20, 65535) * 65536, reverb.clamp(0, 255) * 2 + bus);
+}
+// the sound's clock: ms of sound played
+pub extern fn sound_clock() -> Int;
+// each bus's volume, 0 to 100
+pub extern fn sound_volume(music: Int, effects: Int);
+// silences a bus
+pub extern fn sound_stop(bus: Int);
+
+// numbers saved in a file of this user's (n of them), and loaded back (how
+// many, or -1 if there's no file)
+pub extern fn file_save(name: String, cells: Array<Int>, n: Int) -> Bool;
+pub extern fn file_load(name: String, into: Array<Int>) -> Int;
+
+pub fn key_left() -> Int { 1 }
+pub fn key_right() -> Int { 2 }
+pub fn key_up() -> Int { 3 }
+pub fn key_down_arrow() -> Int { 4 }
+pub fn key_shift() -> Int { 5 }
+pub fn key_tab() -> Int { 6 }
+pub fn key_f11() -> Int { 7 }
+pub fn key_backspace() -> Int { 8 }
+pub fn key_enter() -> Int { 13 }
+pub fn key_escape() -> Int { 27 }
+pub fn key_space() -> Int { 32 }
+// a letter or digit's key: key("a")
+pub fn key(c: String) -> Int { char_at(c, 0) }
+
+pub fn rgb(r: Int, g: Int, b: Int) -> Int { r * 65536 + g * 256 + b }
+
+// the bytes of the file named by command-line argument n (1 is the first),
+// into the array from index at: how many, or -1 if there's no such
+// argument or file, or it doesn't fit
+pub extern fn load_arg_file(n: Int, into: Array<Int>, at: Int) -> Int;
+
+// runs another program in the same folder as this one (by its name), with
+// this one's window hidden until it's done; its exit status, or -1
+pub extern fn screen_run(name: String) -> Int;

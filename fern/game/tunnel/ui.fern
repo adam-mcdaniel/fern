@@ -1,0 +1,247 @@
+// The screens round the play: the title (its letters dug out of the soil,
+// ants walking over them), choosing a map, the pause, the options, the
+// lesson the first time, and the end of a colony.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+use super::hud::*;
+use super::world::*;
+use super::save::*;
+
+// the title: big letters, each a slab of a different sand, bobbing
+pub fn logo(g: Gfx, cx: Int, y: Int, frame: Int, t: Array<Int>) {
+    let s = "TUNNEL VISION";
+    let k = 4;
+    let w = text_w(g, s, k);
+    let colors = [0xe8c48a, 0xd89458, 0xf0dcb8, 0xc0683e];
+    let mut x = cx - w / 2;
+    let mut i = 0;
+    while i < s.len() {
+        let code = s.char_at(i);
+        let c = colors.get(i % 4).unwrap_or(0xffffff);
+        let bob = sin(t, frame * 4 + i * 80) * 2 >> 16;
+        if code != 32 {
+            let ch = s.substring(i, i + 1);
+            text(g, ch, x + 2, y + 4 + bob, k, 0x2a1408);
+            say(g, ch, x, y + bob, k, c, 0x3a2010);
+            // (a speckle of grain across each letter)
+            let mut q = 0;
+            while q < 6 {
+                let gx = x + (hash(i, q, 5) % (char_w(g, code) * k)).max(0);
+                let gy = y + bob + hash(i, q, 6) % (7 * k);
+                blend(g, gx, gy, 0x5a3a20, 60);
+                q = q + 1;
+            }
+        }
+        x = x + (char_w(g, code) + 1) * k;
+        i = i + 1;
+    }
+}
+
+pub fn menu(g: Gfx, items: List<String>, enabled: List<Bool>, sel: Int, x: Int, y0v: Int, frame: Int, mx: Int, my: Int, t: Array<Int>) -> Int {
+    let mut i = 0;
+    let mut over = -1;
+    let mut rest = items;
+    let mut en = enabled;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let on = match en { Cons(b, more) => { en = more; b }, Nil => true };
+                let y = y0v + i * 24;
+                if mx >= x && mx < x + 110 && my >= y && my < y + 20 { over = i }
+                let chosen = i == sel;
+                let dx = if chosen { 4 + (sin(t, frame * 8) >> 15) } else { 0 };
+                if chosen { button(g, x + dx, y, 110, 20, if on { 0x5ab04a } else { 0x9a8a80 }) } else { tag(g, x, y, 110, 20) }
+                text(g, s, x + 10 + dx, y + 6, 1, if chosen { 0xffffff } else if on { ink() } else { 0xc0b0a0 });
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    over
+}
+
+pub fn draw_title(g: Gfx, d: Array<Int>, frame: Int, t: Array<Int>) {
+    round_blend(g, 96, 52, 288, 54, 8, 0x1a1008, 120);
+    logo(g, 240, 60, frame, t);
+    text_mid(g, "dig the tunnels; the ants do the rest", 240, 94, 1, 0xfff0d0);
+}
+
+// choosing where the colony starts
+pub fn draw_maps(g: Gfx, d: Array<Int>, sel: Int, frame: Int, t: Array<Int>, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 90);
+    say_mid(g, "WHERE TO DIG?", 240, 30, 2, 0xffffff, 0x3a2410);
+    let mut over = -1;
+    let mut m = 0;
+    while m < map_count() {
+        let x = 30 + m * 108;
+        let y = 64;
+        let open = map_open(d, m);
+        if mx >= x && mx < x + 100 && my >= y && my < y + 150 { over = m }
+        let chosen = m == sel;
+        let lift = if chosen { 4 } else { 0 };
+        round_blend(g, x + 3, y + 4, 100, 150, 6, 0x1a1008, 110);
+        round_rect(g, x, y - lift, 100, 150, 6, if chosen { 0xe8a018 } else { 0x8a7058 });
+        round_rect(g, x + 2, y + 2 - lift, 96, 146, 5, paper());
+        // (a little slice of its soil)
+        let mut row = 0;
+        while row < 40 {
+            let c = map_band(m, row);
+            rect(g, x + 8, y + 10 + row - lift, 84, 1, if open { c } else { 0xc8c0b0 });
+            row = row + 1;
+        }
+        if !open { text_mid(g, "?", x + 50, y + 22 - lift, 2, 0xf4ead6) }
+        print_mid(g, if open { map_name(m) } else { "Locked" }, x + 50, y + 58 - lift, 1, ink(), 0xe8dcc0);
+        wrap_mid(g, if open { map_text(m) } else { "Bring in " ++ unlock_food().show() ++ " food on the map before." }, x + 50, y + 72 - lift, 86, 1, faint());
+        if open && get(d, sv_best(m)) > 0 {
+            text_mid(g, "best: " ++ get(d, sv_best(m)).show(), x + 50, y + 132 - lift, 1, 0x8a6a2a);
+        }
+        m = m + 1;
+    }
+    text_mid(g, "back to the title", 240, 236, 1, 0xfff0d0);
+    over
+}
+
+fn map_band(m: Int, row: Int) -> Int {
+    if row < 6 { if m == 1 { 0xf0e0b0 } else { 0x7ac0f0 } }
+    else if row < 8 { if m == 1 { 0xd8c090 } else if m == 3 { 0xc8a050 } else { 0x5aa83a } }
+    else if m == 0 { [0x5a3a22, 0xe8c48a, 0xd89458, 0xf0dcb8, 0xc0683e].get((row - 8) / 7).unwrap_or(0xc0683e) }
+    else if m == 1 { [0xc8a878, 0xf0dcb0, 0xe8c898, 0xf8e8c8, 0xd8b888].get((row - 8) / 7).unwrap_or(0xd8b888) }
+    else if m == 2 { [0x3a2818, 0x8a5a34, 0x6a4a2a, 0xa87848, 0x7a5838].get((row - 8) / 7).unwrap_or(0x7a5838) }
+    else { [0xb06a3a, 0xd8803a, 0xc85a30, 0xe8a050, 0xa84a2a].get((row - 8) / 7).unwrap_or(0xa84a2a) }
+}
+
+pub fn draw_pause(g: Gfx, sel: Int, frame: Int, t: Array<Int>, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 120);
+    say_mid(g, "PAUSED", 240, 60, 3, 0xffffff, 0x3a2410);
+    menu(g, ["Carry on", "Options", "How to play", "Give up"], [true, true, true, true], sel, 185, 100, frame, mx, my, t)
+}
+
+pub fn option_count() -> Int { 5 }
+
+pub fn draw_options(g: Gfx, d: Array<Int>, sel: Int, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 120);
+    let x = 150;
+    let w = 180;
+    round_rect(g, x, 50, w, 170, 6, 0x3a2a1a);
+    round_rect(g, x + 1, 51, w - 2, 168, 5, paper());
+    say_mid(g, "OPTIONS", 240, 60, 2, 0xffffff, 0x5a8ab8);
+    let names = ["Music", "Sounds", "Full screen", "Screen shake", "Done"];
+    let mut i = 0;
+    let mut over = -1;
+    let mut rest = names;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let y = 90 + i * 22;
+                if mx >= x + 8 && mx < x + w - 8 && my >= y - 4 && my < y + 14 { over = i }
+                if i == sel { round_rect(g, x + 8, y - 4, w - 16, 18, 3, 0xf0e0b8) }
+                text(g, s, x + 16, y, 1, ink());
+                let v = if i == 0 { "{ " ++ get(d, sv_music()).show() ++ "% }" } else if i == 1 { "{ " ++ get(d, sv_sfx()).show() ++ "% }" }
+                    else if i == 2 { if get(d, sv_full()) > 0 { "{ on }" } else { "{ off }" } } else if i == 3 { if get(d, sv_shake()) > 0 { "{ on }" } else { "{ off }" } } else { "" };
+                text_right(g, v, x + w - 16, y, 1, if i == sel { tomato() } else { faint() });
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    text_mid(g, "left and right to change", 240, 202, 1, faint());
+    over
+}
+
+pub fn draw_howto(g: Gfx, page: Int, frame: Int) {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 140);
+    let x = 110;
+    let w = 260;
+    let y = 30;
+    let h = 206;
+    round_blend(g, x + 3, y + 4, w, h, 6, 0x1a1008, 120);
+    round_rect(g, x, y, w, h, 6, 0x3a2a1a);
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 5, paper());
+    let lines = if page == 0 { [
+        "Food turns up on the surface and buried",
+        "in the soil. Each kind goes to its own",
+        "chamber: SEEDS to a granary, LEAVES to the",
+        "fungus garden, HONEYDEW to a nursery.",
+        "",
+        "DIG tunnels to the food: drag from any",
+        "tunnel. The ants find their own way.",
+        "",
+        "A pile left too long spoils (a ring fills",
+        "round it). If one spoils right through,",
+        "the colony moves out.",
+        "",
+        "Uphill is slow; crowds jam; rain floods",
+        "low tunnels. Pause any time to plan.",
+    ] } else { [
+        "Dig: drag with the left button",
+        "      (or Enter or Z, and the arrows)",
+        "Fill in: the right button (or X)",
+        "      half a dig point back a cell",
+        "Pause and plan: Space",
+        "Speed: 1, 2 and 3",
+        "Menu: Escape",
+        "",
+        "Clay costs two to dig. Rock and roots",
+        "can't be dug. Dig into a buried trinket",
+        "for dig points back.",
+        "",
+        "Each week: more dig points, and a choice.",
+    ] };
+    say_mid(g, if page == 0 { "THE ANT FARM" } else { "HOW TO DIG" }, 240, y + 8, 2, 0xffffff, if page == 0 { 0x5ab04a } else { 0x5a8ab8 });
+    let mut i = 0;
+    let mut rest = lines;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                text(g, s, x + 14, y + 30 + i * 11, 1, ink());
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    if (frame / 20) % 2 == 0 { text_mid(g, if page == 0 { "press for the controls" } else { "press to dig in" }, 240, y + h - 13, 1, faint()) }
+}
+
+// the colony's end
+pub fn draw_lost(g: Gfx, d: Array<Int>, m: Int, food: Int, weeks: Int, ants: Int, opened: Int, why: String, t: Int, sel: Int) {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, (t * 6).min(110));
+    let x = 140;
+    let w = 200;
+    let h = 160;
+    let y = 50 - (if t < 14 { (14 - t) * (14 - t) / 2 } else { 0 });
+    round_blend(g, x + 3, y + 4, w, h, 6, 0x1a1008, 120);
+    round_rect(g, x, y, w, h, 6, 0x3a2a1a);
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 5, paper());
+    say_mid(g, "MOVING OUT", 240, y + 8, 2, 0xffffff, tomato());
+    text_mid(g, why, 240, y + 30, 1, faint());
+    text(g, "Food brought in", x + 14, y + 48, 1, faint());
+    num_right(g, food, x + w - 14, y + 48, 1, ink());
+    text(g, "Weeks", x + 14, y + 60, 1, faint());
+    num_right(g, weeks, x + w - 14, y + 60, 1, ink());
+    text(g, "Ants at the end", x + 14, y + 72, 1, faint());
+    num_right(g, ants, x + w - 14, y + 72, 1, ink());
+    text(g, "Best here", x + 14, y + 84, 1, faint());
+    num_right(g, get(d, sv_best(m)), x + w - 14, y + 84, 1, ink());
+    if food >= get(d, sv_best(m)) && food > 0 { say_mid(g, "A new best!", 240, y + 100, 1, 0xffe04a, 0x6a3a10) }
+    if opened >= 0 { say_mid(g, "New map: " ++ map_name(opened), 240, y + 112, 1, 0x9aff7a, 0x2a4a10) }
+    let opts = ["Dig again", "To the title"];
+    let mut i = 0;
+    let mut o = opts;
+    loop {
+        match o {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let bx = x + 14 + i * 90;
+                let by = y + h - 26;
+                if sel == i { button(g, bx, by, 82, 18, 0x5ab04a) } else { tag(g, bx, by, 82, 18) }
+                text_mid(g, s, bx + 41, by + 5, 1, if sel == i { 0xffffff } else { ink() });
+                i = i + 1;
+                o = tail;
+            }
+        }
+    }
+}

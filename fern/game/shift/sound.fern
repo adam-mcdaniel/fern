@@ -1,0 +1,349 @@
+// The sound: effects for what happens, and music, made as it plays.
+//
+// The music is chords going round (a progression in a key), a bar each,
+// and what's played over them a sixteenth at a time, on synthesizers: a
+// pad of detuned saws whose filter opens over the bar, a square-wave
+// arpeggio picking out the chord with a dotted echo after it, a saw bass
+// whose filter snaps shut on each note, drum machine (a sine kick, noise
+// for the snare and hats), noise swelling into each new phrase, and a
+// pulse-wave lead; more of them as the shift grows dangerous. Each note
+// is scheduled a little ahead on the sound's own clock, so the beat is
+// exact however the frames fall.
+
+use crate::screen::{note, note_swept, sound_clock, sound_volume, sound_stop};
+use super::world::{hash};
+
+// each note's frequency, and where the music is: which song, the next
+// step's time (ms on the sound's clock), and that step
+pub struct Music { freqs: Array<Int>, song: Int, next: Int, step: Int }
+
+pub fn music() -> Music {
+    // each MIDI note's frequency, in 16ths of a hertz: the twelve notes of
+    // the octave from middle C, doubled and halved
+    let ratios = [1000, 1059, 1122, 1189, 1260, 1335, 1414, 1498, 1587, 1682, 1782, 1888];
+    let r = Array::from_list(ratios, 0);
+    let freqs = array(128, 0);
+    let mut n = 0;
+    while n < 128 {
+        let base = 4186 * r.get(n % 12) / 1000;
+        let oct = n / 12 - 5;
+        freqs.set(n, if oct >= 0 { base << oct } else { base >> (-oct) });
+        n = n + 1;
+    }
+    Music { freqs: freqs, song: -1, next: 0, step: 0 }
+}
+
+// the songs
+pub fn title_song() -> Int { 0 }
+pub fn shift_song() -> Int { 1 }
+pub fn boss_song() -> Int { 2 }
+pub fn victory_song() -> Int { 3 }
+pub fn dirge() -> Int { 4 }
+pub fn silence() -> Int { 5 }
+
+// the synthesizer's waves (see screen.fern)
+fn sine() -> Int { 0 }
+fn triangle() -> Int { 1 }
+fn square() -> Int { 2 }
+fn saw() -> Int { 3 }
+fn noise() -> Int { 4 }
+fn pad() -> Int { 6 }
+fn pulse() -> Int { 7 }
+
+fn hz(m: Music, note: Int) -> Int { m.freqs.get(note.clamp(0, 127)) }
+
+// a note: an instrument's
+fn play(wave: Int, f: Int, f_end: Int, at: Int, attack: Int, length: Int, vol: Int, pan: Int, cutoff: Int, reverb: Int, bus: Int) with Io {
+    note(wave, f, f_end, at, attack, length, vol, pan, cutoff, reverb, bus);
+}
+
+// a note whose filter sweeps from one cutoff to another
+fn swept(wave: Int, f: Int, f_end: Int, at: Int, attack: Int, length: Int, vol: Int, pan: Int, cutoff: Int, cutoff_end: Int, reverb: Int, bus: Int) with Io {
+    note_swept(wave, f, f_end, at, attack, length, vol, pan, cutoff, cutoff_end, reverb, bus);
+}
+
+// a degree of a scale (0 is the root; 7 an octave up) as semitones
+fn degree(scale: Int, d: Int) -> Int {
+    let steps = if scale == 0 { [0, 2, 3, 5, 7, 8, 10] } else if scale == 1 { [0, 2, 4, 5, 7, 9, 11] } else { [0, 2, 3, 5, 7, 8, 11] };
+    let oct = d.div_floor(7);
+    let k = d.mod_floor(7);
+    steps.get(k).unwrap_or(0) + oct * 12
+}
+
+// keeps the music going: what's due in the next quarter second, played
+pub fn tick(m: Music, song: Int, intensity: Int, region: Int) with Io {
+    let now = sound_clock();
+    if m.song != song {
+        sound_stop(0);
+        m.song = song;
+        m.next = now + 120;
+        m.step = 0;
+    }
+    if song != silence() {
+        let step_ms = if song == title_song() { 172 } else if song == shift_song() { 140 - region * 5 } else if song == boss_song() { 118 } else if song == victory_song() { 150 } else { 230 };
+        let mut next = m.next;
+        // (fallen far behind, after a pause: start again from now)
+        if next < now - 500 { next = now + 50 }
+        while next < now + 260 {
+            let step = m.step;
+            beat(m, song, step, next, step_ms, intensity, region);
+            m.step = step + 1;
+            next = next + step_ms;
+        }
+        m.next = next;
+    }
+}
+
+// one sixteenth of a song
+fn beat(m: Music, song: Int, step: Int, at: Int, step_ms: Int, intensity: Int, region: Int) with Io {
+    let s = step % 16;
+    let bar = step / 16;
+    // the key (its root, a MIDI note), its scale (0 minor, 1 major, 2
+    // harmonic minor) and the chords' roots, as degrees
+    let (root, scale, prog) = if song == title_song() { (57, 0, [0, 5, 2, 6]) }
+        else if song == shift_song() { if region == 0 { (57, 0, [0, 5, 2, 6, 0, 5, 3, 4]) } else if region == 1 { (52, 0, [0, 3, 5, 4]) } else { (48, 2, [0, 6, 5, 4]) } }
+        else if song == boss_song() { (50, 2, [0, 5, 6, 4]) }
+        else if song == victory_song() { (50, 1, [0, 4, 5, 3]) }
+        else { (45, 0, [0, 5, 3, 4]) };
+    let chord = prog.get(bar % prog.len()).unwrap_or(0);
+    let tone = |d: Int| root + degree(scale, chord + d);
+    let bar_ms = step_ms * 16;
+    let drive = if song == boss_song() { 3 } else if song == shift_song() { intensity } else if song == victory_song() { 2 } else { 0 };
+    let h = hash(step, bar % 4, song * 31 + region);
+    // the pad: the chord, held over the bar, its filter opening (closing,
+    // for the dirge)
+    if s == 0 {
+        let vol = if song == dirge() { 54 } else { 38 };
+        let (c0, c1) = if song == dirge() { (1600, 300) } else { (500, 1300 + drive * 450) };
+        swept(pad(), hz(m, tone(0) + 12), hz(m, tone(0) + 12), at, bar_ms / 3, bar_ms + bar_ms / 4, vol, -35, c0, c1, 210, 0);
+        swept(pad(), hz(m, tone(2) + 12), hz(m, tone(2) + 12), at, bar_ms / 3, bar_ms + bar_ms / 4, vol, 35, c0, c1, 210, 0);
+        swept(pad(), hz(m, tone(4) + 12), hz(m, tone(4) + 12), at, bar_ms / 3, bar_ms + bar_ms / 4, vol * 3 / 4, 0, c0, c1, 210, 0);
+    }
+    // the arpeggio: the chord's notes up and down, every other note an
+    // octave up, on eighths (on sixteenths when it's urgent), each echoed a
+    // dotted eighth later, quieter, from the other side
+    let fast = drive >= 2;
+    if song != dirge() && (s % 2 == 0 || fast) && (song != title_song() || h % 3 != 0) {
+        let up = [0, 2, 4, 7, 9, 7, 4, 2];
+        let i = if fast { s % 8 } else { (s / 2) % 8 };
+        let d = up.get(i).unwrap_or(0);
+        let oct = if (if fast { s } else { s / 2 }) % 2 == 1 { 24 } else { 12 };
+        let n = tone(d) + oct;
+        let (wave, vol) = if song == title_song() { (pulse(), 70) } else if region == 1 && song == shift_song() { (triangle(), 120) } else if region == 2 && song == shift_song() { (saw(), 62) } else { (square(), 72) };
+        let accent = if s % 4 == 0 { vol } else { vol * 3 / 4 };
+        let pan = if s % 4 < 2 { -40 } else { 40 };
+        let open = 2200 + drive * 500;
+        swept(wave, hz(m, n), hz(m, n), at, 2, step_ms * 2, accent, pan, open, 500, 140, 0);
+        swept(wave, hz(m, n), hz(m, n), at + step_ms * 3, 2, step_ms * 2, accent / 3, -pan, open * 2 / 3, 400, 200, 0);
+    }
+    if song == dirge() && s % 4 == 0 {
+        // (falling notes, slowly, fading into the echo)
+        let d = 7 - (s / 4 + bar * 2) % 8;
+        swept(pulse(), hz(m, tone(d) + 12), hz(m, tone(d) + 12), at, 4, 1400, 70, 0, 2400, 400, 230, 0);
+        swept(pulse(), hz(m, tone(d) + 12), hz(m, tone(d) + 12), at + step_ms * 3, 4, 1200, 24, 40, 1600, 300, 255, 0);
+    }
+    // the bass: a deep sine under each bar to begin with; then a saw, its
+    // filter snapping shut on each note, syncopated, then rolling in
+    // octaves
+    if drive == 0 && song != dirge() && s == 0 {
+        play(sine(), hz(m, tone(0) - 12), hz(m, tone(0) - 12), at, 40, bar_ms, 150, 0, 900, 20, 0);
+    } else if drive >= 1 {
+        let hits = if song == boss_song() { true } else if drive >= 2 { s % 2 == 0 } else { s == 0 || s == 6 || s == 8 || s == 14 };
+        if hits {
+            let n = tone(0) - 12 + (if drive >= 2 && s % 4 == 2 { 12 } else { 0 });
+            let len = if song == boss_song() { step_ms } else { step_ms * 2 };
+            swept(saw(), hz(m, n), hz(m, n), at, 3, len, 150, 0, 1800 + drive * 300, 180, 15, 0);
+            swept(square(), hz(m, n - 12), hz(m, n - 12), at, 3, len, 70, 0, 500, 120, 0, 0);
+        }
+    }
+    // the drum machine: hats; then kick and snare; four to the floor at the end
+    if song == title_song() && s % 4 == 0 {
+        // (a clock ticking: you're on it)
+        play(noise(), 9000 * 16, 9000 * 16, at, 1, 14, if s == 0 { 30 } else { 18 }, if s % 8 == 0 { -50 } else { 50 }, 9500, 60, 0);
+    }
+    if drive >= 1 && (s % 2 == 0 || drive >= 3) {
+        let open_hat = drive >= 2 && s % 4 == 2;
+        let vol = if open_hat { 34 } else if s % 2 == 1 { 14 } else { 22 };
+        play(noise(), 9000 * 16, 9000 * 16, at, 1, if open_hat { 110 } else { 30 }, vol, 30, 9500, 30, 0);
+    }
+    if drive >= 2 {
+        let kick = if drive >= 3 { s % 4 == 0 || s == 14 } else { s == 0 || s == 8 || s == 10 };
+        if kick { play(sine(), 160 * 16, 40 * 16, at, 1, 220, 250, 0, 2000, 8, 0) }
+        if s == 4 || s == 12 {
+            swept(noise(), 3000 * 16, 3000 * 16, at, 1, 170, 100, -10, 7000, 1400, 80, 0);
+            play(triangle(), 220 * 16, 140 * 16, at, 1, 90, 90, -10, 2000, 30, 0);
+        }
+        // (noise swelling into the next phrase, and a crash where it lands)
+        if s == 0 && bar % 4 == 3 { swept(noise(), 4000 * 16, 4000 * 16, at, bar_ms * 9 / 10, bar_ms, 46, 0, 250, 7500, 120, 0) }
+        if s == 0 && bar % 4 == 0 && bar > 0 { swept(noise(), 6000 * 16, 6000 * 16, at, 1, 1100, 52, 20, 9000, 1500, 160, 0) }
+    }
+    // the lead: a wandering tune over it all, two bars in four, sliding up
+    // into each note
+    if drive >= 3 && bar % 4 < 2 && (s == 0 || s == 3 || s == 6 || s == 8 || s == 11 || s == 14) {
+        let d = (hash(s, bar % 4, 77 + song) % 5) * 2 - 4 + (if s == 0 { 0 } else { 2 });
+        let n = root + 24 + degree(scale, chord + d.max(0));
+        swept(pulse(), hz(m, n) * 15 / 16, hz(m, n), at, 12, step_ms * 3, 58, 20, 3200, 1400, 170, 0);
+    }
+    if song == victory_song() && bar % 2 == 1 && (s == 0 || s == 4 || s == 8 || s == 10) {
+        // (the victory's fanfare: the chord climbing, on a bright square)
+        let n = tone(s / 2) + 24;
+        swept(square(), hz(m, n), hz(m, n), at, 6, step_ms * 3, 60, 10, 4200, 1500, 170, 0);
+    }
+    // the title's telemetry: a bleep now and then, ringing out
+    if song == title_song() && s == 10 && bar % 2 == 1 {
+        play(sine(), hz(m, tone(4) + 36), hz(m, tone(4) + 36), at, 2, 260, 64, 50, 8000, 255, 0);
+        play(sine(), hz(m, tone(4) + 36), hz(m, tone(4) + 36), at + step_ms * 3, 2, 260, 22, -50, 8000, 255, 0);
+    }
+}
+
+pub fn volumes(music_vol: Int, sfx_vol: Int) with Io { sound_volume(music_vol, sfx_vol) }
+
+// ---- effects
+
+// the effects the shift asked for this frame (three cells each: what, a
+// number, the pan), a few of each at most
+pub fn effects(m: Music, sounds: Array<Int>, n: Int) with Io {
+    let seen = array(24, 0);
+    let mut i = 0;
+    while i < n {
+        let what = sounds.get(i * 3);
+        let k = sounds.get(i * 3 + 1);
+        let pan = sounds.get(i * 3 + 2);
+        let most = if what == 0 { 3 } else if what == 1 { 4 } else if what == 2 { 2 } else { 1 };
+        if seen.get(what) < most {
+            seen.set(what, seen.get(what) + 1);
+            effect(m, what, k, pan);
+        }
+        i = i + 1;
+    }
+}
+
+pub fn effect(m: Music, what: Int, k: Int, pan: Int) with Io {
+    let jitter = (sound_clock() * 7919) % 200;
+    let now = sound_clock();
+    if what == 0 {
+        // a hit: a tick of noise
+        play(noise(), (1500 + jitter * 4) * 16, 700 * 16, 0, 1, 45, 60, pan, 2600, 20, 1);
+    } else if what == 1 {
+        // a creature cleared: a wet pop, falling
+        let base = if k == 2 || k == 6 { 260 } else { 520 + jitter };
+        swept(square(), base * 16, 80 * 16, 0, 1, 100, 44, pan, 2400, 300, 50, 1);
+        play(noise(), 900 * 16, 300 * 16, 0, 1, 70, 40, pan, 1600, 30, 1);
+    } else if what == 2 {
+        // scrap gathered: a blip, a pentatonic step up for each in a run
+        let penta = [0, 2, 4, 7, 9];
+        let n = 79 + penta.get(k % 5).unwrap_or(0) + (k / 5) * 12;
+        swept(square(), hz(m, n), hz(m, n), 0, 1, 110, 46, pan, 6000, 1500, 90, 1);
+        play(sine(), hz(m, n + 12), hz(m, n + 12), now + 30, 1, 160, 40, pan, 8000, 120, 1);
+    } else if what == 3 {
+        // the robot hit: a crunch, and its systems glitching
+        play(saw(), 280 * 16, 60 * 16, 0, 1, 260, 150, pan, 1500, 40, 1);
+        play(noise(), 800 * 16, 200 * 16, 0, 1, 140, 80, pan, 1200, 30, 1);
+        play(square(), 1800 * 16, 1800 * 16, now + 40, 1, 30, 40, pan, 5000, 20, 1);
+        play(square(), 1200 * 16, 1200 * 16, now + 90, 1, 30, 34, pan, 5000, 20, 1);
+    } else if what == 4 {
+        // the rivet gun: a pneumatic punch
+        let f = if k > 0 { 1300 } else { 950 };
+        swept(noise(), 4000 * 16, 4000 * 16, 0, 1, 60, 70, pan, 5000, 600, 30, 1);
+        play(square(), (f + jitter) * 16, (f / 3) * 16, 0, 1, 50, 34, pan, 3000, 30, 1);
+    } else if what == 5 {
+        // the shockwave: a deep thump, and the charge rushing out
+        play(sine(), 180 * 16, 40 * 16, 0, 2, 480, 200, pan, 1500, 60, 1);
+        swept(noise(), 3000 * 16, 3000 * 16, 0, 20, 600, 80, pan, 6000, 300, 120, 1);
+        swept(saw(), 90 * 16, 45 * 16, 0, 2, 400, 70, pan, 1400, 100, 80, 1);
+    } else if what == 6 {
+        // a crate landing
+        play(sine(), 120 * 16, 32 * 16, 0, 1, 620, 230, pan, 1800, 50, 1);
+        swept(noise(), 1500 * 16, 300 * 16, 0, 1, 420, 120, pan, 3000, 400, 90, 1);
+    } else if what == 7 {
+        // the tesla coil: a crackling zap
+        play(square(), 2200 * 16, 260 * 16, 0, 1, 130, 40, pan, 6500, 70, 1);
+        swept(noise(), 6000 * 16, 2000 * 16, 0, 1, 140, 70, pan, 9000, 2500, 80, 1);
+    } else if what == 8 {
+        // a relay rebooting: power winding up, then a chord as it comes on
+        swept(saw(), 60 * 16, 240 * 16, 0, 400, 520, 90, pan, 300, 3500, 100, 1);
+        swept(noise(), 3000 * 16, 3000 * 16, 0, 400, 520, 60, pan, 400, 6000, 120, 1);
+        let mut n = 0;
+        while n < 4 {
+            let p = 69 + degree(1, n * 2);
+            swept(square(), hz(m, p), hz(m, p), now + 480 + n * 60, 2, 900, 70, (n - 2) * 30, 4500, 900, 200, 1);
+            n = n + 1;
+        }
+        swept(pad(), hz(m, 57), hz(m, 57), now + 480, 30, 1400, 70, 0, 2500, 600, 200, 1);
+    } else if what == 9 {
+        // a crate, or a scrap magnet: notes climbing
+        let mut n = 0;
+        while n < 5 {
+            let p = 72 + degree(1, n * 2);
+            swept(square(), hz(m, p), hz(m, p), now + n * 60, 1, 500, 70, 0, 5000, 1200, 180, 1);
+            n = n + 1;
+        }
+    } else if what == 10 {
+        // a level: an arpeggio up, over a swell
+        let mut n = 0;
+        while n < 6 {
+            let p = 67 + degree(1, n * 2);
+            swept(square(), hz(m, p), hz(m, p), now + n * 50, 1, 600, 76, (n - 3) * 25, 5000, 1200, 180, 1);
+            n = n + 1;
+        }
+        swept(pad(), hz(m, 55), hz(m, 55), 0, 300, 1400, 70, 0, 500, 2600, 220, 1);
+    } else if what == 11 {
+        // the boss's roar
+        let low = if k > 0 { 70 } else { 90 };
+        play(saw(), low * 16, 42 * 16, 0, 120, 1700, 190, pan, 900, 120, 1);
+        swept(noise(), 900 * 16, 200 * 16, 0, 200, 1300, 110, pan, 1200, 300, 120, 1);
+    } else if what == 12 {
+        // spit
+        swept(square(), 320 * 16, 120 * 16, 0, 1, 110, 36, pan, 1800, 400, 60, 1);
+    } else if what == 13 {
+        // a relay's power cut: winding down
+        swept(saw(), 240 * 16, 40 * 16, 0, 10, 700, 100, pan, 3000, 200, 100, 1);
+        swept(noise(), 1200 * 16, 200 * 16, 0, 10, 600, 70, pan, 4000, 300, 100, 1);
+    } else if what == 14 {
+        // seekers launching: a chirp up
+        play(sine(), 900 * 16, 2200 * 16, 0, 10, 160, 46, pan, 6000, 160, 1);
+        play(square(), 1800 * 16, 2600 * 16, now + 40, 1, 60, 18, pan, 4000, 100, 1);
+    } else if what == 15 {
+        // repaired: two bright bleeps
+        play(triangle(), hz(m, 76), hz(m, 76), 0, 1, 260, 120, pan, 6000, 150, 1);
+        play(triangle(), hz(m, 83), hz(m, 83), now + 90, 1, 420, 120, pan, 6000, 150, 1);
+    } else if what == 16 {
+        // something big cleared
+        play(sine(), 90 * 16, 28 * 16, 0, 1, 900, 240, pan, 1500, 120, 1);
+        swept(noise(), 1000 * 16, 150 * 16, 0, 1, 700, 140, pan, 5000, 300, 120, 1);
+    } else if what == 17 {
+        // a warning: a klaxon, two tones
+        let f = if k > 0 { 440 } else { 660 };
+        play(pulse(), f * 16, f * 16, 0, 5, 160, 60, 0, 2500, 120, 1);
+        play(pulse(), (f * 4 / 3) * 16, (f * 4 / 3) * 16, now + 180, 5, 240, 60, 0, 2500, 120, 1);
+    } else if what == 18 {
+        // a credit chip
+        play(square(), hz(m, 91), hz(m, 91), 0, 1, 70, 40, pan, 7000, 100, 1);
+        play(square(), hz(m, 96), hz(m, 96), now + 60, 1, 160, 40, pan, 7000, 100, 1);
+    } else if what == 20 {
+        // the menus: moving
+        play(square(), hz(m, 84), hz(m, 84), 0, 1, 40, 34, 0, 4000, 60, 1);
+    } else if what == 21 {
+        // the menus: choosing
+        play(square(), hz(m, 79), hz(m, 79), 0, 1, 70, 44, 0, 5000, 120, 1);
+        play(square(), hz(m, 86), hz(m, 86), now + 60, 1, 160, 44, 0, 5000, 140, 1);
+    } else if what == 22 {
+        // the menus: back, or no
+        swept(square(), hz(m, 67), hz(m, 62), 0, 1, 140, 40, 0, 3000, 600, 80, 1);
+    } else if what == 23 {
+        // the power coming back on: everything spinning up, and a great chord
+        swept(saw(), 40 * 16, 220 * 16, 0, 1600, 2000, 110, 0, 200, 4000, 140, 1);
+        swept(noise(), 3000 * 16, 3000 * 16, 0, 1800, 2000, 70, 0, 300, 8000, 160, 1);
+        let mut n = 0;
+        while n < 5 {
+            let p = 50 + degree(1, n * 2) + 12;
+            swept(pad(), hz(m, p), hz(m, p), now + 1900, 300, 6000, 70, (n - 2) * 30, 600, 3200, 230, 1);
+            n = n + 1;
+        }
+    }
+}
+
+pub fn ui_move() -> Int { 20 }
+pub fn ui_ok() -> Int { 21 }
+pub fn ui_back() -> Int { 22 }
+pub fn power_chord() -> Int { 23 }

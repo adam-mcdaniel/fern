@@ -1,0 +1,298 @@
+// The pictures of the tools and the farm's improvements, for the shed and
+// the market: pixel art written as text, 16 x 16, on a tag of the tool's
+// rarity (green common, blue uncommon, purple rare). They're made once,
+// when the game starts (see `icons`), and drawn from then on.
+
+use super::gfx::*;
+use super::tools::*;
+
+pub fn tool_color(t: Int) -> Int {
+    let r = tool_rarity(t);
+    if r == 2 { 0xa860d8 } else if r == 1 { 0x4a90d8 } else { 0x62b052 }
+}
+
+// the colors the pictures are written in, by letter
+fn keys() -> String { "kwgGsrRoyYbBteEluUcpvnmh" }
+fn colors() -> List<Int> {
+    [0x2a1a10, 0xfff8ec, 0x9aa0a8, 0x5a6068, 0xd8e0e8, 0xe0442e, 0x8a2a20, 0xf08a2a, 0xf8d040, 0xc89820,
+     0x9a6234, 0x5a3a1a, 0xe0b878, 0x5ab04a, 0x2e7a34, 0xa0e070, 0x4a8ae0, 0x2a4a90, 0x9ae0f8, 0xf8a0c0,
+     0x9a5ad0, 0x1a1a24, 0xf4e4c0, 0xfff0a0]
+}
+
+fn art(t: Int) -> List<String> {
+    if t == 0 {
+        // the watering can
+        ["................", "...........kk...", "..........k..k..", "....kkkkkk...k..", "...kgggggk..k...",
+         "..kgssssgkkk....", "kkkgsgggggk..kkk", "k.kgggggggk.kcuk", "k.kgggggggkkcuk.", "k.kgggggggggkk..",
+         ".kkgggggggk.....", "...kGGGGGk...c..", "....kkkkk...c.c.", "..............c.", "................", "................"]
+    } else if t == 1 {
+        // the rooster
+        ["......rr........", ".....rrrr.......", ".....kwwkk......", "....kwnwwk......", "...yywwwwk...kk.",
+         "....kRwwwk..keek", ".....kwwwwkkeEek", ".....kwwwwwwwEk.", "....kwwwwwwwwk..", "....kwwwwwwwk...",
+         ".....kwwwwwk....", "......kkkkk.....", ".......y..y.....", "......yy.yy.....", "................", "................"]
+    } else if t == 2 {
+        // the compost heap
+        ["................", "................", "................", "......e.........", ".....kkk..o.....",
+         "....kbBbk.......", "...kbbbBbk..e...", "..kbBbebbbk.....", "..kbbbbbBbbk....", ".kbBbbobbbBbk...",
+         ".kbbbbbbebbbbk..", "kbbBbbbbbbBbbbk.", "kkkkkkkkkkkkkkk.", "................", "................", "................"]
+    } else if t == 3 {
+        // the scarecrow
+        ["................", ".....kkkkk......", "....kbbbbbk.....", "..kkkkkkkkkkk...", "....kmmmmmk.....",
+         "....kmnmnmk.....", "....kmmmmmk.....", "..yykkkkkkkyy...", "kyyurrrrrrruyyk.", ".yyurrrrrrruyy..",
+         "....kurrrrk.....", ".....kbbbk......", "......kbk.......", "......kbk.......", "......kbk.......", "................"]
+    } else if t == 4 {
+        // the horseshoe
+        ["................", "...kkkk..kkkk...", "..kgsgk..kgsgk..", "..kgggk..kgggk..", ".kgsngk..kgnsgk.",
+         ".kgggk....kgggk.", ".kgsgk....kgsgk.", ".kgngk....kgngk.", ".kgggk....kgggk.", "..kggk....kggk..",
+         "..kgsgkkkkgsgk..", "...kgggggggk....", "....kkkkkkkk....", "................", "................", "................"]
+    } else if t == 5 {
+        // the pitchfork
+        ["...k...k...k....", "...g...g...g....", "...g...g...g....", "...g...g...g....", "...g...g...g....",
+         "...gggggggggg...", ".......g........", ".......b........", ".......b........", ".......b........",
+         ".......b........", ".......b........", ".......b........", ".......b........", ".......B........", "................"]
+    } else if t == 6 {
+        // the beehive
+        ["................", "......kkkk......", ".....kyyyyk.....", "....kYYYYYYk....", "...kyyyyyyyyk...",
+         "...kYYYYYYYYk...", "..kyyyykkyyyyk..", "..kYYYknnkYYYk..", "..kyyyknnkyyyk..", ".kkkkkkkkkkkkkk.",
+         "................", ".....w.....w....", "....ynk...ynk...", ".....w.....w....", "................", "................"]
+    } else if t == 7 {
+        // the old tractor
+        ["................", "................", ".....kkkk.......", ".....kccrk......", ".....kccrk...k..",
+         "..kkkkkkrkkkkk..", "..krrrrrrrrrrk..", "..krrrrrrrrrrk..", ".kkkkrrrkkkkrk..", "kGGGGkrkGGGkkk..",
+         "kGnnGGkkGnGGk...", "kGnsnGk.kGGGk...", "kGnnGGk..kkk....", ".kGGGk..........", "..kkk...........", "................"]
+    } else if t == 8 {
+        // the weathervane
+        ["................", ".......k........", "..rkkkkkkkkkr...", ".rrr...k...k.k..", "..rkkkkkkkkkkk..",
+         ".......k........", ".......k........", "....kkkkkkk.....", ".......k........", "......kkk.......",
+         ".......k........", ".......k........", ".......k........", "......kkk.......", "................", "................"]
+    } else if t == 9 {
+        // the piggy bank
+        ["................", "......kkkk......", "......yyyy......", "...kkkkkkkkk....", "..kppppppppppk..",
+         ".kppnpppppppppk.", "kpppppppppppppkk", "kpppppppppppppkp", "kppppppppppppk.k", ".kppppppppppppk.",
+         "..kpppppppppk...", "...kpk...kpk....", "...kkk...kkk....", "................", "................", "................"]
+    } else if t == 10 {
+        // the seed catalogue
+        ["................", "..kkkkkkkkkkk...", "..kmmmmmmmmmkk..", "..kmmmmemmmmkmk.", "..kmmmeleemmkmk.",
+         "..kmmmmemmmmkmk.", "..kmmmmEmmmmkmk.", "..kmmbbbbbmmkmk.", "..kmmbbbbbmmkmk.", "..kmmmmmmmmmkmk.",
+         "..kmkkkkkkkmkmk.", "..kmmmmmmmmmkmk.", "..kkkkkkkkkkkmk.", "...kkkkkkkkkkk..", "................", "................"]
+    } else if t == 11 {
+        // gran's recipe: a pie
+        ["................", "................", "................", "....kkkkkkkk....", "..kktyttyttykk..",
+         ".ktyrtyrtyrtytk.", ".ktttttttttttk..", "kRtytytytytytyRk", "kRRtttttttttRRRk", ".kRRRRRRRRRRRRk.",
+         "..kbbbbbbbbbbk..", "...kkkkkkkkkk...", "................", "................", "................", "................"]
+    } else if t == 12 {
+        // the wind chime
+        ["................", ".....kkkkkk.....", "....kbbbbbbk....", "....kkkkkkkk....", ".....k.k.k.k....",
+         ".....k.k.k.k....", "....kskk.k.k....", "....ksk.ksk.k...", "....ksk.ksk.ksk.", "....kkk.ksk.ksk.",
+         "........kkk.ksk.", "............kkk.", ".......k........", "......kyk.......", ".......k........", "................"]
+    } else if t == 13 {
+        // the barn cat
+        ["................", "..k.........k...", ".kok.......kok..", ".kookkkkkkkkook..", "kooooooooooook..",
+         "koonoooooooonok.", "kooeoooooooeook.", "kooooooRoooooook", "koooowwRwwooook.", ".koooowwwwoook..",
+         "..kooooooooook..", "...kkkkkkkkkk...", "................", "................", "................", "................"]
+    } else if t == 14 {
+        // the milk pail
+        ["................", "....kkkkkkk.....", "...k.......k....", "..k.........k...", "..kkkkkkkkkkk...",
+         "..kwwwwwwwwwk...", "..kgsssssssgk...", "..kgsgggggsgk...", "...kgggggggk....", "...kgsssssgk....",
+         "...kgggggggk....", "....kgggggk.....", "....kkkkkkk.....", "................", "................", "................"]
+    } else if t == 15 {
+        // the scythe
+        ["................", "..kkkkkkk.......", ".kssssssskk.....", "kggggggggsgk....", ".kkkkkkkkggbk...",
+         "..........kbk...", "..........b.....", "...........b....", "...........b....", "............b...",
+         "............b...", ".............b..", ".............b..", "..............B.", "................", "................"]
+    } else if t == 16 {
+        // the spreader: a sack, seeds flying out
+        ["................", "....kkkkk.......", "....kbbbk..y....", "...kmmmmmk...y..", "..kmmmmmmmk.y.y.",
+         "..kmmtmmmmk...y.", ".kmmtttmmmmk.y..", ".kmmmtmmmmmk....", ".kmmmmmmmmmk..y.", ".kmmmmmmmmmk....",
+         "..kmmmmmmmk.....", "...kkkkkkk......", "................", "................", "................", "................"]
+    } else if t == 17 {
+        // the thermos
+        ["................", ".....kkkk.......", ".....kGGk.......", "....kkkkkk......", "....kuuuuk......",
+         "....kucuuk......", "....kucuuk......", "....kuuuuk......", "....kwwwwk......", "....kuuuuk......",
+         "....kucuuk......", "....kuuuuk......", "....kUUUUk......", "....kkkkkk......", "................", "................"]
+    } else if t == 18 {
+        // the sundial
+        ["................", "................", "....kkkkkkk.....", "..kkgsssssgkk...", ".kgsssgkgsssgk..",
+         ".kssssgkkssssk..", "kgsssgkkkgsssgk.", "kgsssgkkkkgssgk.", ".kgsssssssssgk..", "..kkgggggggkk...",
+         "....kkkkkkk.....", "...kGGGGGGGk....", "...kkkkkkkkk....", "................", "................", "................"]
+    } else if t == 19 {
+        // the crow's feather
+        ["................", "...........kk...", "..........kGnk..", ".........kGnnk..", "........kGnnk...",
+         ".......kGnnnk...", "......kGnnnk....", ".....kGnnnk.....", "....kGnnnk......", "...kGnnnk.......",
+         "...knnnk........", "..kGnkk.........", "..kk............", ".k..............", "................", "................"]
+    } else if t == 20 {
+        // the root cellar: a crate of carrots
+        ["................", "....e.e.e.......", "...eoeoeoe......", "...oooooooo.....", "..kkkkkkkkkkk...",
+         "..kbbbbbbbbbk...", "..kBkkkkkkkBk...", "..kbbbbbbbbbk...", "..kBkkkkkkkBk...", "..kbbbbbbbbbk...",
+         "..kkkkkkkkkkk...", "................", "................", "................", "................", "................"]
+    } else if t == 21 {
+        // the flower crown
+        ["................", "................", "....pypkkkpyp...", "...ppppeeeppp...", "..pyp.....pyp...",
+         "..ppe......ep...", ".pyp........yp..", ".pppe......epp..", "..pyp.....pyp...", "..pppeeeeeppp...",
+         "...pyp.pyp.py...", "....ppp.ppp.....", "................", "................", "................", "................"]
+    } else if t == 22 {
+        // the fruit basket
+        ["................", "................", "......e.........", "....rrkoo.y.....", "...rrrroooyyy...",
+         "..rwrrroowoyy...", "..kkkkkkkkkkkk..", "..ktbtbtbtbtbk..", "..kbtbtbtbtbtk..", "...ktbtbtbtbk...",
+         "...kbtbtbtbtk...", "....kkkkkkkk....", "................", "................", "................", "................"]
+    } else if t == 23 {
+        // the harvest moon
+        ["................", ".....kkkkk......", "...kkhhhhhkk....", "..khhhyhhhhhhk..", ".khhhhhhhthhhk..",
+         ".khhthhhhhhhhhk.", "khhhhhhhhhthhhk.", "khhhhhhhhhhhhhhk", "khhthhhhhhhhhhk.", ".khhhhhthhhhhhk.",
+         ".khhhhhhhhthhk..", "..khhhhhhhhhk...", "...kkhhhhhkk....", ".....kkkkk......", "................", "................"]
+    } else if t == 24 {
+        // the kickback spring
+        ["................", "....kkkkkkk.....", "....krrrrrk.....", "....kkkkkkk.....", "....ksssssk.....",
+         ".....kgggk......", "....ksssssk.....", ".....kgggk......", "....ksssssk.....", ".....kgggk......",
+         "....ksssssk.....", ".....kgggk......", "....kkkkkkk.....", "....kGGGGGk.....", "....kkkkkkk.....", "................"]
+    } else if t == 25 {
+        // the cow bell
+        ["................", ".....kkkkk......", "....kbbbbbk.....", "....kbk.kbk.....", "....kkkkkkk.....",
+         "....kyyyyyk.....", "...kyhyyyyyk....", "...kyhyyyyyk....", "..kyyyyyyyyyk...", "..kyyyyyyyyyk...",
+         ".kYYYYYYYYYYYk..", ".kkkkkkkkkkkkk..", "......kGk.......", ".......k........", "................", "................"]
+    } else if t == 26 {
+        // the seed bag
+        ["................", ".....k...k......", "......kbk.......", ".....kkkkk......", "....kttttk......",
+         "...kttttttk.....", "..kttttttttk....", "..kttyeyttttk...", ".kttteletttttk..", ".ktttteEttttk...",
+         ".kttttttttttk...", "..ktttttttttk...", "...kkkkkkkkk....", "................", "................", "................"]
+    } else if t == 27 {
+        // the rain barrel
+        ["..u......u...u..", "......u.........", "...kkkkkkkkk....", "..kcuucuucuuk...", "..kbbbbbbbbbk...",
+         "..kGGGGGGGGGk...", "..kbBbbBbbBbk...", "..kbBbbBbbBbk...", "..kGGGGGGGGGk...", "..kbBbbBbbBbk...",
+         "..kbBbbBbbBbk...", "..kGGGGGGGGGk...", "...kkkkkkkkk....", "................", "................", "................"]
+    } else if t == 28 {
+        // the greenhouse
+        ["................", ".......kk.......", "......kcck......", ".....kccwck.....", "....kcccccck....",
+         "...kccwccccck...", "..kkkkkkkkkkkk..", "..kccckccckcck..", "..kcwckcwckcck..", "..kceckcelkcek..",
+         "..keEekeEekeEk..", "..kkkkkkkkkkkk..", "................", "................", "................", "................"]
+    } else {
+        // the almanac
+        ["................", "..kkkkkkkkkkk...", "..kvvvvvvvvvkk..", "..kvvvyvvvvvkmk.", "..kvvyyyvvvvkmk.",
+         "..kvvvyvvwvvkmk.", "..kvvvvvwwvvkmk.", "..kvvvvvvwvvkmk.", "..kvvvvvvvvvkmk.", "..kvvyvyvyvvkmk.",
+         "..kvvvvvvvvvkmk.", "..kkkkkkkkkkkmk.", "...kkkkkkkkkkk..", "................", "................", "................"]
+    }
+}
+
+// each fair's visitor
+fn fair_art(f: Int) -> List<String> {
+    if f == 0 {
+        // the gale: gusts
+        ["................", "................", "..kkkkkkkk......", ".kccccccccck.....", "..kkkkkkkkcck....",
+         "..........kck...", "...kkkkkkkkck....", "..kcccccccck.....", "...kkkkkkkk.....", "...kkkkkkk......",
+         "..kcccccccck....", "...kkkkkkkcck...", ".........kcck...", "..........kk....", "................", "................"]
+    } else if f == 1 {
+        // the murder: a crow
+        ["................", "......kkkk......", ".....knnnnk.....", "....knnnwnnk....", "....knnnnnnkyy..",
+         "....knnnnnnkyyy.", "...knnGnnnnk....", "..knnGGnnnnk....", ".knnnGGGnnnk....", ".knnnnGGnnk.....",
+         "..knnnnnnk......", "...kkkkkk.......", ".....y..y.......", "....yy.yy.......", "................", "................"]
+    } else if f == 2 {
+        // the drought: a blazing sun
+        ["................", ".......y........", "...y...y...y....", "....y.kkk.y.....", ".....kyyyk......",
+         "...kkyhhhykk....", "yyyky.hhh.ykyyy.", "...kkyhhhykk....", ".....kyyyk......", "....y.kkk.y.....",
+         "...y...y...y....", ".......y........", "..bbBbbbBbbbB...", "..BbbBbbbBbBb...", "................", "................"]
+    } else if f == 3 {
+        // the frost: a snowflake
+        ["................", ".......c........", "....c..c..c.....", ".....c.c.c......", "......ccc.......",
+         "..c...ccc...c...", "...cccccccccc...", "..c...ccc...c...", "......ccc.......", ".....c.c.c......",
+         "....c..c..c.....", ".......c........", "................", "................", "................", "................"]
+    } else if f == 4 {
+        // the tax man: a fat purse
+        ["................", "......kkkk......", ".......kk.......", "......kttk......", ".....kttttk.....",
+         "....kttttttk....", "...kttkyyktttk..", "...kttyykkttk...", "..kttttyyttttk..", "..kttkkyyttttk..",
+         "..ktttkyykttttk.", "...ktttttttttk..", "....kkkkkkkkk...", "................", "................", "................"]
+    } else if f == 5 {
+        // the flood: waves
+        ["................", "................", "....kkk.........", "..kkuuuk...kkk..", ".kuuuuuukkkuuuk.",
+         "kuuccuuuuuuuuuk.", "kuuuuuuccuuuuuuk", "kkkuuuuuuuuuuukk", "kuuuukkkuuuuukuk", "kuucuuuuukkkuuuk",
+         "kuuuuuuccuuuuuuk", "kUUUUUUUUUUUUUUk", "kkkkkkkkkkkkkkkk", "................", "................", "................"]
+    } else if f == 6 {
+        // the judge: a rosette
+        ["................", ".....kkkkk......", "...kkuuuuukk....", "..kuuyyyyyuuk...", "..kuyyhhhyyuk...",
+         ".kuyyhhhhhyyuk..", ".kuyyhhhhhyyuk..", ".kuyyhhhhhyyuk..", "..kuyyhhhyyuk...", "..kuuyyyyyuuk...",
+         "...kkuukuukk....", "....kuuk.kuuk...", "....kuk...kuk...", "....kk.....kk...", "................", "................"]
+    } else if f == 7 {
+        // the short day: a clock
+        ["................", ".....kkkkkk.....", "...kkwwwwwwkk...", "..kwwwwkwwwwwk..", "..kwwwwkwwwwwk..",
+         ".kwwwwwkwwwwwwk.", ".kwwwwwkwwwwwwk.", ".kwwwwwkkkkkwwk.", ".kwwwwwwwwwwwwk.", "..kwwwwwwwwwwk..",
+         "..kwwwwwwwwwwk..", "...kkwwwwwwkk...", ".....kkkkkk.....", "................", "................", "................"]
+    } else {
+        // lord goose
+        [".....kkkkkk.....", ".....knnnnk.....", ".....knnnnk.....", "....krrrrrrk....", "...kkkkkkkkkk...",
+         "....kwwwwwwk....", "...kwwgggwwwk...", "...kwwgnkwwwkoo.", "...kwwgggwwoooo.", "...kwwwwwwwwkoo.",
+         "....kwwwwwwk....", ".....kwwwwk.....", ".....kwwwwk.....", "....kwwwwwwk....", "................", "................"]
+    }
+}
+
+// the pictures made, into the picture's own store of them
+pub fn load_icons(g: Gfx) {
+    let a = array(tool_count() + 9, blank(1, 1));
+    let mut t = 0;
+    while t < tool_count() {
+        a.set(t, sprite(art(t), keys(), colors()));
+        t = t + 1;
+    }
+    let mut f = 0;
+    while f < 9 {
+        a.set(tool_count() + f, sprite(fair_art(f), keys(), colors()));
+        f = f + 1;
+    }
+    g.tool_art = a;
+}
+
+// fair f's visitor, with its top left at (x, y), on a red tag
+pub fn fair_icon(g: Gfx, f: Int, x: Int, y: Int) {
+    tag_square(g, x, y, 22, 0xd85a4a);
+    let i = tool_count() + f;
+    if i < g.tool_art.len() {
+        let s = g.tool_art.get(i);
+        draw_shadow(g, s, x + 4, y + 4, 90);
+        draw(g, s, x + 3, y + 3);
+    }
+}
+
+// tool t's picture on its tag, with its top left at (x, y)
+pub fn tool_icon(g: Gfx, t: Int, x: Int, y: Int) {
+    tag_square(g, x, y, 22, tool_color(t));
+    if t < g.tool_art.len() {
+        let s = g.tool_art.get(t);
+        draw_shadow(g, s, x + 4, y + 4, 90);
+        draw(g, s, x + 3, y + 3);
+    }
+}
+
+fn tag_square(g: Gfx, x: Int, y: Int, s: Int, color: Int) {
+    round_rect(g, x, y, s, s, 3, scale(color, 170));
+    round_rect(g, x + 1, y + 1, s - 2, s - 2, 2, color);
+    rect(g, x + 3, y + 1, s - 6, 1, mix(color, 0xffffff, 100));
+}
+
+// an improvement's picture: a ball, a shield, a plot, a sack
+pub fn good_icon(g: Gfx, k: Int, x: Int, y: Int) {
+    tag_square(g, x, y, 22, 0xd8902a);
+    let cx = x + 11;
+    let cy = y + 11;
+    if k == 0 {
+        disc(g, cx, cy, 6, 0x5a6070);
+        disc(g, cx, cy, 5, 0xd8e0e8);
+        disc(g, cx - 2, cy - 2, 1, 0xffffff);
+    } else if k == 1 {
+        rect(g, cx - 5, cy - 6, 11, 7, 0x5ae0ff);
+        let mut r = 0;
+        while r < 6 {
+            rect(g, cx - 5 + r, cy + 1 + r, 11 - r * 2, 1, 0x5ae0ff);
+            r = r + 1;
+        }
+        rect(g, cx - 3, cy - 4, 2, 4, 0xffffff);
+    } else if k == 2 {
+        disc(g, cx, cy, 7, 0x6a4026);
+        disc(g, cx, cy, 6, 0x8c5a36);
+        rect(g, cx - 5, cy - 2, 11, 1, 0x6a4026);
+        rect(g, cx - 5, cy + 1, 11, 1, 0x6a4026);
+        text_mid(g, "+", cx + 1, cy - 4, 1, 0xffffff);
+    } else {
+        rect(g, cx - 5, cy - 4, 11, 11, 0xe8dcc0);
+        rect(g, cx - 4, cy - 6, 9, 3, 0xc8b898);
+        rect(g, cx - 3, cy - 1, 7, 4, 0x5aa040);
+        put(g, cx, cy - 2, 0x7ad85a);
+    }
+}

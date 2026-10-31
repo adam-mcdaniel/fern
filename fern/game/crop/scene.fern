@@ -1,0 +1,671 @@
+// Drawing the table each frame: the baked picture, then what moves on
+// it, back to front: the lamps that are lit, the plants (growing,
+// bouncing when they're hit, shining when they're ripe), the hay bales,
+// the fence, the windmill's sails, the plunger, the flippers, the balls
+// and the crows, each with its shadow; then the particles, the numbers
+// popping up, and the banner.
+
+use crate::math::{sin, cos, isqrt};
+use super::gfx::*;
+use super::physics::*;
+use super::table::*;
+use super::art::*;
+use super::sprites::*;
+use super::play::*;
+use super::fx::*;
+use super::seeds::*;
+use super::run::*;
+use super::run::{f_murder as crop_fair_murder};
+
+// the background, with the table's strip shaken by (ox, oy)
+pub fn backdrop(g: Gfx, a: Art) {
+    let px = g.px;
+    let bg = a.bg;
+    let w = sw();
+    let ox = g.ox;
+    let oy = g.oy;
+    let mut y = 0;
+    while y < sh() {
+        let sy = (y - oy).clamp(0, sh() - 1);
+        let mut x = 0;
+        let row = y * w;
+        while x < w {
+            if x >= 96 && x < 384 {
+                let sx = (x - ox).clamp(0, w - 1);
+                px.set(row + x, bg.get(sy * w + sx));
+            } else {
+                px.set(row + x, bg.get(row + x));
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// where table point (x, y) is on the screen, shaken
+fn sx(g: Gfx, x: Int) -> Int { x + table_x() + g.ox }
+fn sy(g: Gfx, y: Int) -> Int { y + g.oy }
+
+pub fn draw_table(g: Gfx, a: Art, sp: Sprites, w: Week) {
+    let t = w.t;
+    let p = t.p;
+    let f = w.fx;
+    g.ox = if f.shake > 0 { rand(f, f.shake * 2 + 1) - f.shake } else { 0 };
+    g.oy = if f.shake > 0 { rand(f, f.shake * 2 + 1) - f.shake } else { 0 };
+    backdrop(g, a);
+    weather(f, w.run.season, w.frame);
+    inserts(g, a, w);
+    // the plants
+    let mut i = 0;
+    while i < t.n_plots {
+        draw_plant(g, sp, w, i);
+        i = i + 1;
+    }
+    // the hay bales
+    i = 0;
+    while i < t.n_hay {
+        let lit = w.hay_lit.get(i);
+        let x = sx(g, t.hay_x.get(i));
+        let y = sy(g, t.hay_y.get(i));
+        shadow(g, x + 3, y + 3, 8, 7, 90);
+        let k = 256 + lit * 8;
+        if t.farm == 1 {
+            // (an apple tree, shaking when it's hit)
+            let wob = if lit > 0 { sin(w.sines, lit * 120) * lit >> 15 } else { 0 };
+            shadow(g, x + 4, y + 4, 11, 9, 70);
+            draw_scaled(g, tree_for(sp, w.run.season), x + wob, y, 256, 256, false, 256);
+        } else {
+            draw_scaled(g, sp.hay, x, y, k, k, false, 256);
+        }
+        if lit > 0 && t.farm != 1 {
+            ring(g, x, y, 8 + (10 - lit) / 2, 1, 0xfff4c0, lit * 20);
+            glow(g, x, y, 12, scale(0x605020, lit * 20));
+        }
+        i = i + 1;
+    }
+    fence(g, w);
+    windmill(g, w);
+    plunger(g, w);
+    barn_light(g, w);
+    // the flippers
+    i = 0;
+    while i < p.flips.len() {
+        draw_flipper(g, p, p.flips.get(i));
+        i = i + 1;
+    }
+    // the balls
+    i = 0;
+    while i < max_balls() {
+        let b = p.balls.get(i);
+        if b.live && !(b.held && w.barn_hold.get(i) > 0) { draw_ball(g, sp, w, b) }
+        i = i + 1;
+    }
+    crows(g, sp, w);
+    particles(g, f);
+    fliers(g, f);
+    pops(g, f);
+    if f.flash > 0 { rect_blend(g, 96, 0, 288, sh(), f.flash_color, f.flash * 14) }
+}
+
+// the season in the air over the table: blossom drifting down in
+// spring, pollen in summer, leaves falling in autumn, snow in winter
+fn weather(f: Fx, season: Int, frame: Int) {
+    let every = if season == 0 { 9 } else if season == 1 { 14 } else if season == 2 { 7 } else { 3 };
+    if frame % every == 0 {
+        let x = 100 + rand(f, 280);
+        if season == 0 {
+            part(f, p_petal(), x, -2, rand(f, 60) - 30, 30 + rand(f, 30), 420, if rand(f, 3) == 0 { 0xffffff } else { 0xffb8d0 });
+        } else if season == 1 {
+            part(f, p_spark(), x, 20 + rand(f, 230), rand(f, 40) - 20, -rand(f, 20), 140, 0x706830);
+        } else if season == 2 {
+            let c = if rand(f, 3) == 0 { 0xe8682e } else if rand(f, 2) == 0 { 0xc8402a } else { 0xd8a030 };
+            part(f, p_petal(), x, -2, rand(f, 80) - 20, 40 + rand(f, 40), 420, c);
+        } else {
+            part(f, p_petal(), x, -2, rand(f, 40) - 20, 25 + rand(f, 30), 520, if rand(f, 4) == 0 { 0xd8e8ff } else { 0xffffff });
+        }
+    }
+}
+
+// ---- the lamps
+
+fn inserts(g: Gfx, a: Art, w: Week) {
+    let t = w.t;
+    let blink = (w.frame / 8) % 2 == 0;
+    let fast = (w.frame / 4) % 2 == 0;
+    let mut n = 0;
+    while n < t.n_ins {
+        let on = if n < 3 {
+            w.lanes.get(n) && (w.lanes_flash == 0 || fast) || (w.phase == ph_serve() && w.skill_lane == n && blink)
+        } else if n == i_barn() { w.basket > 0 && (if w.basket * w.mult > w.rent / 3 { fast } else { blink }) }
+        else if n == i_orbit() { blink && w.phase == ph_play() && w.frame % 120 < 60 }
+        else if n == i_kick() { w.kick_lit }
+        else if n == i_save() { w.save > 0 && (w.save > 120 || fast) }
+        else if n == i_fence() { !(w.down.get(0) && w.down.get(1) && w.down.get(2)) && blink && w.frame % 180 < 90 }
+        else { false };
+        if on { lamp(g, w, n) }
+        n = n + 1;
+    }
+    // the letters on the lanes' lamps
+    let mut k = 0;
+    while k < 3 {
+        let x = sx(g, t.lane_x.get(k));
+        let y = sy(g, 50);
+        let ch = if k == 0 { "H" } else if k == 1 { "A" } else { "Y" };
+        text(g, ch, x - 2, y - 3 - 9, 1, if w.lanes.get(k) { 0xffffff } else { 0x2a4020 });
+        k = k + 1;
+    }
+}
+
+// insert n, lit: its glass bright, a glow round it
+fn lamp(g: Gfx, w: Week, n: Int) {
+    let t = w.t;
+    let x = sx(g, t.ins_x.get(n));
+    let y = sy(g, t.ins_y.get(n));
+    let color = t.ins_color.get(n);
+    let kind = t.ins_kind.get(n);
+    let dir = t.ins_dir.get(n);
+    let c = sin(w.sines, dir);
+    let co = cos(w.sines, dir);
+    let mut dy = -5;
+    while dy <= 5 {
+        let mut dx = -5;
+        while dx <= 5 {
+            let u = (dx * co + dy * c) >> 16;
+            let v = (dy * co - dx * c) >> 16;
+            let inside = if kind == ik_dot() { dx * dx + dy * dy <= 10 }
+                else if kind == ik_arrow() { u >= -4 && u <= 4 && v.abs() * 2 <= (4 - u) + 1 }
+                else { dx.abs() <= 4 && dy >= -4 && dy <= 3 + (4 - dx.abs()) / 2 };
+            if inside { put(g, x + dx, y + dy, mix(color, 0xffffff, if dx + dy < -2 { 140 } else { 50 })) }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    glow(g, x, y, 10, scale(color, 90));
+}
+
+// ---- the plants
+
+// the orchard's trees as the season has them
+fn tree_for(sp: Sprites, season: Int) -> Sprite {
+    if season == 3 { sp.tree_bare } else if season == 2 { sp.tree_autumn } else { sp.tree }
+}
+
+// a plot still to be bought: a little sign on a post
+pub fn for_sale(g: Gfx, x: Int, y: Int) {
+    // (staked out with string, a stake at each corner)
+    line(g, x - 8, y - 6, x + 8, y - 6, 0xf0e4c8, 200);
+    line(g, x + 8, y - 6, x + 8, y + 7, 0xf0e4c8, 200);
+    line(g, x + 8, y + 7, x - 8, y + 7, 0xf0e4c8, 200);
+    line(g, x - 8, y + 7, x - 8, y - 6, 0xf0e4c8, 200);
+    stake(g, x - 8, y - 6);
+    stake(g, x + 8, y - 6);
+    stake(g, x - 8, y + 7);
+    stake(g, x + 8, y + 7);
+    // (and a sign, with a coin painted on it)
+    shadow(g, x + 3, y + 5, 6, 2, 80);
+    rect(g, x, y - 3, 2, 9, 0x5a3a1a);
+    rect(g, x + 1, y - 3, 1, 9, 0x8a5a2a);
+    round_rect(g, x - 6, y - 11, 14, 10, 2, 0x5a3a1a);
+    round_rect(g, x - 5, y - 10, 12, 8, 1, 0xe8d0a0);
+    rect(g, x - 5, y - 10, 12, 1, 0xf8e8c0);
+    disc(g, x + 1, y - 6, 2, 0xc89820);
+    disc(g, x + 1, y - 6, 1, 0xf8d040);
+    put(g, x, y - 7, 0xfff8d0);
+}
+
+fn stake(g: Gfx, x: Int, y: Int) {
+    rect(g, x, y - 3, 2, 4, 0x6a4428);
+    put(g, x, y - 3, 0xa87a48);
+}
+
+fn draw_plant(g: Gfx, sp: Sprites, w: Week, i: Int) {
+    if i >= w.run.plots_open && w.seed.get(i) < 0 { for_sale(g, sx(g, w.t.plot_x.get(i)), sy(g, w.t.plot_y.get(i))) }
+    let s = w.seed.get(i);
+    if s >= 0 {
+        let t = w.t;
+        let x = sx(g, t.plot_x.get(i));
+        let y = sy(g, t.plot_y.get(i));
+        let n = need(w, i);
+        let ripe = w.ripe.get(i) || n == 0;
+        let stage = if ripe { 4 } else if n == 0 { 4 } else { (w.growth.get(i) * 4 / n).min(3) };
+        let img = plant_sprite(sp, s, stage);
+        // (squashed and stretched when hit: a spring, dying away)
+        let b = w.bump.get(i);
+        let wob = if b > 0 { sin(w.sines, b * 90) * b >> 13 } else { 0 };
+        let breathe = if ripe { sin(w.sines, w.frame * 6 + i * 100) >> 13 } else { 0 };
+        let kx = 256 + wob * 3 + breathe;
+        let ky = 256 - wob * 3 + breathe;
+        let r = img.w / 2;
+        shadow(g, x + 2, y + 3, r, r * 3 / 4, 80);
+        if ripe && s != cactus() {
+            glow(g, x, y, r + 6, 0x302a10);
+        }
+        draw_scaled(g, img, x, y, kx, ky, false, 256);
+        if w.frozen.get(i) {
+            draw_frost(g, img, x, y, kx, ky);
+        }
+        if ripe && s != cactus() && (w.frame + i * 13) % 50 < 3 {
+            let a = (w.frame * 37 + i * 101) % 1024;
+            put(g, x + (cos(w.sines, a) * r >> 16), y + (sin(w.sines, a) * r >> 16), 0xffffff);
+        }
+        // its level, as pips beneath it
+        let lv = w.level.get(i);
+        if lv > 1 {
+            let mut k = 0;
+            while k < lv - 1 {
+                let px0 = x - (lv - 2) * 2 + k * 4;
+                rect(g, px0 - 1, y + r + 2, 3, 3, 0x2a2010);
+                put(g, px0, y + r + 3, 0xffe04a);
+                k = k + 1;
+            }
+        }
+    }
+}
+
+fn draw_frost(g: Gfx, img: Sprite, x: Int, y: Int, kx: Int, ky: Int) {
+    let w = (img.w * kx) >> 8;
+    let h = (img.h * ky) >> 8;
+    let x0 = x - w / 2;
+    let y0 = y - h / 2;
+    let mut yy = 0;
+    while yy < h {
+        let mut xx = 0;
+        while xx < w {
+            let v = img.px.get((yy * img.h / h.max(1)).min(img.h - 1) * img.w + (xx * img.w / w.max(1)).min(img.w - 1));
+            if v >= 0 { blend(g, x0 + xx, y0 + yy, 0xd8f0ff, if (xx + yy) % 3 == 0 { 220 } else { 150 }) }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+// ---- the fence's drop targets: white pickets, standing or knocked flat
+
+fn fence(g: Gfx, w: Week) {
+    let t = w.t;
+    let p = t.p;
+    let mut i = 0;
+    while i < t.n_targets {
+        let s = t.targets.get(i);
+        let x = sx(g, shape_ax(p, s) / 4096);
+        let y0 = sy(g, shape_ay(p, s) / 4096);
+        if w.down.get(i) {
+            // (knocked flat into the grass)
+            rect_blend(g, x - 1, y0 - 1, 6, 10, 0x1a2a10, 60);
+            rect(g, x + 1, y0, 4, 8, 0xb8b0a0);
+            rect(g, x + 1, y0, 4, 1, 0xd8d0c0);
+        } else {
+            shadow(g, x + 3, y0 + 6, 3, 6, 100);
+            rect(g, x - 2, y0 - 3, 5, 13, 0x6a5a48);
+            rect(g, x - 1, y0 - 2, 3, 11, 0xfaf6ec);
+            rect(g, x - 1, y0 - 2, 1, 11, 0xffffff);
+            rect(g, x + 1, y0 - 2, 1, 11, 0xd8d0c0);
+            put(g, x, y0 - 4, 0x6a5a48);
+            put(g, x, y0 - 3, 0xfaf6ec);
+            if w.frame - w.last_target <= 6 && w.last_target_n == i { glow(g, x, y0 + 4, 8, 0x605030) }
+        }
+        i = i + 1;
+    }
+}
+
+// ---- the windmill: its sails turn over the spinner
+
+fn windmill(g: Gfx, w: Week) {
+    let t = w.t;
+    let x = sx(g, t.spin_x);
+    let y = sy(g, t.spin_y);
+    let mut k = 0;
+    while k < 4 {
+        let a = w.spin + k * 256;
+        let ex = x + (cos(w.sines, a) * 9 >> 16);
+        let ey = y + (sin(w.sines, a) * 9 >> 16);
+        // (each sail: a spar, and cloth beside it, its shadow on the grass)
+        let a2 = a + 70;
+        let cx2 = x + (cos(w.sines, a2) * 8 >> 16);
+        let cy2 = y + (sin(w.sines, a2) * 8 >> 16);
+        let mx = x + (cos(w.sines, a + 30) * 4 >> 16);
+        let my = y + (sin(w.sines, a + 30) * 4 >> 16);
+        line(g, x + 3, y + 3, ex + 3, ey + 3, 0x1a2a10, 70);
+        line(g, mx, my, cx2, cy2, 0xe8e0d0, 256);
+        line(g, (mx + x) / 2, (my + y) / 2, (cx2 + ex) / 2, (cy2 + ey) / 2, if k % 2 == 0 { 0xd8483a } else { 0xf4ecdc }, 256);
+        line(g, x, y, ex, ey, 0x6a4a2a, 256);
+        k = k + 1;
+    }
+    disc(g, x, y, 2, 0x4a3420);
+    put(g, x - 1, y - 1, 0xa88860);
+}
+
+// ---- the plunger: a spring and a knob at the bottom of its lane
+
+fn plunger(g: Gfx, w: Week) {
+    let t = w.t;
+    let x = sx(g, t.plunger_x);
+    let pull = w.pull * 10 / 256;
+    let top = sy(g, t.plunger_y) + pull;
+    // the spring, squashed as it's pulled
+    let mut y = top + 3;
+    let bottom = sy(g, 270);
+    let coils = 5;
+    let gap = ((bottom - top - 3) / coils).max(1);
+    let mut k = 0;
+    while k < coils {
+        let yy = top + 3 + k * gap;
+        line(g, x - 3, yy, x + 3, yy + gap / 2, 0xc8ccd0, 256);
+        line(g, x + 3, yy + gap / 2, x - 3, yy + gap, 0x8a9098, 256);
+        k = k + 1;
+    }
+    rect(g, x - 4, top, 9, 3, 0xd84a3a);
+    rect(g, x - 4, top, 9, 1, 0xff8a7a);
+    if w.pull > 0 { glow(g, x, top, 6 + pull, 0x402010) }
+    y = y;
+}
+
+// the barn's door flashing as a ball goes in or comes out
+fn barn_light(g: Gfx, w: Week) {
+    if w.barn_door > 0 {
+        let t = w.t;
+        glow(g, sx(g, t.barn_x), sy(g, t.barn_y + 6), 16, scale(0xfff0a0, w.barn_door * 10));
+    }
+}
+
+// ---- the flippers: painted wood with a rubber edge, drawn as capsules
+
+fn draw_flipper(g: Gfx, p: Phys, f: Flipper) {
+    let ax = f.px * 16 / 4096 + (table_x() + g.ox) * 16;
+    let ay = f.py * 16 / 4096 + g.oy * 16;
+    let bx = tip_x(p, f) * 16 / 4096 + (table_x() + g.ox) * 16;
+    let by = tip_y(p, f) * 16 / 4096 + g.oy * 16;
+    let r0 = f.r0 * 16 / 4096;
+    let r1 = f.r1 * 16 / 4096;
+    // its shadow, then it
+    tapered(g, ax + 40, ay + 48, bx + 40, by + 48, r0, r1, 0, true);
+    tapered(g, ax, ay, bx, by, r0, r1, 0, false);
+    // the pivot's bolt
+    let cx = ax >> 4;
+    let cy = ay >> 4;
+    disc(g, cx, cy, 1, 0x8a8a90);
+    put(g, cx, cy, 0xe0e0e8);
+}
+
+fn tapered(g: Gfx, ax: Int, ay: Int, bx: Int, by: Int, r0: Int, r1: Int, color: Int, shade: Bool) {
+    let rmax = r0.max(r1);
+    let x0 = ((ax.min(bx) - rmax) >> 4) - 1;
+    let x1 = ((ax.max(bx) + rmax) >> 4) + 1;
+    let y0 = ((ay.min(by) - rmax) >> 4) - 1;
+    let y1 = ((ay.max(by) + rmax) >> 4) + 1;
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len2 = (abx * abx + aby * aby).max(1);
+    let mut y = y0;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            let qx = x * 16 + 8;
+            let qy = y * 16 + 8;
+            let t = (((qx - ax) * abx + (qy - ay) * aby) * 256 / len2).clamp(0, 256);
+            let cx = ax + abx * t / 256;
+            let cy = ay + aby * t / 256;
+            let r = r0 + (r1 - r0) * t / 256;
+            let dx = qx - cx;
+            let dy = qy - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= r * r {
+                if shade { blend(g, x, y, 0x1a2a10, 100) } else {
+                    // (a rubber edge round a white face; lit from the top left)
+                    let d = isqrt(d2);
+                    let rim = d > r - 18;
+                    let k = 256 - (dx + dy) * 60 / r.max(1);
+                    let base = if rim { 0x3aa84a } else { 0xfaf6ea };
+                    put(g, x, y, scale(base, k.clamp(150, 300)));
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// ---- the balls
+
+fn draw_ball(g: Gfx, sp: Sprites, w: Week, b: Ball) {
+    let x = sx(g, b.x >> 12);
+    let y = sy(g, b.y >> 12);
+    // (a trail when it's moving fast)
+    let s = speed(b);
+    if s > px(5) && !b.held {
+        let mut k = 1;
+        while k <= 3 {
+            let tx = x - (b.vx * k >> 13);
+            let ty = y - (b.vy * k >> 13);
+            disc_blend(g, tx, ty, 3, 0xe8f0ff, 70 - k * 18);
+            k = k + 1;
+        }
+    }
+    shadow(g, x + 3, y + 4, 4, 3, 110);
+    if w.hot > 0 { glow(g, x, y, 10, 0x601808) }
+    draw(g, sp.ball, x - 5, y - 5);
+    if w.hot > 0 && w.frame % 3 == 0 { part(w.fx, p_spark(), (b.x >> 12) + table_x(), b.y >> 12, rand(w.fx, 200) - 100, rand(w.fx, 200) - 100, 12, 0xff6a30) }
+}
+
+// ---- the crows
+
+fn crows(g: Gfx, sp: Sprites, w: Week) {
+    let mut c = 0;
+    while c < max_crows() {
+        let st = w.crow_state.get(c);
+        if st > 0 {
+            let x = sx(g, w.crow_x.get(c) >> 8);
+            let y = sy(g, w.crow_y.get(c) >> 8);
+            let flip = w.crow_vx.get(c) < 0;
+            if st == 2 {
+                let peck = (w.frame / 10) % 3 == 0;
+                let img = if peck { sp.crow_peck } else { sp.crow_sit };
+                shadow(g, x + 2, y + 3, 6, 2, 80);
+                draw_scaled(g, img, x, y - 5, 256, 256, w.crow_x.get(c) > 128 * 256, 256);
+                // (how long it has left before it's eaten the crop: a bar shrinking)
+                let full = if fair_is(w, crop_fair_murder()) { 200 } else { 360 };
+                let left = w.crow_t.get(c);
+                let bw = 14 * left / full;
+                rect(g, x - 8, y - 15, 16, 4, 0x1a1008);
+                rect(g, x - 7, y - 14, bw, 2, if left < 120 { 0xff4a3a } else { 0xffd040 });
+                if left < 120 && (w.frame / 6) % 2 == 0 { say(g, "!", x + 9, y - 19, 1, 0xff4a3a, 0x1a1008) }
+            } else {
+                shadow(g, x + 10, y + 16, 5, 2, 70);
+                let img = sp.crow_fly.get((w.frame / 6) % 2);
+                draw_scaled(g, img, x, y, 256, 256, flip, 256);
+            }
+        }
+        c = c + 1;
+    }
+}
+
+// ---- particles, fliers, popping words
+
+fn particles(g: Gfx, f: Fx) {
+    let mut i = 0;
+    while i < max_parts() {
+        let l = f.life.get(i);
+        if l > 0 {
+            let k = f.kind.get(i);
+            let x = (f.x.get(i) >> 8) + g.ox;
+            let y = (f.y.get(i) >> 8) + g.oy;
+            let c = f.color.get(i);
+            let fade = l * 256 / f.full.get(i);
+            if k == p_dot() {
+                put(g, x, y, c);
+                if fade > 128 { put(g, x + 1, y, scale(c, 200)) }
+            } else if k == p_spark() {
+                add(g, x, y, scale(c, fade));
+                add(g, x + 1, y, scale(c, fade / 2));
+                add(g, x, y + 1, scale(c, fade / 2));
+            } else if k == p_petal() {
+                put(g, x, y, c);
+                put(g, x + 1, y + (l / 8) % 2, scale(c, 220));
+            } else if k == p_confetti() {
+                let alt = if (l / 4) % 2 == 0 { c } else { mix(c, 0x5ad0ff, 160) };
+                rect(g, x, y, 2, if (l / 3) % 2 == 0 { 1 } else { 2 }, alt);
+            } else if k == p_ring() {
+                let r = (f.full.get(i) - l) * 2 + 3;
+                ring(g, x, y, r, 1, c, fade);
+            } else if k == p_dust() {
+                disc_blend(g, x, y, 1 + (f.full.get(i) - l) / 6, c, fade / 3);
+            } else {
+                let tw = if l % 6 < 3 { c } else { 0xffffff };
+                put(g, x, y, tw);
+                if fade > 100 {
+                    blend(g, x - 1, y, tw, 120);
+                    blend(g, x + 1, y, tw, 120);
+                    blend(g, x, y - 1, tw, 120);
+                    blend(g, x, y + 1, tw, 120);
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn fliers(g: Gfx, f: Fx) {
+    let mut i = 0;
+    while i < max_flies() {
+        if f.fval.get(i) != 0 && f.ft.get(i) >= 0 {
+            let x = fly_x(f, i);
+            let y = fly_y(f, i);
+            let c = f.fcolor.get(i);
+            disc(g, x, y, 2, scale(c, 120));
+            disc(g, x, y, 1, c);
+            put(g, x - 1, y - 1, 0xffffff);
+        }
+        i = i + 1;
+    }
+}
+
+fn pops(g: Gfx, f: Fx) {
+    let mut i = 0;
+    while i < max_pops() {
+        let l = f.pop_life.get(i);
+        if l > 0 {
+            let s = f.pop_text.get(i);
+            let size = f.pop_size.get(i);
+            let age = (if size > 1 { 80 } else { 50 }) - l;
+            // (big ones pop in larger, then settle)
+            let k = if size > 1 && age < 6 { 3 } else { size };
+            let x = f.pop_x.get(i) + g.ox;
+            let y = f.pop_y.get(i) + g.oy - (if size > 1 { age / 4 } else { 0 });
+            if l > 6 || (l / 2) % 2 == 0 { say_mid(g, s, x, y, k, f.pop_color.get(i), 0x1a1408) }
+        }
+        i = i + 1;
+    }
+}
+
+// a tip for a new player, on a card over the right panel's bottom (it
+// slides in from the right, and back out)
+pub fn draw_tip(g: Gfx, f: Fx) {
+    let t = f.tip_t;
+    if t >= 0 {
+        let slide = if t < 12 { (12 - t) * (12 - t) } else if t > 285 { (t - 285) * (t - 285) } else { 0 };
+        let x = 374 + slide;
+        let y = 197;
+        round_blend(g, x + 2, y + 3, 100, 68, 5, 0x1a1008, 90);
+        round_rect(g, x, y, 100, 68, 5, 0xe8a018);
+        round_rect(g, x + 1, y + 1, 98, 66, 4, 0xfff4d8);
+        text(g, "TIP", x + 6, y + 4, 1, 0xc87a10);
+        super::hud::wrap_text(g, f.tip, x + 6, y + 15, 88, 1, 0x3a2a1a);
+    }
+}
+
+// the banner across the table: words dropping in, holding, sliding out
+pub fn draw_banner(g: Gfx, f: Fx) {
+    let t = f.banner_t;
+    if t >= 0 {
+        let y = if t < 10 { 90 - (10 - t) * (10 - t) } else if t > 130 { 90 - (t - 130) * 6 } else { 90 };
+        let big = if t < 4 { 4 } else { 3 };
+        let w = text_w(g, f.banner, big);
+        let cx = 240;
+        round_blend(g, cx - w / 2 - 12, y - 6, w + 24, 34 + (if f.banner2 != "" { 10 } else { 0 }), 6, 0x1a1408, 170);
+        say_mid(g, f.banner, cx, y, big, f.banner_color, 0x3a2410);
+        if f.banner2 != "" { say_mid(g, f.banner2, cx, y + 25, 1, 0xf4ead6, 0x1a1408) }
+    }
+}
+
+// ---- the farm between weeks (the market, the menus): what's planted,
+// grown, and the plots that can be chosen (mode 0 none, 1 any open plot,
+// 2 those with plants), the chosen one pulsing
+
+pub fn draw_farm(g: Gfx, a: Art, sp: Sprites, t: Table, r: Run, f: Fx, frame: Int, mode: Int, chosen: Int, sines: Array<Int>) {
+    g.ox = if f.shake > 0 { rand(f, f.shake * 2 + 1) - f.shake } else { 0 };
+    g.oy = 0;
+    backdrop(g, a);
+    weather(f, r.season, frame);
+    let p = t.p;
+    let mut i = 0;
+    while i < t.n_plots {
+        let x = sx(g, t.plot_x.get(i));
+        let y = sy(g, t.plot_y.get(i));
+        let open = i < r.plots_open;
+        let s = if open { r.plot_seed.get(i) } else { -1 };
+        if !open {
+            for_sale(g, x, y);
+        } else if s >= 0 {
+            let img = plant_sprite(sp, s, 4);
+            let r0 = img.w / 2;
+            let sway = sin(sines, frame * 3 + i * 150) >> 14;
+            shadow(g, x + 2, y + 3, r0, r0 * 3 / 4, 80);
+            draw_scaled(g, img, x, y, 256 + sway, 256 - sway, false, 256);
+            let lv = r.plot_level.get(i);
+            let mut k = 0;
+            while k < lv - 1 {
+                let px0 = x - (lv - 2) * 2 + k * 4;
+                rect(g, px0 - 1, y + r0 + 2, 3, 3, 0x2a2010);
+                put(g, px0, y + r0 + 3, 0xffe04a);
+                k = k + 1;
+            }
+        }
+        let pickable = open && (mode == 1 || (mode == 2 && s >= 0));
+        if pickable {
+            let pulse = (sin(sines, frame * 10) >> 14) + 4;
+            if i == chosen {
+                ring(g, x, y, 11 + pulse / 2, 2, 0xfff0a0, 230);
+                glow(g, x, y, 18, 0x403818);
+            } else {
+                ring(g, x, y, 11, 1, 0xffffff, 110);
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < t.n_hay {
+        let x = sx(g, t.hay_x.get(i));
+        let y = sy(g, t.hay_y.get(i));
+        if t.farm == 1 {
+            shadow(g, x + 4, y + 4, 11, 9, 70);
+            let tr = tree_for(sp, r.season);
+            draw(g, tr, x - tr.w / 2, y - tr.h / 2);
+        } else {
+            shadow(g, x + 3, y + 3, 8, 7, 90);
+            draw(g, sp.hay, x - 8, y - 8);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < t.n_targets {
+        let s = t.targets.get(i);
+        let x = sx(g, shape_ax(p, s) / 4096);
+        let y0 = sy(g, shape_ay(p, s) / 4096);
+        shadow(g, x + 3, y0 + 5, 3, 5, 90);
+        rect(g, x - 2, y0 - 2, 5, 12, 0x5a3a1a);
+        rect(g, x - 1, y0 - 1, 3, 10, 0xd8b078);
+        rect(g, x - 1, y0 - 1, 1, 10, 0xf0d8a8);
+        i = i + 1;
+    }
+    i = 0;
+    while i < p.flips.len() {
+        let fl = p.flips.get(i);
+        fl.ang = fl.rest;
+        draw_flipper(g, p, fl);
+        i = i + 1;
+    }
+    let px0 = sx(g, t.plunger_x);
+    rect(g, px0 - 4, sy(g, t.plunger_y), 9, 3, 0xd84a3a);
+    particles(g, f);
+    pops(g, f);
+}

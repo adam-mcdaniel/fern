@@ -1,0 +1,153 @@
+// Digging and filling. A tunnel is dug by dragging from anything already
+// dug: the dig follows the pointer a cell at a time (each new cell next
+// to the last, diagonals allowed), paying a dig point a cell (two in
+// clay), and stops at rock, roots, buried food (which is reached, not dug
+// through), or when the points run out. Digging into a buried trinket
+// finds it, for points back. Filling a tunnel in gives half a point back
+// a cell; chambers can't be filled.
+
+use super::world::*;
+use super::colony::*;
+
+pub struct Digger {
+    // the cell the dig has got to, or -1 when not digging
+    at: Int,
+    // cells dug this drag, and what's been found (a trinket: its number, or -1)
+    dug_now: Int,
+    found: Int,
+    // why the last dig stopped (0 nothing, 1 rock or root, 2 no points)
+    blocked: Int,
+    // the cells dug this frame, for the dirt to fly from
+    fresh: Array<Int>,
+    n_fresh: Int,
+    // filling: half points owed
+    owed: Int,
+}
+
+pub fn digger() -> Digger { Digger { at: -1, dug_now: 0, found: -1, blocked: 0, fresh: array(64, 0), n_fresh: 0, owed: 0 } }
+
+// whether a cell has a buried food pile in it
+fn buried_food(w: World, x: Int, y: Int) -> Bool {
+    let mut yes = false;
+    let mut s = 0;
+    while s < max_sources() {
+        if w.src_alive.get(s) && w.src_buried.get(s) && w.src_x.get(s) == x && w.src_y.get(s) == y { yes = true }
+        s = s + 1;
+    }
+    yes
+}
+
+// starting a dig at a cell: it has to be dug already (a tunnel, a
+// chamber, the surface)
+pub fn start_dig(d: Digger, c: Colony, x: Int, y: Int) -> Bool {
+    let w = c.w;
+    d.blocked = 0;
+    d.dug_now = 0;
+    if inside(x, y) && walkable(w, idx(x, y)) {
+        d.at = idx(x, y);
+        true
+    } else {
+        // (or next to one: start from the dug neighbour)
+        let mut found = -1;
+        let mut dy = -1;
+        while dy <= 1 {
+            let mut dx = -1;
+            while dx <= 1 {
+                if inside(x + dx, y + dy) && walkable(w, idx(x + dx, y + dy)) && found < 0 { found = idx(x + dx, y + dy) }
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+        d.at = found;
+        found >= 0
+    }
+}
+
+pub fn stop_dig(d: Digger) { d.at = -1 }
+
+// the dig carried on toward (x, y), a cell at a time
+pub fn dig_toward(d: Digger, c: Colony, x: Int, y: Int) {
+    let w = c.w;
+    d.n_fresh = 0;
+    let mut steps = 0;
+    while d.at >= 0 && steps < 40 {
+        let ax = d.at % gw();
+        let ay = d.at / gw();
+        if ax == x && ay == y { steps = 40 } else {
+            let sx = (x - ax).sign();
+            let sy = (y - ay).sign();
+            // (the step that keeps nearest the straight line there)
+            let nx = ax + sx;
+            let ny = ay + sy;
+            let tx = if (x - ax).abs() * 2 < (y - ay).abs() { ax } else { nx };
+            let ty = if (y - ay).abs() * 2 < (x - ax).abs() { ay } else { ny };
+            if !inside(tx, ty) || ty <= surface() - 1 {
+                steps = 40;
+            } else {
+                let i = idx(tx, ty);
+                if walkable(w, i) {
+                    d.at = i;
+                } else if buried_food(w, tx, ty) {
+                    // (the food's reached: the tunnel stops at it)
+                    w.fields_dirty = true;
+                    d.blocked = 0;
+                    steps = 40;
+                } else if !diggable(w, i) {
+                    d.blocked = 1;
+                    steps = 40;
+                } else if c.dig < dig_cost(w, i) {
+                    d.blocked = 2;
+                    steps = 40;
+                } else {
+                    c.dig = c.dig - dig_cost(w, i);
+                    set_dug(w, i, true);
+                    d.at = i;
+                    d.dug_now = d.dug_now + 1;
+                    if d.n_fresh < 64 {
+                        d.fresh.set(d.n_fresh, i);
+                        d.n_fresh = d.n_fresh + 1;
+                    }
+                    find_trinket(d, c, tx, ty);
+                }
+            }
+            steps = steps + 1;
+        }
+    }
+}
+
+// digging next to a trinket finds it: points back
+fn find_trinket(d: Digger, c: Colony, x: Int, y: Int) {
+    let w = c.w;
+    let mut t = 0;
+    while t < w.n_tr {
+        if !w.tr_found.get(t) && (w.tr_x.get(t) - x).abs() <= 1 && (w.tr_y.get(t) - y).abs() <= 1 {
+            w.tr_found.set(t, true);
+            c.dig = c.dig + trinket_points(w.tr_what.get(t));
+            d.found = t;
+        }
+        t = t + 1;
+    }
+}
+
+pub fn trinket_points(what: Int) -> Int { if what == 0 { 10 } else if what == 1 { 15 } else if what == 2 { 25 } else { 12 } }
+pub fn trinket_name(what: Int) -> String {
+    if what == 0 { "a bottle cap" } else if what == 1 { "a marble" } else if what == 2 { "a lost key" } else if what == 3 { "a toy soldier" } else if what == 4 { "a button" } else { "an old coin" }
+}
+
+// a tunnel cell filled back in (not a chamber, not the surface, not
+// where an ant is): whether it was
+pub fn fill(d: Digger, c: Colony, x: Int, y: Int) -> Bool {
+    let w = c.w;
+    if inside(x, y) && y > surface() {
+        let i = idx(x, y);
+        if w.dug.get(i) && w.room.get(i) < 0 && c.crowd.get(i) == 0 {
+            set_dug(w, i, false);
+            d.owed = d.owed + 1;
+            if d.owed >= 2 {
+                d.owed = d.owed - 2;
+                c.dig = c.dig + 1;
+            }
+            true
+        } else { false }
+    } else { false }
+}

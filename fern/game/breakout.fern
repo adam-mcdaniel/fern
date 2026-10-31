@@ -1,0 +1,227 @@
+// Breakout. The mouse (or the arrow keys, or A and D) moves the paddle; a
+// click (or space) serves. Break every brick; three balls. Escape quits.
+//
+// Build it, with SDL2 installed, with fern/game/build.sh.
+
+mod screen;
+mod draw;
+
+use screen::*;
+use draw::{Canvas, canvas, clear, fill_rect, show, text, text_width};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+// the top rows show the score
+fn top() -> Int { 10 }
+
+// the bricks: 10 columns of 5 rows, each 14 x 5 pixels, 2 apart
+fn columns() -> Int { 10 }
+fn rows() -> Int { 5 }
+fn bricks_y() -> Int { 16 }
+
+fn paddle_y() -> Int { 110 }
+fn paddle_width() -> Int { 24 }
+
+// the ball's position and speed are in 16ths of a pixel
+fn unit() -> Int { 16 }
+
+struct Ball { x: Int, y: Int, dx: Int, dy: Int }
+
+enum State { Serving, Playing, Won, Lost }
+
+struct Game {
+    state: State,
+    bricks: Array<Bool>,
+    paddle: Int,
+    ball: Ball,
+    score: Int,
+    lives: Int,
+}
+
+fn new_game() -> Game {
+    Game { state: Serving, bricks: array(columns() * rows(), true), paddle: (width() - paddle_width()) / 2, ball: Ball { x: 0, y: 0, dx: 0, dy: 0 }, score: 0, lives: 3 }
+}
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern breakout") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let mut game = new_game();
+    let mut mouse = mouse_x();
+    loop {
+        // the paddle follows the mouse while it moves, and the keys
+        let m = mouse_x();
+        let mut paddle = game.paddle;
+        if m != mouse {
+            paddle = m - paddle_width() / 2;
+            mouse = m;
+        }
+        if key_down(key_left()) || key_down(key("a")) { paddle = paddle - 3 }
+        if key_down(key_right()) || key_down(key("d")) { paddle = paddle + 3 }
+        paddle = paddle.max(0).min(width() - paddle_width());
+        let go = mouse_clicked() || key_pressed(key_space());
+        game = update(Game { state: game.state, bricks: game.bricks, paddle: paddle, ball: game.ball, score: game.score, lives: game.lives }, go);
+        draw(c, game);
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+}
+
+// ---- playing
+
+// the game a frame later (go: a click or space)
+fn update(g: Game, go: Bool) -> Game with Io {
+    match g.state {
+        Serving => {
+            // the ball sits on the paddle until it's served
+            let ball = Ball { x: (g.paddle + paddle_width() / 2 - 1) * unit(), y: (paddle_y() - 2) * unit(), dx: 0, dy: 0 };
+            if go {
+                let s = speed(g.bricks);
+                // (a little to one side or the other, by the clock)
+                let dx = (screen_ticks() % 21 - 10) * s / 20;
+                Game { state: Playing, bricks: g.bricks, paddle: g.paddle, ball: Ball { x: ball.x, y: ball.y, dx: dx, dy: -s }, score: g.score, lives: g.lives }
+            } else {
+                Game { state: Serving, bricks: g.bricks, paddle: g.paddle, ball: ball, score: g.score, lives: g.lives }
+            }
+        }
+        Playing => {
+            let (ball, points) = step(g.ball, g.paddle, g.bricks);
+            let score = g.score + points;
+            let state = if left(g.bricks) == 0 {
+                Won
+            } else if ball.y > height() * unit() {
+                if g.lives == 1 { Lost } else { Serving }
+            } else {
+                Playing
+            };
+            let lives = if ball.y > height() * unit() { g.lives - 1 } else { g.lives };
+            Game { state: state, bricks: g.bricks, paddle: g.paddle, ball: ball, score: score, lives: lives }
+        }
+        Won => if go { new_game() } else { g },
+        Lost => if go { new_game() } else { g },
+    }
+}
+
+// the ball a frame later, off the walls, the paddle and the bricks (which
+// it breaks), and the points that scored
+fn step(b: Ball, paddle: Int, bricks: Array<Bool>) -> (Ball, Int) {
+    let mut x = b.x + b.dx;
+    let mut y = b.y + b.dy;
+    let mut dx = b.dx;
+    let mut dy = b.dy;
+    let mut points = 0;
+    // the walls (the ball is 2 x 2 pixels)
+    let right = (width() - 2) * unit();
+    if x < 0 { x = -x; dx = -dx }
+    if x > right { x = 2 * right - x; dx = -dx }
+    if y < top() * unit() { y = 2 * top() * unit() - y; dy = -dy }
+    let px = x / unit();
+    let py = y / unit();
+    // the paddle: the further from its middle, the more to the side
+    if dy > 0 && py + 2 >= paddle_y() && py < paddle_y() + 3 && px + 2 > paddle && px < paddle + paddle_width() {
+        let s = speed(bricks);
+        let off = px + 1 - (paddle + paddle_width() / 2);
+        dx = off * s * 3 / 4 / (paddle_width() / 2);
+        dy = -(s - abs(dx) / 3);
+    }
+    // a brick: the one under the ball's middle, if there is one there
+    let cx = px + 1;
+    let cy = py + 1;
+    let row = (cy - bricks_y()) / 7;
+    if cy >= bricks_y() && row < rows() && (cy - bricks_y()) % 7 < 5 && cx % 16 >= 1 && cx % 16 < 15 {
+        let i = row * columns() + cx / 16;
+        if array_get(bricks, i) {
+            array_set(bricks, i, false);
+            points = (rows() - row) * 10;
+            // from the side if it was level with the brick a frame ago,
+            // else from above or below
+            let was = b.y / unit() + 1;
+            let level = was >= bricks_y() + row * 7 && was < bricks_y() + row * 7 + 5;
+            if level { dx = -dx } else { dy = -dy }
+        }
+    }
+    (Ball { x: x, y: y, dx: dx, dy: dy }, points)
+}
+
+// faster as there are fewer bricks: 1.5 pixels a frame, up to 3
+fn speed(bricks: Array<Bool>) -> Int {
+    24 + (columns() * rows() - left(bricks)) / 2
+}
+
+// how many bricks are left
+fn left(bricks: Array<Bool>) -> Int {
+    let mut n = 0;
+    let mut i = 0;
+    while i < array_length(bricks) {
+        if array_get(bricks, i) { n = n + 1 }
+        i = i + 1;
+    }
+    n
+}
+
+fn abs(n: Int) -> Int { if n < 0 { -n } else { n } }
+
+// ---- drawing
+
+fn draw(c: Canvas, g: Game) {
+    clear(c, rgb(14, 16, 30));
+    let white = rgb(240, 240, 240);
+    text(c, "SCORE " ++ g.score.show(), 2, 2, 1, white);
+    let lives = "BALLS " ++ g.lives.show();
+    text(c, lives, width() - text_width(lives, 1) - 2, 2, 1, white);
+    fill_rect(c, 0, top() - 2, width(), 1, rgb(60, 64, 90));
+    let mut i = 0;
+    while i < columns() * rows() {
+        if array_get(g.bricks, i) {
+            let row = i / columns();
+            let x = i % columns() * 16 + 1;
+            let y = bricks_y() + row * 7;
+            fill_rect(c, x, y, 14, 5, brick_color(row));
+            // (lit from above)
+            fill_rect(c, x, y, 14, 1, lighter(brick_color(row)));
+        }
+        i = i + 1;
+    }
+    fill_rect(c, g.paddle, paddle_y(), paddle_width(), 3, rgb(120, 200, 255));
+    fill_rect(c, g.paddle + 1, paddle_y(), paddle_width() - 2, 1, rgb(210, 240, 255));
+    match g.state {
+        Lost => (),
+        _ => fill_rect(c, g.ball.x / unit(), g.ball.y / unit(), 2, 2, white),
+    }
+    match g.state {
+        Serving => centered(c, "CLICK TO SERVE", 70, 1, rgb(180, 180, 200)),
+        Playing => (),
+        Won => {
+            centered(c, "YOU WIN!", 56, 2, rgb(255, 230, 90));
+            centered(c, "CLICK TO PLAY AGAIN", 76, 1, white);
+        }
+        Lost => {
+            centered(c, "GAME OVER", 56, 2, rgb(255, 90, 90));
+            centered(c, "CLICK TO PLAY AGAIN", 76, 1, white);
+        }
+    }
+}
+
+fn centered(c: Canvas, s: String, y: Int, size: Int, color: Int) {
+    text(c, s, (width() - text_width(s, size)) / 2, y, size, color)
+}
+
+fn brick_color(row: Int) -> Int {
+    match row {
+        0 => rgb(235, 80, 90),
+        1 => rgb(245, 150, 60),
+        2 => rgb(240, 215, 70),
+        3 => rgb(90, 200, 110),
+        _ => rgb(80, 150, 240),
+    }
+}
+
+// a color halfway to white
+fn lighter(color: Int) -> Int {
+    let r = color / 65536;
+    let g = color / 256 % 256;
+    let b = color % 256;
+    rgb((r + 255) / 2, (g + 255) / 2, (b + 255) / 2)
+}

@@ -1,0 +1,476 @@
+// EMBERWAKE. The sun has gone out, and the night is full of hungry things.
+// You are the last ember of it: walk the dark until the dawn comes back.
+//
+// Your weapons fire on their own; you only move. The creatures of the dark
+// come in their hundreds, and leave embers when they burn; gather them to
+// grow, and at each level choose what you learn: eight weapons, each of
+// which can evolve, and six gifts. Braziers stand in the clearings: stand
+// by one to light it, and it mends you and burns the dark round it (the
+// snuffers will try to put them out). Your light is your life: as your
+// flame weakens, the dark closes in. At the ninth minute the night's
+// master comes. Destroy it, and the sun rises.
+//
+// Between nights, the cinders you bring back buy lasting strength at the
+// hearth; seeing a region through to dawn opens the next, and new embers
+// to play as. Three regions, four embers, ten hearth upgrades, saved.
+//
+// Move with WASD, the arrows or a game controller's stick; Enter or Space
+// (or A) chooses; Escape (or Start) pauses; F11 fills the screen.
+//
+// It's made of the parts in ember/: the picture and its light (gfx, light),
+// the land (world), the night (run, play, arms, foes), drawing it (scene,
+// icons, art), the screens round it (ui), the sound (sound), and what's
+// kept between nights (save).
+
+mod screen;
+mod draw;
+mod math;
+mod ember;
+
+use screen::*;
+use draw::{show};
+use math::{sin, cos};
+use ember::gfx::*;
+use ember::art::{letters, art, creature_colors, land_colors};
+use ember::world::{make, brazier_count};
+use ember::run::*;
+use ember::arms::{offers, take, evolvable, characters, hearth_count, hearth_max, hearth_cost, s_level, s_chest};
+use ember::play::{start, step, ambience, level_up, chest, died, won};
+use ember::scene::{draw_night, draw_hud, sky};
+use ember::light::{bake_all};
+use ember::sound::*;
+use ember::save;
+use ember::ui::*;
+
+enum Scene { Title, Menu, Chars, Regions, Loading, Night, Leveling, Opening, Paused, Options, Hearth, Fallen, Dawn, Results }
+
+// what the player's doing this frame: how they're moving (each -256 to
+// 256), what they've pressed, and the mouse
+struct Input { mx: Int, my: Int, up: Bool, down: Bool, left: Bool, right: Bool, ok: Bool, back: Bool, pause: Bool, x: Int, y: Int, click: Bool, full: Bool }
+
+fn read_input(stick: Array<Int>) -> Input with Io {
+    let dead = 8000;
+    let ax = pad_axis(0);
+    let ay = pad_axis(1);
+    let sx = if ax.abs() < dead { 0 } else { ax * 256 / 32767 };
+    let sy = if ay.abs() < dead { 0 } else { ay * 256 / 32767 };
+    let right = key_down(key_right()) || key_down(key("d")) || pad_down(14);
+    let left = key_down(key_left()) || key_down(key("a")) || pad_down(13);
+    let down = key_down(key_down_arrow()) || key_down(key("s")) || pad_down(12);
+    let up = key_down(key_up()) || key_down(key("w")) || pad_down(11);
+    let kx = (if right { 256 } else { 0 }) - (if left { 256 } else { 0 });
+    let ky = (if down { 256 } else { 0 }) - (if up { 256 } else { 0 });
+    // (the stick, pushed past halfway, is a press in the menus, once until it comes back)
+    let dir = if sy < -150 { 1 } else if sy > 150 { 2 } else if sx < -150 { 3 } else if sx > 150 { 4 } else { 0 };
+    let fresh = dir != array_get(stick, 0);
+    array_set(stick, 0, dir);
+    Input {
+        mx: (kx + sx).clamp(-256, 256),
+        my: (ky + sy).clamp(-256, 256),
+        up: key_pressed(key_up()) || key_pressed(key("w")) || pad_pressed(11) || (fresh && dir == 1),
+        down: key_pressed(key_down_arrow()) || key_pressed(key("s")) || pad_pressed(12) || (fresh && dir == 2),
+        left: key_pressed(key_left()) || key_pressed(key("a")) || pad_pressed(13) || (fresh && dir == 3),
+        right: key_pressed(key_right()) || key_pressed(key("d")) || pad_pressed(14) || (fresh && dir == 4),
+        ok: key_pressed(key_enter()) || key_pressed(key_space()) || pad_pressed(0),
+        back: key_pressed(key_escape()) || key_pressed(key_backspace()) || pad_pressed(1),
+        pause: key_pressed(key_escape()) || key_pressed(key("p")) || pad_pressed(6),
+        x: mouse_x(),
+        y: mouse_y(),
+        click: mouse_clicked(),
+        full: key_pressed(key_f11()),
+    }
+}
+
+// which of n cards side by side (each w wide, gap apart, centered, from y
+// to y + h) the point is over, or -1
+fn card_at(x: Int, y: Int, n: Int, w: Int, gap: Int, top: Int, h: Int) -> Int {
+    let x0 = (sw() - (w * n + gap * (n - 1))) / 2;
+    if y < top || y > top + h || x < x0 { -1 } else {
+        let k = (x - x0) / (w + gap);
+        if k < n && (x - x0) % (w + gap) < w { k } else { -1 }
+    }
+}
+
+// the hearth's levels, from what's saved
+fn hearth(data: Array<Int>) -> Array<Int> { save::hearth_levels(data) }
+
+// how many cinders a night earns
+fn earnings(r: Run, won_it: Bool) -> Int {
+    let base = get(r, k_cinders()) + get(r, k_kills()) / 25 + get(r, k_time()) / 3600 * 4 + ember::play::lit_count(r) * 3
+        + (if won_it { 60 + get(r, k_region()) * 40 } else { 0 });
+    base * stat(r, st_greed()) / 100
+}
+
+fn main() {
+    if !screen_open(sw(), sh(), 3, "EMBERWAKE") {
+        panic("couldn't open a window\n");
+    }
+    let data = save::load();
+    volumes(save::get(data, save::sv_music()), save::get(data, save::sv_sfx()));
+    if save::get(data, save::sv_full()) > 0 { screen_full(true) }
+    let g = gfx(letters());
+    set_sky(g, 0);
+    creature_colors(g);
+    land_colors(g, 0);
+    let a = art();
+    let m = music();
+    // a frame to show while the title's land is made
+    rect(g, 0, 0, sw(), sh(), 0);
+    title(g, "EMBERWAKE", sw() / 2 - text_w(g, "EMBERWAKE", 5) / 2, 110, 5, 0x806a50, 0x603018, 0x100804);
+    show(g.c);
+    // the title's night: a forest with every brazier burning, and no one in it
+    let demo = new_run(make(0, 7), 0, 0, hearth(data), 7);
+    let mut b = 0;
+    while b < brazier_count(demo.w) {
+        array_set(demo.lit, b, 1);
+        array_set(demo.baked, b, 1);
+        b = b + 1;
+    }
+    bake_all(demo.still, g, demo.w, demo.lit, demo.table);
+    keep(demo, k_dead(), 1);
+    let t = demo.table;
+    let mut r = demo;
+    let mut scene = Title;
+    let mut sel = 0;
+    let mut anim = 0;
+    let mut frame = 0;
+    let mut offered = array(4, -1);
+    let mut reward = -1;
+    let mut evolved = false;
+    let mut earned = 0;
+    let mut news = [];
+    let mut won_night = false;
+    let mut from_pause = false;
+    let mut region = 0;
+    let mut who = 0;
+    let mut quit = false;
+    let mut last_x = 0;
+    let mut last_y = 0;
+    let mut bought = 0;
+    let stick = array(1, 0);
+    loop {
+        let inp = read_input(stick);
+        frame = frame + 1;
+        anim = anim + 1;
+        let mouse_moved = inp.x != last_x || inp.y != last_y;
+        last_x = inp.x;
+        last_y = inp.y;
+        if inp.full {
+            save::set(data, save::sv_full(), 1 - save::get(data, save::sv_full()));
+            screen_full(save::get(data, save::sv_full()) > 0);
+            save::store(data);
+        }
+        let in_night = match scene { Night => true, Leveling => true, Opening => true, Paused => true, Fallen => true, Dawn => true, Results => true, Options => from_pause, _ => false };
+        // the title's night behind the menus: the camera drifting over it
+        if !in_night {
+            keep(demo, k_camx(), 768 - 240 + ((sin(t, frame / 3) * 260) >> 16));
+            keep(demo, k_camy(), 768 - 135 + ((cos(t, frame / 4) * 180) >> 16));
+            ambience(demo);
+            draw_night(g, a, demo, false);
+        }
+        match scene {
+            Title => {
+                draw_title(g, frame, t, (anim * 3).min(256));
+                if anim > 60 && frame / 30 % 2 == 0 { say_mid(g, "PRESS ENTER", 190, 2, 0xfff0d0) }
+                say(g, "A GAME IN FERN", 6, sh() - 12, 1, 0x605048);
+                if inp.ok || inp.click {
+                    scene = Menu;
+                    sel = 0;
+                    anim = 0;
+                    effect(m, ui_ok(), 0, 0);
+                }
+                if inp.back { quit = true }
+            }
+            Menu => {
+                draw_title(g, frame, t, 256);
+                let over = list(g, ["BEGIN THE NIGHT", "THE HEARTH", "OPTIONS", "QUIT"], sel, 120, 24, frame, inp.x, inp.y, t);
+                if mouse_moved && over >= 0 && over != sel { sel = over; effect(m, ui_move(), 0, 0) }
+                if inp.up { sel = (sel + 3) % 4; effect(m, ui_move(), 0, 0) }
+                if inp.down { sel = (sel + 1) % 4; effect(m, ui_move(), 0, 0) }
+                say(g, save::get(data, save::sv_cinders()).show() ++ " CINDERS", 6, sh() - 12, 1, 0xffb070);
+                if inp.ok || (inp.click && over >= 0) {
+                    effect(m, ui_ok(), 0, 0);
+                    anim = 0;
+                    if sel == 0 { scene = Chars; sel = who }
+                    else if sel == 1 { scene = Hearth; sel = 0 }
+                    else if sel == 2 { scene = Options; from_pause = false; sel = 0 }
+                    else { quit = true }
+                }
+                if inp.back { scene = Title; anim = 0; effect(m, ui_back(), 0, 0) }
+            }
+            Chars => {
+                dim(g, 0, 0, sw(), sh(), 1);
+                draw_chars(g, data, sel, frame, t);
+                let over = card_at(inp.x, inp.y, characters(), 104, 10, 56, 156);
+                if mouse_moved && over >= 0 && over != sel { sel = over; effect(m, ui_move(), 0, 0) }
+                if inp.left { sel = (sel + characters() - 1) % characters(); effect(m, ui_move(), 0, 0) }
+                if inp.right { sel = (sel + 1) % characters(); effect(m, ui_move(), 0, 0) }
+                if inp.ok || (inp.click && over >= 0) {
+                    if save::has_char(data, sel) {
+                        who = sel;
+                        scene = Regions;
+                        sel = region;
+                        effect(m, ui_ok(), 0, 0);
+                    } else { effect(m, ui_back(), 0, 0) }
+                }
+                if inp.back { scene = Menu; sel = 0; effect(m, ui_back(), 0, 0) }
+            }
+            Regions => {
+                dim(g, 0, 0, sw(), sh(), 1);
+                draw_regions(g, data, sel, frame, t);
+                let over = card_at(inp.x, inp.y, 3, 140, 12, 56, 156);
+                if mouse_moved && over >= 0 && over != sel { sel = over; effect(m, ui_move(), 0, 0) }
+                if inp.left { sel = (sel + 2) % 3; effect(m, ui_move(), 0, 0) }
+                if inp.right { sel = (sel + 1) % 3; effect(m, ui_move(), 0, 0) }
+                if inp.ok || (inp.click && over >= 0) {
+                    if sel < save::get(data, save::sv_regions()) {
+                        region = sel;
+                        scene = Loading;
+                        anim = 0;
+                        effect(m, ui_ok(), 0, 0);
+                    } else { effect(m, ui_back(), 0, 0) }
+                }
+                if inp.back { scene = Chars; sel = who; effect(m, ui_back(), 0, 0) }
+            }
+            Loading => {
+                rect(g, 0, 0, sw(), sh(), 0x040306);
+                say_mid(g, "NIGHT FALLS ON", 110, 1, 0x887870);
+                say_mid(g, save::region_name(region), 124, 3, 0xffe0b0);
+                if anim == 3 {
+                    // (the land made, and the night begun)
+                    let seed = screen_ticks() * 7 + frame;
+                    land_colors(g, region);
+                    set_sky(g, 0);
+                    r = new_run(make(region, seed), region, who, hearth(data), seed);
+                    bake_all(r.still, g, r.w, r.lit, r.table);
+                    let mut k = 0;
+                    while k < brazier_count(r.w) {
+                        array_set(r.baked, k, array_get(r.lit, k));
+                        k = k + 1;
+                    }
+                    start(r);
+                    scene = Night;
+                    anim = 0;
+                }
+            }
+            Night => {
+                if inp.pause {
+                    scene = Paused;
+                    sel = 0;
+                    effect(m, ui_back(), 0, 0);
+                } else {
+                    let ev = step(r, inp.mx, inp.my);
+                    if save::get(data, save::sv_taught()) == 0 { teach(r) }
+                    if ev == level_up() {
+                        effect(m, s_level(), 0, 0);
+                        offered = offers(r, stat(r, st_choices()));
+                        sel = 0;
+                        anim = 0;
+                        scene = Leveling;
+                    } else if ev == chest() {
+                        inc(r, k_chests(), -1);
+                        let e = evolvable(r);
+                        if e >= 0 {
+                            array_set(r.evo, e, 1);
+                            reward = e;
+                            evolved = true;
+                        } else {
+                            reward = array_get(offers(r, 1), 0);
+                            evolved = false;
+                            if reward >= 0 { take(r, reward) } else {
+                                keep(r, k_hp(), stat(r, st_maxhp()) * 16);
+                                inc(r, k_cinders(), 10);
+                            }
+                        }
+                        effect(m, s_chest(), 0, 0);
+                        anim = 0;
+                        scene = Opening;
+                    } else if ev == died() {
+                        anim = 0;
+                        scene = Fallen;
+                    } else if ev == won() {
+                        anim = 0;
+                        scene = Dawn;
+                        effect(m, dawn_chord(), 0, 0);
+                    }
+                }
+                effects(m, r.sounds, get(r, k_nsounds()));
+                draw_night(g, a, r, save::get(data, save::sv_numbers()) > 0);
+                draw_hud(g, r, frame);
+            }
+            Leveling => {
+                draw_night(g, a, r, false);
+                draw_hud(g, r, frame);
+                draw_levelup(g, r, offered, sel, anim, frame);
+                let n = count_offers(offered);
+                let cw = if n >= 4 { 108 } else { 132 };
+                let over = card_at(inp.x, inp.y, n, cw, 10, 64, 156);
+                if mouse_moved && over >= 0 && over != sel { sel = over; effect(m, ui_move(), 0, 0) }
+                if inp.left && n > 0 { sel = (sel + n - 1) % n; effect(m, ui_move(), 0, 0) }
+                if inp.right && n > 0 { sel = (sel + 1) % n; effect(m, ui_move(), 0, 0) }
+                if anim > 16 && (inp.ok || (inp.click && over >= 0)) {
+                    if n > 0 { take(r, array_get(offered, sel)) } else {
+                        keep(r, k_hp(), (get(r, k_hp()) + 30 * 16).min(stat(r, st_maxhp()) * 16));
+                    }
+                    effect(m, ui_ok(), 0, 0);
+                    inc(r, k_ups(), -1);
+                    if get(r, k_ups()) > 0 {
+                        offered = offers(r, stat(r, st_choices()));
+                        sel = 0;
+                        anim = 8;
+                    } else { scene = Night }
+                }
+            }
+            Opening => {
+                draw_night(g, a, r, false);
+                draw_hud(g, r, frame);
+                draw_chest(g, a, r, reward, evolved, anim, frame);
+                if anim == 50 { effect(m, s_level(), 0, 0) }
+                if anim > 80 && (inp.ok || inp.click) {
+                    effect(m, ui_ok(), 0, 0);
+                    scene = Night;
+                }
+            }
+            Paused => {
+                draw_night(g, a, r, false);
+                draw_hud(g, r, frame);
+                let over = draw_pause(g, r, sel, frame, inp.x, inp.y);
+                if mouse_moved && over >= 0 && over != sel { sel = over; effect(m, ui_move(), 0, 0) }
+                if inp.up { sel = (sel + 2) % 3; effect(m, ui_move(), 0, 0) }
+                if inp.down { sel = (sel + 1) % 3; effect(m, ui_move(), 0, 0) }
+                if inp.ok || (inp.click && over >= 0) {
+                    effect(m, ui_ok(), 0, 0);
+                    if sel == 0 { scene = Night }
+                    else if sel == 1 { scene = Options; from_pause = true; sel = 0 }
+                    else {
+                        won_night = false;
+                        earned = earnings(r, false);
+                        news = save::record(data, region, get(r, k_time()) / 60, false, get(r, k_kills()), earned);
+                        save::store(data);
+                        anim = 0;
+                        scene = Results;
+                    }
+                } else if inp.back && anim > 2 { scene = Night }
+            }
+            Options => {
+                if from_pause {
+                    draw_night(g, a, r, false);
+                }
+                dim(g, 0, 0, sw(), sh(), 1);
+                draw_options(g, data, sel, frame);
+                let n = option_count();
+                if inp.up { sel = (sel + n - 1) % n; effect(m, ui_move(), 0, 0) }
+                if inp.down { sel = (sel + 1) % n; effect(m, ui_move(), 0, 0) }
+                let change = (if inp.right { 1 } else { 0 }) - (if inp.left { 1 } else { 0 }) + (if inp.ok && sel >= 2 && sel <= 4 { 1 } else { 0 });
+                if change != 0 {
+                    if sel < 2 {
+                        let k = if sel == 0 { save::sv_music() } else { save::sv_sfx() };
+                        save::set(data, k, (save::get(data, k) + change * 10).clamp(0, 100));
+                        volumes(save::get(data, save::sv_music()), save::get(data, save::sv_sfx()));
+                    } else if sel <= 4 {
+                        let k = if sel == 2 { save::sv_full() } else if sel == 3 { save::sv_shake() } else { save::sv_numbers() };
+                        save::set(data, k, 1 - save::get(data, k));
+                        if sel == 2 { screen_full(save::get(data, k) > 0) }
+                    }
+                    effect(m, ui_move(), 0, 0);
+                }
+                if inp.back || (inp.ok && sel == 5) {
+                    save::store(data);
+                    effect(m, ui_back(), 0, 0);
+                    if from_pause { scene = Paused; sel = 1 } else { scene = Menu; sel = 2 }
+                }
+            }
+            Hearth => {
+                dim(g, 0, 0, sw(), sh(), 1);
+                draw_hearth(g, data, sel, frame, t, bought);
+                bought = (bought - 1).max(0);
+                let n = hearth_count();
+                if inp.left { sel = (sel + n - 1) % n; effect(m, ui_move(), 0, 0) }
+                if inp.right { sel = (sel + 1) % n; effect(m, ui_move(), 0, 0) }
+                if inp.up || inp.down { sel = (sel + 5) % n; effect(m, ui_move(), 0, 0) }
+                if inp.ok {
+                    let lv = save::get(data, save::sv_hearth(sel));
+                    let cost = hearth_cost(sel, lv);
+                    if lv < hearth_max(sel) && save::get(data, save::sv_cinders()) >= cost {
+                        save::set(data, save::sv_cinders(), save::get(data, save::sv_cinders()) - cost);
+                        save::set(data, save::sv_hearth(sel), lv + 1);
+                        save::store(data);
+                        bought = 16;
+                        effect(m, s_level(), 0, 0);
+                    } else { effect(m, ui_back(), 0, 0) }
+                }
+                if inp.back { scene = Menu; sel = 1; effect(m, ui_back(), 0, 0) }
+            }
+            Fallen => {
+                draw_night(g, a, r, false);
+                tint(g, 0, 0, sw(), sh(), 0x000000, (anim * 2).min(200));
+                if anim > 30 { say_mid(g, "YOUR FLAME GOES OUT...", 120, 2, mix(0x000000, 0xd0b0a0, ((anim - 30) * 4).min(256))) }
+                if anim > 170 {
+                    won_night = false;
+                    earned = earnings(r, false);
+                    news = save::record(data, region, get(r, k_time()) / 60, false, get(r, k_kills()), earned);
+                    save::store(data);
+                    anim = 0;
+                    scene = Results;
+                }
+            }
+            Dawn => {
+                step(r, 0, 0);
+                effects(m, r.sounds, get(r, k_nsounds()));
+                if frame % 4 == 0 { set_sky(g, sky(r)) }
+                draw_night(g, a, r, false);
+                if anim > 150 {
+                    let k = ((anim - 150) * 3).min(256);
+                    title(g, "THE SUN RISES", sw() / 2 - text_w(g, "THE SUN RISES", 3) / 2, 70, 3, mix(0x000000, 0xfffff0, k), mix(0x000000, 0xffc050, k), scale(0x503010, k));
+                }
+                if anim > 460 {
+                    won_night = true;
+                    earned = earnings(r, true);
+                    news = save::record(data, region, get(r, k_time()) / 60, true, get(r, k_kills()), earned);
+                    save::store(data);
+                    anim = 0;
+                    scene = Results;
+                }
+            }
+            Results => {
+                draw_night(g, a, r, false);
+                draw_results(g, r, won_night, anim, earned, news, frame);
+                if anim > 150 && (inp.ok || inp.click) {
+                    effect(m, ui_ok(), 0, 0);
+                    land_colors(g, 0);
+                    set_sky(g, 0);
+                    scene = Menu;
+                    sel = 0;
+                    anim = 0;
+                }
+            }
+        }
+        // the music for where we are
+        let (song, intensity) = match scene {
+            Loading => (silence(), 0),
+            Fallen => (dirge(), 0),
+            Dawn => (dawn_song(), 0),
+            Results => (if won_night { dawn_song() } else { dirge() }, 0),
+            _ => if in_night {
+                let mn = minute(r);
+                (if get(r, k_boss()) >= 0 { boss_song() } else { night_song() }, if mn < 2 { 0 } else if mn < 4 { 1 } else if mn < 7 { 2 } else { 3 })
+            } else { (title_song(), 0) },
+        };
+        tick(m, song, intensity, get(r, k_region()));
+        if save::get(data, save::sv_shake()) == 0 { keep(r, k_shake(), 0) }
+        if !show(g.c) || quit {
+            break;
+        }
+    }
+    sound_stop(0);
+    sound_stop(1);
+}
+
+// the first night's lessons, as it goes
+fn teach(r: Run) {
+    let t = get(r, k_time());
+    if t == 240 { announce(r, "MOVE WITH WASD, THE ARROWS OR A STICK") }
+    if t == 600 { announce(r, "YOUR WEAPONS FIRE ON THEIR OWN") }
+    if t == 960 { announce(r, "GATHER THE EMBERS THE DARK LEAVES BEHIND") }
+    if t == 1320 { announce(r, "LIGHT BRAZIERS: THEY MEND YOU, AND BURN THE DARK") }
+}

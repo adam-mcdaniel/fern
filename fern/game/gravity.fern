@@ -1,0 +1,205 @@
+// Gravity between many bodies, by Barnes and Hut's octree (as in
+// samples/nbody.fern): space is a cube cut into eight cubes, each of those
+// into eight, until each holds at most one star, and each cube knows its
+// mass and center of mass. A cube that's small next to how far away it is
+// pulls like one star at its center of mass, so a step is about n log n
+// pulls, not n². In fixed point (Fx), with the operators' traits.
+
+// ---- numbers: x / 2^24 (so a product of two is good up to about 180)
+
+#[derive(Eq)]
+pub struct Fx { raw: Int }
+
+fn bits() -> Int { 24 }
+
+impl Fx {
+    pub fn of(n: Int) -> Fx { Fx { raw: n << bits() } }
+    // n / d
+    pub fn ratio(n: Int, d: Int) -> Fx { Fx { raw: (n << bits()) / d } }
+    pub fn zero() -> Fx { Fx { raw: 0 } }
+    pub fn abs(self) -> Fx { Fx { raw: self.raw.abs() } }
+    pub fn sqrt(self) -> Fx { Fx { raw: isqrt(self.raw << bits()) } }
+    // to the nearest integer
+    pub fn round(self) -> Int { (self.raw + (1 << (bits() - 1))) >> bits() }
+    // from math.fern's fixed point (x / 2^16)
+    pub fn from16(x: Int) -> Fx { Fx { raw: x << (bits() - 16) } }
+}
+
+impl Add for Fx { fn add(self, o: Fx) -> Fx { Fx { raw: self.raw + o.raw } } }
+impl Sub for Fx { fn sub(self, o: Fx) -> Fx { Fx { raw: self.raw - o.raw } } }
+impl Mul for Fx { fn mul(self, o: Fx) -> Fx { Fx { raw: self.raw * o.raw >> bits() } } }
+impl Div for Fx { fn div(self, o: Fx) -> Fx { Fx { raw: (self.raw << bits()) / o.raw } } }
+impl Neg for Fx { fn neg(self) -> Fx { Fx { raw: -self.raw } } }
+impl Num for Fx {}
+impl Ord for Fx { fn cmp(self, o: Fx) -> Int { self.raw.cmp(o.raw) } }
+
+// the largest integer whose square is at most n (Newton's method, from a
+// power of two at least as big)
+fn isqrt(n: Int) -> Int {
+    if n < 2 {
+        n.max(0)
+    } else {
+        let mut x = 1;
+        let mut m = n;
+        while m > 0 {
+            m = m >> 2;
+            x = x << 1;
+        }
+        let mut y = (x + n / x) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
+    }
+}
+
+// ---- vectors
+
+#[derive(Eq)]
+pub struct V3 { x: Fx, y: Fx, z: Fx }
+
+impl V3 {
+    pub fn new(x: Fx, y: Fx, z: Fx) -> V3 { V3 { x: x, y: y, z: z } }
+    pub fn zero() -> V3 { V3::new(Fx::zero(), Fx::zero(), Fx::zero()) }
+    pub fn scale(self, k: Fx) -> V3 { V3 { x: self.x * k, y: self.y * k, z: self.z * k } }
+    pub fn dot(self, o: V3) -> Fx { self.x * o.x + self.y * o.y + self.z * o.z }
+    // turned about the x axis, by the angle with this cosine and sine
+    pub fn tilt(self, cos: Fx, sin: Fx) -> V3 { V3 { x: self.x, y: self.y * cos - self.z * sin, z: self.y * sin + self.z * cos } }
+}
+
+impl Add for V3 { fn add(self, o: V3) -> V3 { V3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z } } }
+impl Sub for V3 { fn sub(self, o: V3) -> V3 { V3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z } } }
+impl Neg for V3 { fn neg(self) -> V3 { V3 { x: -self.x, y: -self.y, z: -self.z } } }
+
+// ---- gravity (G is 1)
+
+// (kind: which galaxy it's from, for its color; 0 is a core)
+pub struct Star { id: Int, mass: Fx, pos: V3, vel: V3, kind: Int }
+
+// (so two stars passing close don't fling each other off to infinity)
+fn softening() -> Fx { Fx::ratio(2, 25) }
+
+// how mass m at `to` accelerates something at `at`: m r / |r|³
+pub fn attract(at: V3, to: V3, m: Fx) -> V3 {
+    let r = to - at;
+    let d2 = r.dot(r) + softening() * softening();
+    r.scale(m / d2 / d2.sqrt())
+}
+
+// ---- the octree
+
+struct Cell { mass: Fx, center: V3, size: Fx, kids: List<Octree> }
+
+enum Octree { Empty, Single(Star), Inner(Cell) }
+
+// the tree of stars inside the cube around `mid`, `half` its size across
+fn build(stars: List<Star>, mid: V3, half: Fx) -> Octree {
+    match stars {
+        Nil => Empty,
+        Cons(s, Nil) => Single(s),
+        _ => {
+            let mass = stars.fold(Fx::zero(), |m, s| m + s.mass);
+            let center = stars.fold(V3::zero(), |c, s| c + s.pos.scale(s.mass)).scale(Fx::of(1) / mass);
+            // (stars too close to tell apart are just listed)
+            let kids = if half.raw < 64 {
+                stars.map(|s| Single(s))
+            } else {
+                (0..8).to_list().map(|k| build(stars.filter(|s| octant(s.pos, mid) == k), corner(mid, half, k), half / Fx::of(2)))
+            };
+            Inner(Cell { mass: mass, center: center, size: half * Fx::of(2), kids: kids })
+        }
+    }
+}
+
+// which of the eight cubes around mid p is in: a bit for each axis
+fn octant(p: V3, mid: V3) -> Int {
+    (if p.x < mid.x { 0 } else { 1 }) + (if p.y < mid.y { 0 } else { 2 }) + (if p.z < mid.z { 0 } else { 4 })
+}
+
+// the middle of cube k of the eight around mid
+fn corner(mid: V3, half: Fx, k: Int) -> V3 {
+    let q = half / Fx::of(2);
+    let side = |bit| if k & bit == 0 { -q } else { q };
+    mid + V3 { x: side(1), y: side(2), z: side(4) }
+}
+
+// the tree of all the stars, in a cube around the origin big enough for them
+fn tree(stars: List<Star>) -> Octree {
+    let far = stars.fold(Fx::of(1), |h, s| h.max(s.pos.x.abs()).max(s.pos.y.abs()).max(s.pos.z.abs()));
+    build(stars, V3::zero(), far + Fx::ratio(1, 16))
+}
+
+// the pull on s of everything in the tree: a cell small enough, seen from
+// s (its size under theta times its distance), as one star
+fn pull(t: Octree, s: Star, theta: Fx) -> V3 {
+    match t {
+        Empty => V3::zero(),
+        Single(o) => if o.id == s.id { V3::zero() } else { attract(s.pos, o.pos, o.mass) },
+        Inner(c) => {
+            let r = c.center - s.pos;
+            if c.size * c.size < theta * theta * r.dot(r) {
+                attract(s.pos, c.center, c.mass)
+            } else {
+                c.kids.fold(V3::zero(), |a, k| a + pull(k, s, theta))
+            }
+        }
+    }
+}
+
+// a step of dt: each star's velocity by its acceleration, then its place
+// by its new velocity (semi-implicit Euler, which keeps orbits closed).
+// Stars thrown further than `away` are gone.
+pub fn step(stars: List<Star>, dt: Fx, theta: Fx, away: Fx) -> List<Star> {
+    let t = tree(stars);
+    let moved = stars.map(|s| {
+        let vel = s.vel + pull(t, s, theta).scale(dt);
+        Star { id: s.id, mass: s.mass, pos: s.pos + vel.scale(dt), vel: vel, kind: s.kind }
+    });
+    moved.filter(|s| s.pos.x.abs() < away && s.pos.y.abs() < away && s.pos.z.abs() < away)
+}
+
+pub fn momentum(stars: List<Star>) -> V3 {
+    stars.fold(V3::zero(), |p, s| p + s.vel.scale(s.mass))
+}
+
+// ---- galaxies
+
+// A galaxy: a core of mass 1 at `at`, moving at `vel`, and n stars weighing
+// a fifth as much between them in a thin disk from radius 1/2 to 3, each
+// going round about as fast as a circular orbit would (from the mass inside
+// it), clockwise or not (`spin` 1 or -1); the disk tilted by the angle with
+// cosine `cos` and sine `sin`. The core moves just enough the other way that
+// the whole goes at `vel`. Its stars are numbered from `first`, and are of
+// kind `kind`; `seed` makes it.
+pub struct Disk { at: V3, vel: V3, n: Int, spin: Int, cos: Fx, sin: Fx, first: Int, kind: Int, seed: Int }
+
+pub fn galaxy(d: Disk) -> List<Star> {
+    let mut seed = d.seed;
+    // a pseudo-random fraction from lo to hi
+    let random = |lo: Fx, hi: Fx| {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        lo + (hi - lo) * Fx { raw: seed >> (31 - bits()) }
+    };
+    let (inner, outer) = (Fx::ratio(1, 2), Fx::of(3));
+    let disk = Fx::ratio(1, 5);
+    let mut stars = [];
+    let mut id = d.first + 1;
+    while id <= d.first + d.n {
+        let x = random(-outer, outer);
+        let y = random(-outer, outer);
+        let z = random(Fx::ratio(-1, 20), Fx::ratio(1, 20));
+        let r = (x * x + y * y).sqrt();
+        // (only those in the ring)
+        if r >= inner && r <= outer {
+            let inside = Fx::of(1) + disk * (r - inner) / (outer - inner);
+            let speed = (inside / r).sqrt() * Fx::of(d.spin);
+            let around = V3::new(-y / r, x / r, Fx::zero()).scale(speed);
+            let pos = V3::new(x, y, z).tilt(d.cos, d.sin);
+            stars = Cons(Star { id: id, mass: disk / Fx::of(d.n), pos: d.at + pos, vel: d.vel + around.tilt(d.cos, d.sin), kind: d.kind }, stars);
+            id = id + 1;
+        }
+    }
+    let drift = momentum(stars) - d.vel.scale(disk);
+    Cons(Star { id: d.first, mass: Fx::of(1), pos: d.at, vel: d.vel - drift, kind: 0 }, stars)
+}

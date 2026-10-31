@@ -1,0 +1,18 @@
+// A method without pub is for its own module.
+
+mod shapes {
+    pub struct Square { side: Int }
+
+    impl Square {
+        pub fn new(side: Int) -> Square { Square { side: side } }
+        fn secret(self) -> Int { self.side * 7 }
+    }
+}
+
+use shapes::Square;
+
+fn main() {
+    let s: Square = Square::new(2);
+    println(s.secret().show());
+}
+// error: Square::secret is private

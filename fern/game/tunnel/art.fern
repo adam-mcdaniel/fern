@@ -1,0 +1,264 @@
+// The ant farm's picture, baked into a background and touched up where
+// the tunnels change: the sky over the garden, the grass, and the soil in
+// its layers like poured sand art (each layer its own color, the bands
+// wavering, the grains speckled), clay laid in fine sheets, stones, roots,
+// and the tunnels: rounded (a pixel's in a tunnel if it's near the middle
+// of a dug cell, so tunnels are smooth and chambers round), darker inside,
+// shadowed under their roofs, with a rim of packed soil. Over it all, the
+// glass of the case, a wooden frame, and light falling across the glass.
+
+use crate::math::isqrt;
+use super::gfx::*;
+use super::world::*;
+
+pub struct Art { bg: Array<Int>, sky_top: Int, sky_low: Int }
+
+pub fn art() -> Art { Art { bg: array(sw() * sh(), 0), sky_top: 0x7ac0f0, sky_low: 0xd8eef8 } }
+
+// each map's layers, top to bottom
+fn layer_color(map: Int, layer: Int) -> Int {
+    if map == 1 {
+        // the beach: pale sands
+        if layer == 0 { 0xc8a878 } else if layer % 4 == 1 { 0xf0dcb0 } else if layer % 4 == 2 { 0xe8c898 } else if layer % 4 == 3 { 0xf8e8c8 } else { 0xd8b888 }
+    } else if map == 3 {
+        // the desert: reds and oranges
+        if layer == 0 { 0xb06a3a } else if layer % 4 == 1 { 0xd8803a } else if layer % 4 == 2 { 0xc85a30 } else if layer % 4 == 3 { 0xe8a050 } else { 0xa84a2a }
+    } else if map == 2 {
+        // the woods: dark loams
+        if layer == 0 { 0x3a2818 } else if layer % 4 == 1 { 0x8a5a34 } else if layer % 4 == 2 { 0x6a4a2a } else if layer % 4 == 3 { 0xa87848 } else { 0x7a5838 }
+    } else {
+        if layer == 0 { 0x5a3a22 } else if layer % 4 == 1 { 0xe8c48a } else if layer % 4 == 2 { 0xd89458 } else if layer % 4 == 3 { 0xf0dcb8 } else { 0xc0683e }
+    }
+}
+
+// whether a layer is clay, on a map (as the world lays it)
+fn clay_layer(map: Int, layer: Int) -> Bool { if map == 3 { layer >= 2 } else if map == 1 { false } else { layer == 4 } }
+
+// which layer a pixel's in (by depth, the bands wavering)
+pub fn pixel_layer(px: Int, py: Int) -> Int {
+    let warp = vnoise(px, py, 40, 3) - 128;
+    let d = (py - y0()) + warp / 6;
+    if d < 24 { 0 } else { 1 + ((d - 24) / 28).min(6) }
+}
+
+pub fn bake(a: Art, w: World) {
+    let mut y = 0;
+    while y < sh() {
+        let mut x = 0;
+        while x < sw() {
+            a.bg.set(y * sw() + x, pixel(a, w, x, y));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let mut i = 0;
+    while i < gw() * gh() {
+        w.changed.set(i, false);
+        i = i + 1;
+    }
+    w.any_changed = false;
+}
+
+// redraws what's round the cells that changed
+pub fn touch_up(a: Art, w: World) {
+    if w.any_changed {
+        let mut i = 0;
+        while i < gw() * gh() {
+            if w.changed.get(i) {
+                w.changed.set(i, false);
+                let cx = i % gw();
+                let cy = i / gw();
+                let mut y = cy * cell() + y0() - 4;
+                while y < cy * cell() + y0() + 8 {
+                    let mut x = cx * cell() - 4;
+                    while x < cx * cell() + 8 {
+                        if x >= 0 && y >= 0 && x < sw() && y < sh() { a.bg.set(y * sw() + x, pixel(a, w, x, y)) }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+            }
+            i = i + 1;
+        }
+        w.any_changed = false;
+    }
+}
+
+// whether a pixel's inside a tunnel: near the middle of a dug cell
+fn hollow(w: World, px: Int, py: Int) -> Bool {
+    let gy = py - y0();
+    let cx = px / cell();
+    let cy = gy.div_floor(cell());
+    let mut yes = false;
+    let mut dy = -1;
+    while dy <= 1 && !yes {
+        let mut dx = -1;
+        while dx <= 1 && !yes {
+            let x = cx + dx;
+            let y = cy + dy;
+            if inside(x, y) && y > surface() && w.dug.get(idx(x, y)) {
+                let mx = x * cell() + cell() / 2;
+                let my = y * cell() + cell() / 2 + y0();
+                let ex = px * 2 + 1 - mx * 2;
+                let ey = py * 2 + 1 - my * 2;
+                if ex * ex + ey * ey <= 92 { yes = true }
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    yes
+}
+
+// a smooth field over the cells of a kind: each cell adds a soft bump
+// round its middle (r2 its reach, squared, in half pixels), so cells next
+// to each other melt into one round shape (metaballs)
+fn melt(w: World, px: Int, py: Int, kind: Int, r2: Int) -> Int {
+    let gy = py - y0();
+    let cx = px / cell();
+    let cy = gy.div_floor(cell());
+    let mut sum = 0;
+    let mut dy = -2;
+    while dy <= 2 {
+        let mut dx = -2;
+        while dx <= 2 {
+            let x = cx + dx;
+            let y = cy + dy;
+            if inside(x, y) && w.kind.get(idx(x, y)) == kind {
+                let ex = px * 2 + 1 - (x * cell() + cell() / 2) * 2;
+                let ey = py * 2 + 1 - (y * cell() + cell() / 2 + y0()) * 2;
+                let d2 = ex * ex + ey * ey;
+                if d2 < r2 {
+                    let k = r2 - d2;
+                    sum = sum + k * k / r2;
+                }
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    sum
+}
+
+fn pixel(a: Art, w: World, x: Int, y: Int) -> Int {
+    let ground = y0() + (surface() + 1) * cell();
+    if y < ground {
+        sky(a, w, x, y, ground)
+    } else {
+        let cx = x / cell();
+        let cy = (y - y0()) / cell();
+        let i = idx(cx.clamp(0, gw() - 1), cy.clamp(0, gh() - 1));
+        let k = w.kind.get(i);
+        let layer = pixel_layer(x, y);
+        let base = layer_color(w.map, layer);
+        let clayish = clay_layer(w.map, layer);
+        let soil = grain(base, x, y, if clayish { c_clay() } else { c_soil() }, w.map);
+        // stones: smooth and round, lit from above, dark at their edges
+        let st = melt(w, x, y, c_rock(), 340);
+        let rt = melt(w, x, y, c_root(), 150);
+        let solid = if st > 130 {
+            let slope = melt(w, x, y - 2, c_rock(), 340) - melt(w, x, y + 2, c_rock(), 340);
+            let n = vnoise(x, y, 6, 13) / 10;
+            let grey = rgb(132 + n, 126 + n, 118 + n);
+            let lit = if slope < -20 { mix(grey, 0xfff8f0, 80) } else if slope > 30 { scale(grey, 175) } else { grey };
+            if st < 210 { mix(scale(grey, 120), 0x3a2a20, 60) } else { lit }
+        } else if rt > 44 {
+            let slope = melt(w, x, y - 1, c_root(), 150) - melt(w, x, y + 1, c_root(), 150);
+            let c = if rt < 60 { 0x4a2e18 } else if slope < 0 { 0xb08a5a } else { 0x8a6238 };
+            if hash(x, y, 4) < 40 { scale(c, 220) } else { c }
+        } else { soil };
+        let out = if hollow(w, x, y) {
+            // inside a tunnel: the soil darker, warmer; shadowed under its roof
+            let roof = !hollow(w, x, y - 1) || !hollow(w, x, y - 2);
+            let floor = !hollow(w, x, y + 1);
+            let dark = mix(scale(base, 120), 0x2a1408, 70);
+            if roof { scale(dark, 170) } else if floor { mix(dark, base, 40) } else { dark }
+        } else {
+            // the rim of packed soil round a tunnel
+            let near = hollow(w, x + 1, y) || hollow(w, x - 1, y) || hollow(w, x, y + 1) || hollow(w, x, y - 1);
+            if near { if hollow(w, x, y + 1) { mix(solid, 0xfff0d0, 50) } else { scale(solid, 180) } } else { solid }
+        };
+        glass(out, x, y)
+    }
+}
+
+// a grain of sand: speckled, a little; clay smooth, in fine sheets
+fn grain(base: Int, x: Int, y: Int, k: Int, map: Int) -> Int {
+    let h = hash(x, y, 7);
+    if k == c_clay() {
+        let sheet = ((y + vnoise(x, y, 18, 5) / 32) % 3) == 0;
+        let c = mix(base, 0x9a5a48, 90);
+        if sheet { scale(c, 236) } else { c }
+    } else if y < y0() + (surface() + 1) * cell() + 3 {
+        // (the top of the soil: dark, with grass roots)
+        let c = mix(base, 0x3a2a14, 60);
+        if h < 60 { 0x6a8a3a } else { c }
+    } else {
+        let sp = if h < 26 { -30 } else if h > 236 { 28 } else if h > 200 { 10 } else { 0 };
+        let pebble = hash(x / 2, y / 2, 9) > 252;
+        if pebble { mix(base, 0x8a8478, 160) } else { rgb(red(base) + sp, green(base) + sp, blue(base) + sp * 3 / 4) }
+    }
+}
+
+// the sky drawn live each frame over the baked one: the light running
+// from dawn to dusk across the week (day out of 256), clouds drifting
+pub fn live_sky(g: Gfx, a: Art, w: World, day: Int, frame: Int) {
+    // (the sky's colors through the day: dawn pink, noon blue, dusk orange, evening violet)
+    let top = if day < 40 { mix(0x8a7ab8, 0x7ac0f0, day * 6) } else if day < 190 { 0x7ac0f0 } else if day < 230 { mix(0x7ac0f0, 0x5a6aa8, (day - 190) * 6) } else { mix(0x5a6aa8, 0x3a3a78, (day - 230) * 9) };
+    let low = if day < 40 { mix(0xffc8a8, 0xd8eef8, day * 6) } else if day < 190 { 0xd8eef8 } else if day < 230 { mix(0xd8eef8, 0xffb070, (day - 190) * 6) } else { mix(0xffb070, 0xd87a8a, (day - 230) * 9) };
+    let saved_top = a.sky_top;
+    let saved_low = a.sky_low;
+    a.sky_top = top;
+    a.sky_low = low;
+    let ground = y0() + (surface() + 1) * cell();
+    let drift = frame / 6;
+    let mut y = 0;
+    while y < ground {
+        let mut x = 0;
+        while x < sw() {
+            g.px.set(y * sw() + x, sky_at(a, w, x, y, ground, drift));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // (the sun, crossing)
+    let sx = 20 + day * 440 / 256;
+    let sy = 30 - (sin_ish(day) * 22 >> 8);
+    if day < 246 { glow(g, sx, sy, 10, if day > 190 { 0x603010 } else { 0x605a30 }); disc(g, sx, sy, 3, if day > 190 { 0xffb060 } else { 0xfff4c0 }) }
+    a.sky_top = saved_top;
+    a.sky_low = saved_low;
+}
+
+// a hump from 0 to 256 and back across the day
+fn sin_ish(day: Int) -> Int { let t = day.clamp(0, 256); t * (256 - t) / 64 }
+
+// the sky and the grass
+fn sky(a: Art, w: World, x: Int, y: Int, ground: Int) -> Int { sky_at(a, w, x, y, ground, 0) }
+
+fn sky_at(a: Art, w: World, x: Int, y: Int, ground: Int, drift: Int) -> Int {
+    let t = y * 256 / ground;
+    let base = mix(a.sky_top, a.sky_low, t);
+    // (far hills)
+    let hill = ground - 10 - (vnoise(x, 0, 60, 21) / 16);
+    let hill2 = ground - 6 - (vnoise(x, 0, 30, 22) / 24);
+    let c = if y > hill2 { mix(0x8ac870, 0xb8e098, (ground - y) * 20) } else if y > hill { mix(base, 0xa8d8a0, 160) } else { base };
+    // (a cloud or two)
+    let cloud = vnoise(x + drift, y * 3, 24, 31) + vnoise(x + drift, y * 3, 9, 32) / 3 > 236 && y < ground - 14;
+    let c2 = if cloud { mix(c, 0xffffff, 200) } else { c };
+    // (the grass: blades at the ground)
+    let blade = ground - 1 - (hash(x, 0, 41) % 7);
+    if y >= blade && hash(x, 0, 42) > 40 { mix(0x5aa83a, 0x8ad85a, (hash(x, y, 43) % 100) * 2) } else { c2 }
+}
+
+// light across the glass: two broad diagonal streaks, faintly brighter;
+// and the case's wooden frame round the edges
+fn glass(c: Int, x: Int, y: Int) -> Int {
+    if x < 3 || x >= sw() - 3 || y >= sh() - 3 {
+        let edge = x == 2 || x == sw() - 3 || y == sh() - 3;
+        if edge { 0x5a3a20 } else { 0x9a6a3a }
+    } else {
+        let d = (x + y * 2) % 300;
+        let streak = (d > 40 && d < 70) || (d > 80 && d < 88);
+        if streak { mix(c, 0xffffff, 22) } else { c }
+    }
+}

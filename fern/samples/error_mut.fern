@@ -1,0 +1,6 @@
+// Variables are immutable unless declared `let mut`.
+fn main() {
+    let x = 1;
+    x = 2;
+}
+// error: x isn't mutable

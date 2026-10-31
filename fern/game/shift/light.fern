@@ -1,0 +1,158 @@
+// Light and shadow. A light casts rays all round (or in a cone), each
+// stopping a little way into the first thing that blocks light it meets,
+// and the fan of triangles between them is filled, fading with distance
+// (gfx::fan): so what's behind a machine or a wall from the light is in
+// its shadow.
+//
+// The light that stays put (the relays that are on, the fungus's glow,
+// lamps in the floor, coolant) is worked out once for the whole deck, at
+// half resolution, and again only where a relay comes on or goes down;
+// each frame starts from it, and adds what moves.
+
+use crate::math::{sin, cos};
+use super::world::{World, size, occ_at, walls, relay_count};
+use super::gfx::{Gfx, fan, lw, lh};
+
+// the half-resolution light of the whole deck
+pub fn half() -> Int { 768 }
+
+pub struct Still { lamp: Array<Int>, bloom: Array<Int>, ends: Array<Int> }
+
+pub fn still() -> Still {
+    Still { lamp: array(half() * half(), 0), bloom: array(half() * half(), 0), ends: array(1024, 0) }
+}
+
+pub fn relay_reach() -> Int { 118 }
+
+// where rays from (cx, cy), out to `radius`, across `spread` (1024ths of a
+// turn) from angle `from`, stop: at what blocks light (4 pixels into it, so
+// what faces the light is lit), or at the radius. Their ends, in pixels,
+// x then y, into ends.
+pub fn ray_ends(w: World, ends: Array<Int>, cx: Int, cy: Int, radius: Int, from: Int, spread: Int, rays: Int, table: Array<Int>) {
+    let mut i = 0;
+    while i <= rays {
+        let a = (from + spread * i / rays) & 1023;
+        let (dx, dy) = (cos(table, a), sin(table, a));
+        let mut d = 0;
+        let mut into = -1;
+        while d < radius && into < 0 {
+            d = d + 2;
+            if occ_at(w, cx + ((dx * d) >> 16), cy + ((dy * d) >> 16)) == walls() { into = d }
+        }
+        let reach = if into >= 0 { (into + 4).min(radius) } else { radius };
+        ends.set(i * 2, cx + ((dx * reach) >> 16));
+        ends.set(i * 2 + 1, cy + ((dy * reach) >> 16));
+        i = i + 1;
+    }
+}
+
+// how far a ray goes from (cx, cy) at angle a before something blocks light
+pub fn reach(w: World, cx: Int, cy: Int, a: Int, radius: Int, table: Array<Int>) -> Int {
+    let (dx, dy) = (cos(table, a), sin(table, a));
+    let mut d = 0;
+    let mut hit = false;
+    while d < radius && !hit {
+        d = d + 3;
+        if occ_at(w, cx + ((dx * d) >> 16), cy + ((dy * d) >> 16)) == walls() { hit = true }
+    }
+    d.min(radius)
+}
+
+// whether nothing blocks light between two points
+pub fn clear_between(w: World, x0: Int, y0: Int, x1: Int, y1: Int) -> Bool {
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    let steps = (dx.abs().max(dy.abs()) / 3).max(1);
+    let mut i = 1;
+    let mut clear = true;
+    while i < steps && clear {
+        if occ_at(w, x0 + dx * i / steps, y0 + dy * i / steps) == walls() { clear = false }
+        i = i + 1;
+    }
+    clear
+}
+
+// ---- the light that stays
+
+// all of it, from nothing: each lit relay's, and the glows
+pub fn bake_all(s: Still, g: Gfx, w: World, lit: Array<Int>, table: Array<Int>) {
+    bake(s, g, w, lit, 0, 0, size(), size(), table);
+}
+
+// the light that stays, worked out again within a box of the deck (pixels)
+pub fn bake(s: Still, g: Gfx, w: World, lit: Array<Int>, x0: Int, y0: Int, x1: Int, y1: Int, table: Array<Int>) {
+    let (hx0, hy0) = ((x0 / 2).max(0), (y0 / 2).max(0));
+    let (hx1, hy1) = ((x1 / 2).min(half()), (y1 / 2).min(half()));
+    let mut y = hy0;
+    while y < hy1 {
+        let mut x = hx0;
+        while x < hx1 {
+            s.lamp.set(y * half() + x, 0);
+            s.bloom.set(y * half() + x, 0);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // the glows: little lights with no shadows of their own
+    let n = w.glows.len() / 5;
+    let mut i = 0;
+    while i < n {
+        let (gx, gy, r) = (w.glows.get(i * 5), w.glows.get(i * 5 + 1), w.glows.get(i * 5 + 2));
+        if gx + r >= x0 && gx - r < x1 && gy + r >= y0 && gy - r < y1 {
+            spot(s, g, gx / 2, gy / 2, r / 2, w.glows.get(i * 5 + 3), w.glows.get(i * 5 + 4), hx0, hy0, hx1, hy1);
+        }
+        i = i + 1;
+    }
+    // the relays that are on
+    let mut b = 0;
+    while b < relay_count(w) {
+        let (bx, by) = (w.relays.get(b * 2), w.relays.get(b * 2 + 1) - 4);
+        let r = relay_reach();
+        if lit.get(b) > 0 && bx + r >= x0 && bx - r < x1 && by + r >= y0 && by - r < y1 {
+            ray_ends(w, s.ends, bx, by, r, 0, 1024, 200, table);
+            let mut k = 0;
+            while k <= 200 * 2 {
+                s.ends.set(k, s.ends.get(k) / 2);
+                k = k + 1;
+            }
+            fan(g.falloff, s.lamp, s.bloom, half(), s.ends, 200, bx / 2, by / 2, r / 2, 225, 0, hx0, hy0, hx1, hy1);
+        }
+        b = b + 1;
+    }
+}
+
+// a little light with no shadows, into the light that stays (half
+// resolution), within a box
+fn spot(s: Still, g: Gfx, cx: Int, cy: Int, r: Int, lamp: Int, bloom: Int, bx0: Int, by0: Int, bx1: Int, by1: Int) {
+    let r2 = (r * r).max(1);
+    let inv = (1024 << 16) / r2;
+    let mut y = (cy - r).max(by0);
+    while y < (cy + r + 1).min(by1) {
+        let mut x = (cx - r).max(bx0);
+        while x < (cx + r + 1).min(bx1) {
+            let d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            if d2 < r2 {
+                let k = g.falloff.get((d2 * inv) >> 16);
+                let p = y * half() + x;
+                s.lamp.set(p, s.lamp.get(p) + ((k * lamp) >> 8));
+                s.bloom.set(p, s.bloom.get(p) + ((k * bloom) >> 8));
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// ---- light that moves, onto the screen
+
+// a light with shadows, at (x, y) on the deck, seen from the camera: rays
+// all round if spread is 1024, else a cone
+pub fn cast(g: Gfx, s: Still, w: World, x: Int, y: Int, radius: Int, from: Int, spread: Int, rays: Int, lamp: Int, bloom: Int, camx: Int, camy: Int, table: Array<Int>) {
+    ray_ends(w, s.ends, x, y, radius, from, spread, rays, table);
+    let mut k = 0;
+    while k <= rays {
+        s.ends.set(k * 2, (s.ends.get(k * 2) - camx) / 2);
+        s.ends.set(k * 2 + 1, (s.ends.get(k * 2 + 1) - camy) / 2);
+        k = k + 1;
+    }
+    fan(g.falloff, g.lamp, g.bloom, lw(), s.ends, rays, (x - camx) / 2, (y - camy) / 2, radius / 2, lamp, bloom, 0, 0, lw(), lh());
+}

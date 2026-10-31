@@ -1,0 +1,446 @@
+// A frame of the night: the ember moves, its weapons fire, the creatures
+// come; braziers catch, embers are gathered, levels are gained; and what
+// happened is told to whoever's running it (a level to choose, a chest, the
+// end).
+
+use crate::math::{sin, cos};
+use super::run::*;
+use super::arms::*;
+use super::foes::*;
+use super::world::{brazier_count, occ_at, slow};
+use super::light::{brazier_reach};
+use super::gfx::{rgb};
+
+pub fn nothing() -> Int { 0 }
+pub fn level_up() -> Int { 1 }
+pub fn chest() -> Int { 2 }
+pub fn died() -> Int { 3 }
+pub fn won() -> Int { 4 }
+
+// how far the ember's own light reaches (pixels): less as its flame does
+pub fn light_radius(r: Run) -> Int {
+    let max = stat(r, st_maxhp()) * 16;
+    let base = (62 + 62 * get(r, k_hp()).max(0) / max.max(1)) * stat(r, st_light()) / 100;
+    if get(r, k_dark()) > 0 { base * 2 / 5 } else { base }
+}
+
+pub fn start(r: Run) {
+    restat(r);
+    keep(r, k_hp(), stat(r, st_maxhp()) * 16);
+    take(r, first_weapon(get(r, k_char())));
+    keep(r, k_camx(), (get(r, k_x()) >> 4) - 240);
+    keep(r, k_camy(), (get(r, k_y()) >> 4) - 135);
+    announce(r, "SURVIVE THE NIGHT");
+}
+
+// a frame, the ember moved by (mx, my) (each -256 to 256): what happened
+pub fn step(r: Run, mx: Int, my: Int) -> Int {
+    keep(r, k_nsounds(), 0);
+    if get(r, k_freeze()) > 0 {
+        inc(r, k_freeze(), -1);
+        nothing()
+    } else if get(r, k_won()) > 0 {
+        dawn(r)
+    } else {
+        inc(r, k_time(), 1);
+        inc(r, k_frame(), 1);
+        walk(r, mx, my);
+        if get(r, k_time()) % 8 == 0 { find_ways(r) }
+        sort_foes(r);
+        direct(r);
+        move_foes(r);
+        fire_weapons(r);
+        move_shots(r);
+        spread_rings(r);
+        burn_fires(r);
+        let bolt_dmg = move_bolts(r);
+        touch(r, bolt_dmg);
+        braziers(r);
+        gather(r);
+        effects(r);
+        sweep(r.foes.p, 4);
+        follow(r);
+        if get(r, k_hp()) <= 0 { fall(r) }
+        else if get(r, k_won()) > 0 { won() }
+        else if get(r, k_chests()) > 0 { chest() }
+        else if get(r, k_ups()) > 0 { level_up() }
+        else { nothing() }
+    }
+}
+
+// ---- the ember
+
+fn walk(r: Run, mx: Int, my: Int) {
+    let len = length(mx, my);
+    let moving = len > 40;
+    keep(r, k_moving(), if moving { 1 } else { 0 });
+    if moving {
+        let (ux, uy) = if len > 256 { (mx * 256 / len, my * 256 / len) } else { (mx, my) };
+        let wading = occ_at(r.w, get(r, k_x()) >> 4, get(r, k_y()) >> 4) == slow();
+        let speed = 21 * stat(r, st_speed()) / 100 * (if wading { 2 } else { 3 }) / 3;
+        let dx = ux * speed / 256;
+        let dy = uy * speed / 256;
+        let (x, y) = (get(r, k_x()), get(r, k_y()));
+        if fits(r, x + dx, y) { keep(r, k_x(), x + dx) }
+        if fits(r, get(r, k_x()), y + dy) { keep(r, k_y(), y + dy) }
+        keep(r, k_mvx(), ux);
+        keep(r, k_mvy(), uy);
+        // which way it faces: an angle, by searching the table of sines
+        keep(r, k_face(), angle(r, ux, uy));
+    }
+    inc(r, k_iframes(), -1);
+}
+
+// the angle (1024ths of a turn) of a direction 256 long
+pub fn angle(r: Run, ux: Int, uy: Int) -> Int {
+    let mut best = 0;
+    let mut best_d = 1 << 40;
+    let mut a = 0;
+    while a < 1024 {
+        let dx = (cos(r.table, a) >> 8) - ux;
+        let dy = (sin(r.table, a) >> 8) - uy;
+        if dx * dx + dy * dy < best_d {
+            best_d = dx * dx + dy * dy;
+            best = a;
+        }
+        a = a + 16;
+    }
+    best
+}
+
+// whether the ember fits at (x, y): its four corners on open ground
+fn fits(r: Run, x: Int, y: Int) -> Bool {
+    walkable16(r, x - 64, y - 48) && walkable16(r, x + 64, y - 48) && walkable16(r, x - 64, y + 64) && walkable16(r, x + 64, y + 64) && inside(x, y)
+}
+
+// what hurts the ember: creatures touching it, and their bolts
+fn touch(r: Run, bolt_dmg: Int) {
+    let f = r.foes;
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let found = nearby(r, px, py, 32);
+    let mut worst = bolt_dmg;
+    let mut j = 0;
+    while j < found {
+        let i = array_get(r.near, j);
+        let reach = array_get(f.r, i) + 5;
+        let dx = array_get(f.x, i) - px;
+        let dy = array_get(f.y, i) - py;
+        if dx * dx + dy * dy < reach * reach * 256 { worst = worst.max(array_get(f.dmg, i)) }
+        j = j + 1;
+    }
+    if worst > 0 && get(r, k_iframes()) <= 0 {
+        let d = (worst - stat(r, st_armor())).max(1);
+        inc(r, k_hp(), -d * 16);
+        keep(r, k_iframes(), 30);
+        keep(r, k_hurt(), 12);
+        shake(r, 4);
+        sound(r, s_hurt(), 0, px);
+        burst(r, px, py, 10, rgb(255, 120, 60), 50, 16);
+    }
+    inc(r, k_hurt(), -1);
+    // mending (Ashheart): regen is in flame each ten seconds
+    let regen = stat(r, st_regen());
+    if regen > 0 {
+        inc(r, k_regen(), regen * 16);
+        if get(r, k_regen()) >= 600 {
+            inc(r, k_regen(), -600);
+            keep(r, k_hp(), (get(r, k_hp()) + 1).min(stat(r, st_maxhp()) * 16));
+        }
+    }
+}
+
+// out: unless the hearth's Rekindle brings it back, once
+fn fall(r: Run) -> Int {
+    if array_get(r.meta, 9) > 0 && get(r, k_revives()) == 0 {
+        keep(r, k_revives(), 1);
+        keep(r, k_hp(), stat(r, st_maxhp()) * 8);
+        keep(r, k_iframes(), 120);
+        let (px, py) = (get(r, k_x()), get(r, k_y()));
+        let found = nearby(r, px, py, 160);
+        let mut j = 0;
+        while j < found {
+            let i = array_get(r.near, j);
+            let (ux, uy) = unit(array_get(r.foes.x, i) - px, array_get(r.foes.y, i) - py);
+            hurt(r, i, 400, ux / 3, uy / 3, -1);
+            j = j + 1;
+        }
+        flash(r, px, py, 200, 60, 255, 120);
+        burst(r, px, py, 60, rgb(255, 220, 140), 90, 30);
+        shake(r, 12);
+        sound(r, s_big(), 0, px);
+        announce(r, "REKINDLED!");
+        nothing()
+    } else {
+        keep(r, k_dead(), 1);
+        died()
+    }
+}
+
+// ---- braziers
+
+// standing by an unlit brazier lights it; a lit one mends the ember near
+// it, and burns the weakest creatures in its light
+fn braziers(r: Run) {
+    let (px, py) = (get(r, k_x()) >> 4, get(r, k_y()) >> 4);
+    let mut b = 0;
+    while b < brazier_count(r.w) {
+        let (bx, by) = (array_get(r.w.braziers, b * 2), array_get(r.w.braziers, b * 2 + 1));
+        let (dx, dy) = (px - bx, py - by);
+        let d2 = dx * dx + dy * dy;
+        if array_get(r.lit, b) == 0 {
+            if d2 < 34 * 34 {
+                let h = array_get(r.heat, b) + 1;
+                array_set(r.heat, b, h);
+                if h % 6 == 0 { embers(r, bx * 16, by * 16 - 64, 2, rgb(255, 160, 60)) }
+                if h >= 80 { ignite(r, b) }
+            } else {
+                array_set(r.heat, b, (array_get(r.heat, b) - 2).max(0));
+            }
+        } else {
+            if get(r, k_time()) % 4 == 0 { spark(r, (bx + roll(r, 7) - 3) * 16, (by - 8) * 16, roll(r, 9) - 4, -14 - roll(r, 12), 20 + roll(r, 20), rgb(255, 140 + roll(r, 100), 40), 1) }
+            if d2 < 60 * 60 {
+                inc(r, k_heal_t(), 1);
+                if get(r, k_heal_t()) % 20 == 0 { keep(r, k_hp(), (get(r, k_hp()) + 16).min(stat(r, st_maxhp()) * 16)) }
+            }
+            if get(r, k_time()) % 30 == b % 30 {
+                let found = nearby(r, bx * 16, by * 16, 80);
+                let mut j = 0;
+                while j < found {
+                    let i = array_get(r.near, j);
+                    let k = array_get(r.foes.kind, i);
+                    if (k == gloom() || k == shade()) && array_get(r.foes.elite, i) == 0 { hurt(r, i, 5, 0, 0, -1) }
+                    j = j + 1;
+                }
+            }
+        }
+        b = b + 1;
+    }
+}
+
+fn ignite(r: Run, b: Int) {
+    let (bx, by) = (array_get(r.w.braziers, b * 2) * 16, array_get(r.w.braziers, b * 2 + 1) * 16);
+    array_set(r.lit, b, 1);
+    array_set(r.heat, b, 0);
+    flash(r, bx, by, 160, 40, 255, 40);
+    burst(r, bx, by - 64, 40, rgb(255, 190, 80), 70, 30);
+    embers(r, bx, by, 24, rgb(255, 150, 50));
+    shake(r, 3);
+    sound(r, s_ignite(), 0, bx);
+    // (the light bursting out burns what's near)
+    let found = nearby(r, bx, by, brazier_reach() * 2 / 3);
+    let mut j = 0;
+    while j < found {
+        let i = array_get(r.near, j);
+        let (ux, uy) = unit(array_get(r.foes.x, i) - bx, array_get(r.foes.y, i) - by);
+        hurt(r, i, 60 + minute(r) * 20, ux / 4, uy / 4, -1);
+        j = j + 1;
+    }
+    let lit = lit_count(r);
+    if lit == brazier_count(r.w) { announce(r, "EVERY BRAZIER BURNS!") }
+    else { announce(r, "BRAZIER LIT  " ++ lit.show() ++ "/" ++ brazier_count(r.w).show()) }
+}
+
+pub fn lit_count(r: Run) -> Int {
+    let mut n = 0;
+    let mut b = 0;
+    while b < brazier_count(r.w) {
+        n = n + array_get(r.lit, b);
+        b = b + 1;
+    }
+    n
+}
+
+// ---- what's on the ground
+
+fn gather(r: Run) {
+    let p = r.drops;
+    let (xs, ys, kinds, values, pulls) = (col(p, dr_x()), col(p, dr_y()), col(p, dr_kind()), col(p, dr_value()), col(p, dr_pull()));
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let reach = 34 * stat(r, st_magnet()) / 100;
+    let reach2 = reach * reach * 256;
+    let n = count(p);
+    let mut lodestar = false;
+    let mut i = 0;
+    while i < n {
+        let dx = px - array_get(xs, i);
+        let dy = py - array_get(ys, i);
+        let d2 = dx * dx + dy * dy;
+        let pull = array_get(pulls, i);
+        let kind = array_get(kinds, i);
+        if pull == 0 && d2 < reach2 && kind != 3 { array_set(pulls, i, 1) }
+        if pull > 0 {
+            // (flying in, faster and faster)
+            let s = (8 + pull * 2).min(90);
+            let d = length(dx, dy).max(1);
+            array_set(xs, i, array_get(xs, i) + dx * s / d);
+            array_set(ys, i, array_get(ys, i) + dy * s / d);
+            array_set(pulls, i, pull + 1);
+        }
+        if d2 < 10 * 10 * 256 {
+            let v = array_get(values, i);
+            if kind == 0 {
+                inc(r, k_xp(), v);
+                chime(r);
+            } else if kind == 1 {
+                keep(r, k_hp(), (get(r, k_hp()) + v * 16).min(stat(r, st_maxhp()) * 16));
+                sound(r, s_heal(), 0, px);
+                burst(r, px, py, 14, rgb(255, 120, 90), 40, 20);
+            } else if kind == 2 {
+                lodestar = true;
+                sound(r, s_chest(), 1, px);
+            } else if kind == 3 {
+                inc(r, k_chests(), 1);
+            } else {
+                inc(r, k_cinders(), v);
+                sound(r, s_coin(), 0, px);
+            }
+            array_set(values, i, 0);
+        }
+        array_set(col(p, dr_t()), i, array_get(col(p, dr_t()), i) + 1);
+        i = i + 1;
+    }
+    // (a chest is walked onto, not pulled in)
+    i = 0;
+    while i < n {
+        if array_get(kinds, i) == 3 && array_get(values, i) > 0 {
+            let dx = px - array_get(xs, i);
+            let dy = py - array_get(ys, i);
+            if dx * dx + dy * dy < 14 * 14 * 256 {
+                inc(r, k_chests(), 1);
+                array_set(values, i, 0);
+            }
+        }
+        i = i + 1;
+    }
+    if lodestar {
+        let mut k = 0;
+        while k < n {
+            if array_get(kinds, k) == 0 { array_set(pulls, k, array_get(pulls, k).max(1)) }
+            k = k + 1;
+        }
+        announce(r, "LODESTAR!");
+    }
+    sweep(p, dr_value());
+    // levels: as many as the embers gathered make
+    let mut need = needed(get(r, k_level()));
+    while get(r, k_xp()) >= need {
+        inc(r, k_xp(), -need);
+        inc(r, k_level(), 1);
+        inc(r, k_ups(), 1);
+        need = needed(get(r, k_level()));
+    }
+}
+
+// an ember gathered: a note, higher each time while they come quickly
+fn chime(r: Run) {
+    let t = get(r, k_time());
+    if t - get(r, k_chain_t()) < 40 { keep(r, k_chain(), (get(r, k_chain()) + 1).min(14)) } else { keep(r, k_chain(), 0) }
+    keep(r, k_chain_t(), t);
+    sound(r, s_ember(), get(r, k_chain()), get(r, k_x()));
+}
+
+// ---- sparks and the rest that just fade
+
+fn effects(r: Run) {
+    let s = r.sparks;
+    let (xs, ys, vxs, vys, life, kind) = (col(s, sp_x()), col(s, sp_y()), col(s, sp_vx()), col(s, sp_vy()), col(s, sp_life()), col(s, sp_kind()));
+    let n = count(s);
+    let mut i = 0;
+    while i < n {
+        array_set(xs, i, array_get(xs, i) + array_get(vxs, i));
+        array_set(ys, i, array_get(ys, i) + array_get(vys, i));
+        if array_get(kind, i) == 0 {
+            // (sparks slow down)
+            array_set(vxs, i, array_get(vxs, i) * 7 / 8);
+            array_set(vys, i, array_get(vys, i) * 7 / 8);
+        } else {
+            // (embers drift)
+            array_set(vxs, i, array_get(vxs, i) + roll(r, 3) - 1);
+        }
+        array_set(life, i, array_get(life, i) - 1);
+        i = i + 1;
+    }
+    sweep(s, sp_life());
+    let nu = r.nums;
+    i = 0;
+    while i < count(nu) {
+        array_set(col(nu, nu_y()), i, array_get(col(nu, nu_y()), i) - 8);
+        array_set(col(nu, nu_life()), i, array_get(col(nu, nu_life()), i) - 1);
+        i = i + 1;
+    }
+    sweep(nu, nu_life());
+    let z = r.zaps;
+    i = 0;
+    while i < count(z) {
+        array_set(col(z, za_life()), i, array_get(col(z, za_life()), i) - 1);
+        i = i + 1;
+    }
+    sweep(z, za_life());
+    let fl = r.flashes;
+    i = 0;
+    while i < count(fl) {
+        array_set(col(fl, fl_life()), i, array_get(col(fl, fl_life()), i) - 1);
+        i = i + 1;
+    }
+    sweep(fl, fl_life());
+    keep(r, k_shake(), (get(r, k_shake()) * 7 / 8 - 0).max(0));
+    keep(r, k_dark(), (get(r, k_dark()) - 1).max(0));
+    keep(r, k_banner_t(), (get(r, k_banner_t()) - 1).max(0));
+}
+
+// the camera: after the ember, a little ahead of where it's going
+fn follow(r: Run) {
+    let tx = (get(r, k_x()) >> 4) + get(r, k_mvx()) * 30 / 256 - 240;
+    let ty = (get(r, k_y()) >> 4) + get(r, k_mvy()) * 22 / 256 - 135;
+    let cx = get(r, k_camx()) * 16;
+    let cy = get(r, k_camy()) * 16;
+    // (kept in 16ths in between, so it eases smoothly)
+    let nx = get(r, k_camfx()) + (tx * 16 - cx) / 10;
+    let ny = get(r, k_camfy()) + (ty * 16 - cy) / 10;
+    keep(r, k_camx(), (cx + nx) >> 4);
+    keep(r, k_camy(), (cy + ny) >> 4);
+    keep(r, k_camfx(), (cx + nx) & 15);
+    keep(r, k_camfy(), (cy + ny) & 15);
+}
+
+// ---- dawn
+
+// the boss is dead and the sun comes up: what's left of the dark burns
+// away, a few at a time
+fn dawn(r: Run) -> Int {
+    inc(r, k_dawn(), 1);
+    inc(r, k_frame(), 1);
+    let d = get(r, k_dawn());
+    let f = r.foes;
+    sort_foes(r);
+    let n = count(f.p);
+    let mut i = 0;
+    while i < n {
+        if (i + d) % 9 == 0 && d > 30 { hurt(r, i, 100000, 0, 0, -1) }
+        i = i + 1;
+    }
+    gather_all(r);
+    effects(r);
+    sweep(f.p, 4);
+    follow(r);
+    nothing()
+}
+
+// at dawn, every ember on the ground comes to the ember
+fn gather_all(r: Run) {
+    let p = r.drops;
+    let mut i = 0;
+    while i < count(p) {
+        if array_get(col(p, dr_kind()), i) != 3 { array_set(col(p, dr_pull()), i, array_get(col(p, dr_pull()), i).max(1)) }
+        i = i + 1;
+    }
+    gather(r);
+}
+
+// the title's night: nothing comes; the braziers burn and the sparks drift
+pub fn ambience(r: Run) {
+    keep(r, k_nsounds(), 0);
+    inc(r, k_frame(), 1);
+    braziers(r);
+    effects(r);
+}

@@ -1,0 +1,6 @@
+// An impl says what each of its trait's associated types is.
+// error: this impl doesn't say what Item is
+trait C { type Item; fn get(self) -> Self::Item; }
+struct B {}
+impl C for B { fn get(self) -> Int { 1 } }
+fn main() {}

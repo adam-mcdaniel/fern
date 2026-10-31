@@ -1,0 +1,336 @@
+// What's drawn over the ant farm to play it by: a strip across the sky
+// with the week and its clock, the dig points, the ants and the food
+// brought in; a forecast when rain's coming; the cards to choose from at
+// the end of a week; the outline of a chamber being placed; the tunnel
+// being dug.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+use super::world::*;
+use super::colony::*;
+use super::upgrades::*;
+use super::scene::{food_color, kind_color};
+
+pub fn ink() -> Int { 0x3a2a1a }
+pub fn paper() -> Int { 0xfbf3e0 }
+pub fn faint() -> Int { 0x9a8a70 }
+pub fn tomato() -> Int { 0xd8402e }
+
+// a paper tag with a soft shadow
+pub fn tag(g: Gfx, x: Int, y: Int, w: Int, h: Int) {
+    round_blend(g, x + 1, y + 2, w, h, 3, 0x1a2a40, 60);
+    round_rect(g, x, y, w, h, 3, 0xd8c8a8);
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 2, paper());
+}
+
+pub fn button(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int) {
+    round_blend(g, x + 1, y + 2, w, h, 3, 0x1a2a40, 70);
+    round_rect(g, x, y, w, h, 3, scale(color, 180));
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 2, color);
+    rect(g, x + 3, y + 1, w - 6, 1, mix(color, 0xffffff, 90));
+}
+
+pub fn draw_hud(g: Gfx, c: Colony, speed: Int, paused: Bool, sines: Array<Int>) {
+    // the week, and its clock: a bar filling across
+    tag(g, 4, 3, 92, 20);
+    text(g, "Week " ++ (c.week + 1).show(), 9, 6, 1, ink());
+    let frac = c.week_t * 80 / week_len();
+    rect(g, 9, 16, 80, 3, 0xe4d8bc);
+    rect(g, 9, 16, frac, 3, 0x5ab04a);
+    // (rain: where on the clock it'll come)
+    if rainy_week(c) {
+        let rx = 9 + rain_at() * 80 / week_len();
+        rect(g, rx, 14, 2, 7, 0x4a90e0);
+    }
+    // dig points
+    tag(g, 100, 3, 70, 20);
+    shovel(g, 105, 6);
+    num(g, c.dig, 118, 9, 1, if c.dig < 5 { tomato() } else { ink() });
+    text(g, "dig", 146, 9, 1, faint());
+    // ants, and food brought in
+    tag(g, 174, 3, 66, 20);
+    ant_icon(g, 180, 12);
+    num(g, c.n_ants, 190, 9, 1, ink());
+    tag(g, 244, 3, 82, 20);
+    disc(g, 251, 12, 3, 0xf0c850);
+    put(g, 250, 11, 0xfff4c0);
+    num(g, c.delivered, 258, 9, 1, ink());
+    text(g, "food", 300, 9, 1, faint());
+    // speed and the pause
+    let sx = 410;
+    tag(g, sx, 3, 66, 20);
+    let mut k = 0;
+    while k < 3 {
+        let on = speed == k + 1 && !paused;
+        let bx = sx + 6 + k * 13;
+        let col = if on { ink() } else { 0xc8b898 };
+        // (k + 1 little arrows)
+        let mut j = 0;
+        while j <= k {
+            put(g, bx + j * 3, 9, col);
+            rect(g, bx + j * 3, 10, 2, 3, col);
+            put(g, bx + j * 3, 13, col);
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+    let pc = if paused { tomato() } else { 0xc8b898 };
+    rect(g, sx + 50, 8, 2, 7, pc);
+    rect(g, sx + 54, 8, 2, 7, pc);
+    // the forecast
+    if rainy_week(c) && c.week_t < rain_at() && rain_at() - c.week_t < 60 * 15 && (c.frame / 20) % 2 == 0 {
+        tag(g, 330, 3, 76, 20);
+        cloud(g, 338, 12);
+        text(g, "rain soon", 348, 9, 1, 0x3a6aa8);
+    } else if c.rain > 0 {
+        tag(g, 330, 3, 76, 20);
+        cloud(g, 338, 12);
+        text(g, "raining", 348, 9, 1, 0x3a6aa8);
+    }
+    if paused {
+        let w = text_w(g, "PAUSED: dig away, time's stopped", 1) + 16;
+        round_blend(g, 240 - w / 2, 252, w, 14, 4, 0x1a1008, 160);
+        text_mid(g, "PAUSED: dig away, time's stopped", 240, 255, 1, 0xfff0d0);
+    }
+}
+
+fn shovel(g: Gfx, x: Int, y: Int) {
+    rect(g, x + 4, y, 2, 8, 0x8a5a2a);
+    rect(g, x + 2, y + 8, 6, 4, 0xa8b0b8);
+    rect(g, x + 3, y + 12, 4, 1, 0xa8b0b8);
+    put(g, x + 2, y + 8, 0xd8e0e8);
+}
+
+pub fn ant_icon(g: Gfx, x: Int, y: Int) {
+    rect(g, x - 3, y - 1, 2, 2, 0xc03a1c);
+    rect(g, x - 1, y - 1, 2, 2, 0xe85a30);
+    rect(g, x + 1, y - 2, 3, 3, 0xc03a1c);
+    put(g, x - 2, y + 1, 0x6a1a0a);
+    put(g, x + 1, y + 1, 0x6a1a0a);
+    put(g, x - 4, y - 2, 0x6a1a0a);
+}
+
+fn cloud(g: Gfx, x: Int, y: Int) {
+    disc(g, x - 2, y, 2, 0x8aa8c8);
+    disc(g, x + 2, y - 1, 3, 0x9ab8d8);
+    put(g, x - 2, y + 3, 0x4a90e0);
+    put(g, x + 2, y + 4, 0x4a90e0);
+}
+
+// ---- the week's cards: three to choose one from
+
+pub fn card_x(i: Int) -> Int { 240 - 156 + i * 106 }
+pub fn card_y() -> Int { 80 }
+
+pub fn draw_cards(g: Gfx, c: Colony, cards: Array<Int>, sel: Int, t: Int, sines: Array<Int>) {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, (t * 12).min(110));
+    let title = "Week " ++ c.week.show() ++ " done!";
+    say_mid(g, title, 240, 34 - (if t < 10 { (10 - t) * 3 } else { 0 }), 2, 0xffffff, 0x3a2410);
+    text_mid(g, "+30 dig points. Choose one more thing for the colony:", 240, 58, 1, 0xfff0d0);
+    let mut i = 0;
+    while i < 3 {
+        let u = cards.get(i);
+        let delay = i * 5;
+        let rise = if t < 12 + delay { ((12 + delay - t) * (12 + delay - t)).min(200) } else { 0 };
+        let chosen = i == sel;
+        let x = card_x(i);
+        let y = card_y() + rise - (if chosen { 4 } else { 0 });
+        round_blend(g, x + 3, y + 4, 100, 130, 6, 0x1a1008, 110);
+        round_rect(g, x, y, 100, 130, 6, if chosen { 0xe8a018 } else { 0x8a7058 });
+        round_rect(g, x + 2, y + 2, 96, 126, 5, paper());
+        card_art(g, u, x + 50, y + 34, t, sines);
+        print_mid(g, up_name(u), x + 50, y + 62, 1, ink(), 0xe8dcc0);
+        super::hud::wrap_mid(g, up_text(u), x + 50, y + 76, 86, 1, faint());
+        i = i + 1;
+    }
+    text_mid(g, "left and right, then choose", 240, 230, 1, 0xfff0d0);
+}
+
+// lines of words wrapped, each centered on x
+pub fn wrap_mid(g: Gfx, s: String, x: Int, y: Int, width: Int, k: Int, color: Int) {
+    let n = s.len();
+    let mut start = 0;
+    let mut yy = y;
+    let mut last = -1;
+    let mut i = 0;
+    while i <= n {
+        if i == n || s.char_at(i) == 32 {
+            if text_w_range(g, s, start, i, k) > width && last > start {
+                let lw = text_w_range(g, s, start, last, k);
+                text_range(g, s, start, last, x - lw / 2, yy, k, color);
+                yy = yy + 10 * k;
+                start = last + 1;
+            }
+            last = i;
+        }
+        i = i + 1;
+    }
+    if start < n {
+        let lw = text_w_range(g, s, start, n, k);
+        text_range(g, s, start, n, x - lw / 2, yy, k, color);
+    }
+}
+
+// each card's picture, drawn
+fn card_art(g: Gfx, u: Int, x: Int, y: Int, t: Int, sines: Array<Int>) {
+    disc(g, x, y, 20, 0xf0e4c8);
+    let bob = sin(sines, t * 6) >> 15;
+    if u == u_shovel() {
+        rect(g, x - 1, y - 16 + bob, 3, 18, 0x8a5a2a);
+        rect(g, x - 6, y + 2 + bob, 13, 9, 0xa8b0b8);
+        rect(g, x - 4, y + 11 + bob, 9, 2, 0xa8b0b8);
+        rect(g, x - 6, y + 2 + bob, 13, 1, 0xe0e8f0);
+    } else if up_places(u) {
+        // (a chamber in the soil, with what it's for)
+        let kind = up_kind(u);
+        round_rect(g, x - 16, y - 6, 32, 14, 6, 0x3a2414);
+        round_rect(g, x - 14, y - 4, 28, 10, 5, 0x5a3a24);
+        let col = if kind == k_sump() { 0x4a90e0 } else if kind == k_guard() { 0x8a1a10 } else { kind_color(kind) };
+        let mut k = 0;
+        while k < 7 {
+            put(g, x - 10 + k * 3, y + 3 - (k % 2), col);
+            put(g, x - 9 + k * 3, y + 4, col);
+            k = k + 1;
+        }
+        text_mid(g, "+", x, y - 18 + bob, 2, 0x5ab04a);
+    } else if u == u_jaws() {
+        ant_big(g, x, y + bob);
+        disc(g, x + 13, y - 5 + bob, 2, 0xf0c850);
+        disc(g, x + 16, y - 7 + bob, 2, 0x6ad048);
+    } else if u == u_feet() {
+        ant_big(g, x + 3, y);
+        rect(g, x - 18, y - 3, 8, 1, 0xc8b898);
+        rect(g, x - 20, y + 1, 10, 1, 0xc8b898);
+        rect(g, x - 16, y + 5, 6, 1, 0xc8b898);
+    } else if u == u_piles() {
+        let mut k = 0;
+        while k < 15 {
+            let row = if k < 5 { 0 } else if k < 9 { 1 } else if k < 12 { 2 } else if k < 14 { 3 } else { 4 };
+            let col = if k < 5 { k } else if k < 9 { k - 5 } else if k < 12 { k - 9 } else if k < 14 { k - 12 } else { 0 };
+            disc(g, x - 9 + col * 4 + row * 2, y + 10 - row * 4, 2, if k % 3 == 0 { 0x6ad048 } else { 0xf0c850 });
+            k = k + 1;
+        }
+    } else if u == u_brood() {
+        let mut k = 0;
+        while k < 5 {
+            let ex = x - 12 + k * 6;
+            let wig = (t / 8 + k) % 2;
+            rect(g, ex, y - wig, 4, 4, 0xfff4e0);
+            put(g, ex + 1, y + 1 - wig, 0xd8c8b0);
+            k = k + 1;
+        }
+    } else if u == u_guard() {
+        // a soldier, big jawed, on guard
+        ant_big(g, x, y + bob);
+        rect(g, x + 10, y - 2 + bob, 3, 1, 0xe8d8b0);
+        rect(g, x + 10, y + 1 + bob, 3, 1, 0xe8d8b0);
+        text_mid(g, "!", x - 12, y - 16, 2, 0xd8402e);
+    } else {
+        // patience: an hourglass
+        rect(g, x - 8, y - 14, 17, 2, 0x8a5a2a);
+        rect(g, x - 8, y + 12, 17, 2, 0x8a5a2a);
+        let mut r = 0;
+        while r < 12 {
+            let half = (12 - r) * 6 / 12;
+            rect(g, x - half, y - 12 + r, half * 2 + 1, 1, if r > 6 { 0xf0c850 } else { 0xd8ecf8 });
+            rect(g, x - (r * 6 / 12), y + r, (r * 6 / 12) * 2 + 1, 1, if r > 7 { 0xf0c850 } else { 0xd8ecf8 });
+            r = r + 1;
+        }
+    }
+}
+
+fn ant_big(g: Gfx, x: Int, y: Int) {
+    disc(g, x - 8, y, 4, 0xc03a1c);
+    disc(g, x, y, 3, 0xe85a30);
+    disc(g, x + 7, y - 1, 3, 0xc03a1c);
+    put(g, x + 8, y - 2, 0xffffff);
+    let mut k = 0;
+    while k < 3 {
+        line(g, x - 3 + k * 3, y + 2, x - 6 + k * 4, y + 7, 0x6a1a0a, 256);
+        k = k + 1;
+    }
+    line(g, x + 9, y - 3, x + 12, y - 8, 0x6a1a0a, 256);
+}
+
+// a chamber being placed: its outline where it would go, green if it fits
+pub fn draw_ghost(g: Gfx, w: World, u: Int, x: Int, y: Int, frame: Int) {
+    let kind = up_kind(u);
+    let cw = if kind == k_sump() || kind == k_guard() { 4 } else { 5 };
+    let ok = room_fits(w, x, y, cw, 3);
+    let px0 = x * cell();
+    let py0 = y * cell() + y0();
+    let col = if ok { 0x7aff7a } else { 0xff5a4a };
+    round_blend(g, px0, py0, cw * cell(), 3 * cell(), 4, col, if (frame / 8) % 2 == 0 { 120 } else { 80 });
+    let label = "Place the " ++ up_name(u) ++ (if ok { "" } else { ": not here" });
+    let lw = text_w(g, label, 1) + 12;
+    round_blend(g, 240 - lw / 2, 252, lw, 14, 4, 0x1a1008, 170);
+    text_mid(g, label, 240, 255, 1, if ok { 0xd8ffd0 } else { 0xffd0c8 });
+}
+
+// the pointer: a cell outlined, and the cost of digging it
+pub fn draw_pointer(g: Gfx, w: World, x: Int, y: Int, digging: Bool, frame: Int) {
+    if inside(x, y) && y > surface() - 1 {
+        let px0 = x * cell();
+        let py0 = y * cell() + y0();
+        let i = idx(x, y);
+        let col = if walkable(w, i) { 0xffffff } else if diggable(w, i) { 0xffe080 } else { 0xff6a5a };
+        outline(g, px0 - 1, py0 - 1, cell() + 2, cell() + 2, col);
+        if digging { blend(g, px0 + 1, py0 + 1, 0xffffff, 120) }
+    }
+}
+
+// a tip for a new player, on a card in the bottom corner (sliding in)
+pub fn draw_tip(g: Gfx, f: super::fx::Fx) {
+    let t = f.tip_t;
+    if t >= 0 {
+        let slide = if t < 12 { (12 - t) * (12 - t) } else if t > 285 { (t - 285) * (t - 285) } else { 0 };
+        let w = 190;
+        let lines = wrap_lines_n(g, f.tip, w - 16);
+        let h = 16 + lines * 10;
+        let x = sw() - w - 8 + slide * 2;
+        let y = sh() - h - 8;
+        round_blend(g, x + 2, y + 3, w, h, 5, 0x1a1008, 90);
+        round_rect(g, x, y, w, h, 5, 0xe8a018);
+        round_rect(g, x + 1, y + 1, w - 2, h - 2, 4, 0xfff4d8);
+        wrap_left(g, f.tip, x + 8, y + 6, w - 16, 0x3a2a1a);
+    }
+}
+
+fn wrap_lines_n(g: Gfx, s: String, width: Int) -> Int {
+    let n = s.len();
+    let mut start = 0;
+    let mut lines = 1;
+    let mut last = -1;
+    let mut i = 0;
+    while i <= n {
+        if i == n || s.char_at(i) == 32 {
+            if text_w_range(g, s, start, i, 1) > width && last > start {
+                lines = lines + 1;
+                start = last + 1;
+            }
+            last = i;
+        }
+        i = i + 1;
+    }
+    lines
+}
+
+fn wrap_left(g: Gfx, s: String, x: Int, y: Int, width: Int, color: Int) {
+    let n = s.len();
+    let mut start = 0;
+    let mut yy = y;
+    let mut last = -1;
+    let mut i = 0;
+    while i <= n {
+        if i == n || s.char_at(i) == 32 {
+            if text_w_range(g, s, start, i, 1) > width && last > start {
+                text_range(g, s, start, last, x, yy, 1, color);
+                yy = yy + 10;
+                start = last + 1;
+            }
+            last = i;
+        }
+        i = i + 1;
+    }
+    if start < n { text_range(g, s, start, n, x, yy, 1, color) }
+}

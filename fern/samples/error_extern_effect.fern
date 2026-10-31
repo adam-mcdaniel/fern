@@ -1,0 +1,9 @@
+// An extern fn either has Io (unwritten) or nothing (with {}): C can't
+// perform fern's own effects, whose operations go to handlers in fern.
+
+extern fn risky(n: Int) -> Int with {Fail};
+
+fn main() {
+    println(attempt(|| risky(1)).show());
+}
+// error: C can't perform Fail

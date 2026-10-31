@@ -1,0 +1,5 @@
+// Generic code can use an associated type only as its trait's bounds say.
+// error: T::Item doesn't implement Show
+trait C { type Item; fn get(self) -> Self::Item; }
+fn show_it<T: C>(t: T) -> String { t.get().show() }
+fn main() {}

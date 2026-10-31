@@ -1,0 +1,509 @@
+// PERIHELION: a game of orbits. Crystals circle a star, each on its own
+// orbit; collect them all in a ship with little fuel. Everything moves by
+// gravity: the planets go round the star (and pull on each other, and on
+// it), and the crystals, the rocks of the belt and the ship fall around all
+// of them. So the way to get anywhere isn't to point at it and burn: it's
+// to burn a little, at the right moment, and let the orbit take you. The
+// dotted line is where you'll coast to, if you burn no more.
+//
+// Left and right turn the ship, up burns forward, down burns backward.
+// Drag with the mouse to turn the view, Z and X zoom, P pauses, escape
+// quits. Fly into the star, a planet or a rock, or off into space, and the
+// ship's lost.
+
+mod screen;
+mod draw;
+mod math;
+mod gravity;
+mod space;
+
+use screen::*;
+use draw::{Canvas, canvas, show, text, text_width, fill_rect};
+use math::{sines, sin, cos, rng, random};
+use gravity::{Fx, V3, attract};
+use space::{View, project, apparent, shine, spark, ball, line3, fade};
+
+fn width() -> Int { 320 }
+fn height() -> Int { 240 }
+// time a frame: three units a second (the innermost orbits take seconds,
+// the outermost a minute)
+fn dt() -> Fx { Fx::ratio(1, 20) }
+fn full_tank() -> Int { 1000 }
+
+// ---- what's out there
+
+// something heavy: the star (0), or a planet
+struct Mass { id: Int, pos: V3, vel: V3, mass: Fx, radius: Fx, color: Int }
+
+// something light, that only feels the heavy things' gravity: a rock or a
+// crystal
+struct Mote { pos: V3, vel: V3 }
+
+struct World { masses: List<Mass>, rocks: List<Mote>, crystals: List<Mote> }
+
+// the ship: which way it points (1024ths of a turn, in the plane of the
+// orbits), its fuel, and whether it's burning (1 forward, -1 back)
+struct Ship { pos: V3, vel: V3, heading: Int, fuel: Int, burn: Int }
+
+// the pull of every heavy thing at p
+fn pull(ms: List<Mass>, p: V3) -> V3 {
+    ms.fold(V3::zero(), |a, m| a + attract(p, m.pos, m.mass))
+}
+
+// a step for the heavy things, each pulled by the others
+fn move_masses(ms: List<Mass>) -> List<Mass> {
+    ms.map(|m| {
+        let a = ms.fold(V3::zero(), |a, o| if o.id == m.id { a } else { a + attract(m.pos, o.pos, o.mass) });
+        let vel = m.vel + a.scale(dt());
+        Mass { id: m.id, pos: m.pos + vel.scale(dt()), vel: vel, mass: m.mass, radius: m.radius, color: m.color }
+    })
+}
+
+// a step for a light thing
+fn drift(ms: List<Mass>, m: Mote) -> Mote {
+    let vel = m.vel + pull(ms, m.pos).scale(dt());
+    Mote { pos: m.pos + vel.scale(dt()), vel: vel }
+}
+
+// (a crystal flung off too far to fetch is gone, so a level can always be
+// finished)
+fn step_world(w: World) -> World {
+    let ms = w.masses;
+    let crystals = w.crystals.map(|m| drift(ms, m)).filter(|m| ms.any(|star| star.id == 0 && near(m.pos, star.pos, Fx::of(13))));
+    World { masses: move_masses(ms), rocks: w.rocks.map(|m| drift(ms, m)), crystals: crystals }
+}
+
+// a step for the ship, turned by `turn` and burning `burn` (if it has fuel)
+fn fly(ms: List<Mass>, s: Ship, turn: Int, burn: Int, table: Array<Int>) -> Ship {
+    let heading = (s.heading + turn) & 1023;
+    let burning = if s.fuel > 0 { burn } else { 0 };
+    let thrust = facing(table, heading).scale(Fx::ratio(burning, 4));
+    let vel = s.vel + (pull(ms, s.pos) + thrust).scale(dt());
+    let fuel = if burning != 0 { (s.fuel - 4).max(0) } else { s.fuel };
+    Ship { pos: s.pos + vel.scale(dt()), vel: vel, heading: heading, fuel: fuel, burn: burning }
+}
+
+// the way an angle points, in the plane of the orbits
+fn facing(table: Array<Int>, a: Int) -> V3 {
+    V3::new(Fx::from16(cos(table, a)), Fx::zero(), Fx::from16(sin(table, a)))
+}
+
+fn near(a: V3, b: V3, r: Fx) -> Bool {
+    let d = a - b;
+    d.dot(d) < r * r
+}
+
+// whether the ship's hit something
+fn wrecked(w: World, s: Ship) -> Bool {
+    w.masses.any(|m| near(s.pos, m.pos, m.radius + Fx::ratio(1, 20))) || w.rocks.any(|m| near(s.pos, m.pos, Fx::ratio(3, 25)))
+}
+
+// whether it's drifted off where no one will find it
+fn lost(w: World, s: Ship) -> Bool {
+    match w.masses {
+        Nil => false,
+        Cons(star, _) => !near(s.pos, star.pos, Fx::of(15)),
+    }
+}
+
+// where the ship will be the next `steps` steps, if it burns no more (a
+// point every third step), and whether it hits something heavy on the way
+fn coast(ms: List<Mass>, s: Ship, steps: Int) -> (List<V3>, Bool) {
+    let mut masses = ms;
+    let mut m = Mote { pos: s.pos, vel: s.vel };
+    let mut points = [];
+    let mut hit = false;
+    let mut i = 0;
+    while i < steps && !hit {
+        m = drift(masses, m);
+        masses = move_masses(masses);
+        hit = masses.any(|b| near(m.pos, b.pos, b.radius));
+        if i % 3 == 0 || hit {
+            points = Cons(m.pos, points);
+        }
+        i = i + 1;
+    }
+    (points.reverse(), hit)
+}
+
+// ---- the levels
+
+// a light thing going round a heavy one (of mass `mass`, at `center`
+// going at `cvel`) in a circle of radius r, at angle a in it
+fn circling(table: Array<Int>, center: V3, cvel: V3, mass: Fx, r: Fx, a: Int) -> Mote {
+    let (ca, sa) = (Fx::from16(cos(table, a)), Fx::from16(sin(table, a)));
+    let speed = (mass / r).sqrt();
+    Mote { pos: center + V3::new(r * ca, Fx::zero(), r * sa), vel: cvel + V3::new(-sa * speed, Fx::zero(), ca * speed) }
+}
+
+fn planet(table: Array<Int>, id: Int, distance: Fx, mass: Fx, radius: Fx, color: Int, a: Int) -> Mass {
+    let o = circling(table, V3::zero(), V3::zero(), Fx::of(1), distance, a);
+    Mass { id: id, pos: o.pos, vel: o.vel, mass: mass, radius: radius, color: color }
+}
+
+// level n: a planet more each level up to three (a blue one, a giant past
+// the belt, a small red one close in), the rock belt from level 2, and more
+// crystals each level, from level 3 two of them circling the giant (and the
+// rest well inside its orbit, which would scatter them)
+fn level_world(n: Int, table: Array<Int>) -> World {
+    let r = rng(n * 7919 + 13);
+    let between = |lo: Fx, hi: Fx| lo + (hi - lo) * Fx::ratio(random(r, 1000), 1000);
+    let angle = || random(r, 1024);
+    let mut planets = [planet(table, 1, Fx::ratio(42, 10), Fx::ratio(12, 1000), Fx::ratio(22, 100), rgb(90, 150, 255), angle())];
+    if n >= 2 {
+        planets = Cons(planet(table, 2, Fx::of(9), Fx::ratio(3, 100), Fx::ratio(35, 100), rgb(255, 170, 90), angle()), planets);
+    }
+    if n >= 3 {
+        planets = Cons(planet(table, 3, Fx::ratio(27, 10), Fx::ratio(4, 1000), Fx::ratio(15, 100), rgb(255, 110, 90), angle()), planets);
+    }
+    // (the star moves just enough the other way that the whole stays put)
+    let momentum = planets.fold(V3::zero(), |p, m| p + m.vel.scale(m.mass));
+    let star = Mass { id: 0, pos: V3::zero(), vel: -momentum, mass: Fx::of(1), radius: Fx::ratio(9, 20), color: rgb(255, 225, 150) };
+    let masses = Cons(star, planets);
+    let mut rocks = [];
+    if n >= 2 {
+        let mut k = (40 + 20 * n).min(140);
+        while k > 0 {
+            let m = circling(table, V3::zero(), star.vel, Fx::of(1), between(Fx::of(6), Fx::of(7)), angle());
+            rocks = Cons(Mote { pos: m.pos + V3::new(Fx::zero(), between(Fx::ratio(-2, 25), Fx::ratio(2, 25)), Fx::zero()), vel: m.vel }, rocks);
+            k = k - 1;
+        }
+    }
+    let mut crystals = [];
+    let count = (3 + 2 * n).min(12);
+    let mut k = 0;
+    while k < count {
+        let farthest = if n >= 2 { Fx::ratio(38, 5) } else { Fx::ratio(19, 2) };
+        // (not too near a planet's orbit, whose pull would soon fling it off)
+        let round_star = || {
+            let mut radius = between(Fx::ratio(8, 5), farthest);
+            while planets.any(|p| (p.pos.dot(p.pos).sqrt() - radius).abs() < Fx::ratio(3, 5)) {
+                radius = between(Fx::ratio(8, 5), farthest);
+            }
+            circling(table, V3::zero(), star.vel, Fx::of(1), radius, angle())
+        };
+        let c = match masses.filter(|m| m.id == 2) {
+            Cons(giant, _) => if n >= 3 && k < 2 { circling(table, giant.pos, giant.vel, giant.mass, Fx::ratio(4, 5), angle()) } else { round_star() },
+            Nil => round_star(),
+        };
+        crystals = Cons(c, crystals);
+        k = k + 1;
+    }
+    World { masses: masses, rocks: rocks, crystals: crystals }
+}
+
+// a ship in a circle round the star, close in, pointing the way it goes
+fn new_ship(w: World, table: Array<Int>, dice: Array<Int>, fuel: Int) -> Ship {
+    let a = random(dice, 1024);
+    match w.masses {
+        Nil => panic("no star"),
+        Cons(star, _) => {
+            let o = circling(table, star.pos, star.vel, star.mass, Fx::of(2), a);
+            Ship { pos: o.pos, vel: o.vel, heading: (a + 256) & 1023, fuel: fuel, burn: 0 }
+        }
+    }
+}
+
+// ---- the wreck
+
+struct Bit { pos: V3, vel: V3, life: Int }
+
+fn explode(at: V3, dice: Array<Int>) -> List<Bit> {
+    let between = |lo: Int, hi: Int| Fx::ratio(lo + random(dice, hi - lo), 100);
+    (0..60).to_list().map(|_| Bit { pos: at, vel: V3::new(between(-100, 100), between(-40, 40), between(-100, 100)), life: 30 + random(dice, 40) })
+}
+
+fn move_bits(bits: List<Bit>) -> List<Bit> {
+    bits.filter(|b| b.life > 1).map(|b| Bit { pos: b.pos + b.vel.scale(dt()), vel: b.vel.scale(Fx::ratio(97, 100)), life: b.life - 1 })
+}
+
+// ---- drawing
+
+fn channels(color: Int) -> (Int, Int, Int) { (color >> 16 & 255, color >> 8 & 255, color & 255) }
+
+// each planet's orbit, faintly, as a ring round the star
+fn rings(c: Canvas, v: View, w: World) {
+    match w.masses {
+        Nil => {}
+        Cons(star, planets) => planets.each(|p| {
+            let (r, g, b) = channels(p.color);
+            let d = p.pos - star.pos;
+            let radius = d.dot(d).sqrt();
+            let mut a = 0;
+            while a < 1024 {
+                let q = star.pos + facing(v.table, a).scale(radius);
+                match project(c, v, q) {
+                    Some((x, y, _)) => shine(c, x, y, r, g, b, 36),
+                    None => {}
+                }
+                a = a + 16;
+            }
+        }),
+    }
+}
+
+fn draw_world(c: Canvas, v: View, w: World, frame: Int) {
+    rings(c, v, w);
+    w.masses.each(|m| match project(c, v, m.pos) {
+        Some((x, y, depth)) => {
+            let (r, g, b) = channels(m.color);
+            ball(c, x, y, apparent(v, m.radius, depth), r, g, b)
+        }
+        None => {}
+    });
+    w.rocks.each(|m| match project(c, v, m.pos) {
+        Some((x, y, _)) => spark(c, x, y, 170, 150, 130, 150),
+        None => {}
+    });
+    let mut k = 0;
+    w.crystals.each(|m| {
+        match project(c, v, m.pos) {
+            // (each pulsing, out of step with the others)
+            Some((x, y, _)) => spark(c, x, y, 110, 255, 170, 190 + sin(v.table, frame * 12 + k * 97) / 1024),
+            None => {}
+        }
+        k = k + 1;
+    });
+}
+
+// where the ship will coast: dots fading as they go, and a red cross where
+// it would crash
+fn draw_course(c: Canvas, v: View, course: (List<V3>, Bool)) {
+    let (points, hit) = course;
+    let n = points.len().max(1);
+    let mut k = 0;
+    points.each(|p| {
+        match project(c, v, p) {
+            Some((x, y, _)) => {
+                if hit && k == n - 1 {
+                    let mut d = -2;
+                    while d <= 2 {
+                        shine(c, x + d, y + d, 255, 60, 60, 255);
+                        shine(c, x + d, y - d, 255, 60, 60, 255);
+                        d = d + 1;
+                    }
+                } else if k % 2 == 0 {
+                    shine(c, x, y, 90, 200, 255, 200 - 170 * k / n);
+                }
+            }
+            None => {}
+        }
+        k = k + 1;
+    });
+}
+
+// the ship: an arrowhead pointing its way (the same size on the screen
+// however far the camera is), and a flame when it burns
+fn draw_ship(c: Canvas, v: View, s: Ship, frame: Int) {
+    let size = v.distance / Fx::of(30);
+    let d = facing(v.table, s.heading).scale(size);
+    let side = facing(v.table, s.heading + 256).scale(size);
+    let nose = s.pos + d.scale(Fx::ratio(3, 5));
+    let back = s.pos - d.scale(Fx::ratio(2, 5));
+    let left = back + side.scale(Fx::ratio(3, 10));
+    let right = back - side.scale(Fx::ratio(3, 10));
+    let white = rgb(235, 240, 255);
+    line3(c, v, nose, left, white);
+    line3(c, v, nose, right, white);
+    line3(c, v, left, right, white);
+    if s.burn != 0 {
+        let flame = s.pos - d.scale(Fx::ratio(s.burn * (60 + frame % 3 * 15), 100));
+        match project(c, v, flame) {
+            Some((x, y, _)) => spark(c, x, y, 255, 170, 60, 255),
+            None => {}
+        }
+    }
+}
+
+fn draw_bits(c: Canvas, v: View, bits: List<Bit>) {
+    bits.each(|b| match project(c, v, b.pos) {
+        Some((x, y, _)) => spark(c, x, y, 255, 120 + b.life * 2, 50, b.life * 5),
+        None => {}
+    });
+}
+
+fn centered(c: Canvas, s: String, y: Int, size: Int, color: Int) {
+    text(c, s, (width() - text_width(s, size)) / 2, y, size, color);
+}
+
+fn hud(c: Canvas, level: Int, score: Int, lives: Int, s: Ship, crystals: Int) {
+    let grey = rgb(150, 150, 170);
+    text(c, "LEVEL " ++ level.show() ++ "   SCORE " ++ score.show(), 4, 4, 1, grey);
+    let right = "SHIPS " ++ lives.show() ++ "   CRYSTALS " ++ crystals.show();
+    text(c, right, width() - text_width(right, 1) - 4, 4, 1, grey);
+    text(c, "FUEL", 4, height() - 9, 1, grey);
+    fill_rect(c, 22, height() - 9, 100, 5, rgb(40, 40, 50));
+    let color = if s.fuel * 4 < full_tank() { rgb(255, 90, 70) } else { rgb(110, 230, 150) };
+    fill_rect(c, 22, height() - 9, 100 * s.fuel / full_tank(), 5, color);
+}
+
+// ---- the game
+
+enum Phase { Title, Playing, Crashed(Int), Cleared(Int), Over }
+
+fn main() {
+    if !screen_open(width(), height(), 3, "perihelion") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let table = sines();
+    let dice = rng(screen_ticks() + 1);
+    let mut level = 1;
+    let mut lives = 3;
+    let mut score = 0;
+    let mut world = level_world(3, table);
+    let mut ship = new_ship(world, table, dice, full_tank());
+    let mut phase = Title;
+    let mut bits = [];
+    let mut beep = 0;
+    let mut banner = 0;
+    let mut flung = 0;
+    let mut frame = 0;
+    let mut paused = false;
+    let mut yaw = 0;
+    let mut pitch = -190;
+    let mut distance = Fx::of(12);
+    let mut center = V3::zero();
+    let mut last_x = mouse_x();
+    let mut last_y = mouse_y();
+    loop {
+        // the view
+        let (mx, my) = (mouse_x(), mouse_y());
+        if mouse_down() {
+            yaw = (yaw - (mx - last_x) * 3) & 1023;
+            pitch = (pitch + (my - last_y) * 3).clamp(-250, -30);
+        }
+        last_x = mx;
+        last_y = my;
+        if key_down(key("z")) { distance = (distance * Fx::ratio(97, 100)).max(Fx::of(3)) }
+        if key_down(key("x")) { distance = (distance * Fx::ratio(103, 100)).min(Fx::of(40)) }
+        if key_pressed(key("p")) { paused = !paused }
+
+        // the game
+        if !paused {
+            match phase {
+                Title => {
+                    yaw = (yaw + 1) & 1023;
+                    world = step_world(world);
+                    if key_pressed(key_space()) {
+                        level = 1;
+                        lives = 3;
+                        score = 0;
+                        world = level_world(level, table);
+                        ship = new_ship(world, table, dice, full_tank());
+                        banner = 150;
+                        phase = Playing;
+                    }
+                }
+                Playing => {
+                    let turn = (if key_down(key_left()) { 10 } else { 0 }) - (if key_down(key_right()) { 10 } else { 0 });
+                    let burn = (if key_down(key_up()) { 1 } else { 0 }) - (if key_down(key_down_arrow()) { 1 } else { 0 });
+                    ship = fly(world.masses, ship, turn, burn, table);
+                    let before = world.crystals.len();
+                    world = step_world(world);
+                    if world.crystals.len() < before { flung = 120 }
+                    let (got, left) = world.crystals.partition(|m| near(ship.pos, m.pos, Fx::ratio(8, 25)));
+                    if !got.is_empty() {
+                        score = score + 100 * level * got.len();
+                        ship = Ship { pos: ship.pos, vel: ship.vel, heading: ship.heading, fuel: (ship.fuel + 150 * got.len()).min(full_tank()), burn: ship.burn };
+                        world = World { masses: world.masses, rocks: world.rocks, crystals: left };
+                        beep = 5;
+                    }
+                    if wrecked(world, ship) || lost(world, ship) {
+                        bits = explode(ship.pos, dice);
+                        lives = lives - 1;
+                        beep = 18;
+                        phase = Crashed(150);
+                    } else if world.crystals.is_empty() {
+                        score = score + ship.fuel / 10 * level;
+                        phase = Cleared(150);
+                    }
+                }
+                Crashed(t) => {
+                    world = step_world(world);
+                    if t > 0 {
+                        phase = Crashed(t - 1);
+                    } else if lives > 0 {
+                        ship = new_ship(world, table, dice, ship.fuel.max(full_tank() / 2));
+                        phase = Playing;
+                    } else {
+                        phase = Over;
+                    }
+                }
+                Cleared(t) => {
+                    ship = fly(world.masses, ship, 0, 0, table);
+                    world = step_world(world);
+                    if t > 0 {
+                        phase = Cleared(t - 1);
+                    } else {
+                        level = level + 1;
+                        world = level_world(level, table);
+                        ship = new_ship(world, table, dice, full_tank());
+                        banner = 150;
+                        phase = Playing;
+                    }
+                }
+                Over => {
+                    yaw = (yaw + 1) & 1023;
+                    world = step_world(world);
+                    if key_pressed(key_space()) {
+                        world = level_world(3, table);
+                        phase = Title;
+                    }
+                }
+            }
+            bits = move_bits(bits);
+            frame = frame + 1;
+            banner = (banner - 1).max(0);
+            flung = (flung - 1).max(0);
+        }
+        beep = (beep - 1).max(0);
+        screen_beep(beep > 0);
+
+        // the camera follows the ship, while there is one
+        let flying = match phase { Playing => true, Cleared(_) => true, _ => false };
+        let target = match phase { Title => V3::zero(), Over => V3::zero(), Crashed(_) => center, _ => ship.pos };
+        center = center + (target - center).scale(Fx::ratio(1, 12));
+
+        // the picture
+        fade(c, 1);
+        let v = View { center: center, yaw: yaw, pitch: pitch, distance: distance, focal: Fx::of(220), table: table };
+        draw_world(c, v, world, frame);
+        if flying {
+            match phase { Playing => draw_course(c, v, coast(world.masses, ship, 180)), _ => {} }
+            draw_ship(c, v, ship, frame);
+        }
+        draw_bits(c, v, bits);
+        match phase {
+            Title => {
+                centered(c, "PERIHELION", 50, 4, rgb(255, 225, 150));
+                centered(c, "COLLECT THE CRYSTALS. LET GRAVITY DO THE WORK.", 90, 1, rgb(180, 190, 220));
+                centered(c, "LEFT RIGHT TURN   UP BURN   DOWN BRAKE", 150, 1, rgb(130, 140, 170));
+                centered(c, "DRAG TO TURN THE VIEW   Z X ZOOM   P PAUSE", 160, 1, rgb(130, 140, 170));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 190, 2, rgb(255, 255, 255)) }
+            }
+            Over => {
+                centered(c, "GAME OVER", 70, 3, rgb(255, 110, 90));
+                centered(c, "SCORE " ++ score.show() ++ "   LEVEL " ++ level.show(), 100, 2, rgb(220, 220, 240));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 190, 2, rgb(255, 255, 255)) }
+            }
+            _ => {
+                hud(c, level, score, lives, ship, world.crystals.len());
+                match phase {
+                    Crashed(_) => centered(c, if lives > 0 { "SHIP LOST" } else { "LAST SHIP LOST" }, 80, 2, rgb(255, 110, 90)),
+                    Cleared(_) => centered(c, "LEVEL CLEAR", 80, 2, rgb(110, 255, 170)),
+                    _ => {
+                        if banner > 0 { centered(c, "LEVEL " ++ level.show(), 80, 2, rgb(255, 225, 150)) }
+                        if ship.fuel == 0 { centered(c, "OUT OF FUEL", 100, 1, rgb(255, 110, 90)) }
+                        if flung > 0 { centered(c, "A CRYSTAL WAS FLUNG OUT OF REACH", 110, 1, rgb(110, 255, 170)) }
+                    }
+                }
+            }
+        }
+        if paused { centered(c, "PAUSED", 110, 2, rgb(255, 255, 255)) }
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}

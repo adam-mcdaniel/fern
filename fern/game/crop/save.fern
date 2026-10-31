@@ -1,0 +1,217 @@
+// What's kept between plays, in a file of numbers in the user's own
+// folder (screen.c's file_save): the settings, what's been unlocked, the
+// almanac (every seed and tool ever found), the records, and the run in
+// progress, saved at each market so it can be carried on.
+
+use crate::screen::{file_save, file_load};
+use super::run::*;
+use super::tools::{max_tools};
+
+pub fn version() -> Int { 3 }
+pub fn cells() -> Int { 128 }
+
+pub fn sv_music() -> Int { 1 }
+pub fn sv_sfx() -> Int { 2 }
+pub fn sv_full() -> Int { 3 }
+pub fn sv_shake() -> Int { 4 }
+pub fn sv_runs() -> Int { 5 }
+pub fn sv_wins() -> Int { 6 }
+pub fn sv_farmers() -> Int { 7 }
+pub fn sv_farms() -> Int { 8 }
+// the best ribbon won with each farmer (+1; 0 none)
+pub fn sv_ribbon(f: Int) -> Int { 9 + f }
+pub fn sv_harvests() -> Int { 13 }
+pub fn sv_best_bank() -> Int { 14 }
+pub fn sv_weeks() -> Int { 15 }
+pub fn sv_seeds_seen() -> Int { 16 }
+pub fn sv_tools_seen() -> Int { 17 }
+pub fn sv_taught() -> Int { 18 }
+pub fn sv_best_run() -> Int { 19 }
+pub fn sv_furthest() -> Int { 20 }
+pub fn sv_ribbons_open() -> Int { 21 }
+pub fn sv_assist() -> Int { 22 }
+// the tips a new player's been shown, a bit each
+pub fn sv_tips() -> Int { 23 }
+
+// the run in progress, from cell 40
+fn rv() -> Int { 40 }
+
+fn file() -> String { "bumpercrop.sav" }
+
+pub fn fresh() -> Array<Int> {
+    let d = array(cells(), 0);
+    d.set(0, version());
+    d.set(sv_music(), 70);
+    d.set(sv_sfx(), 80);
+    d.set(sv_shake(), 1);
+    d.set(sv_farmers(), 1);
+    d.set(sv_farms(), 1);
+    d.set(sv_ribbons_open(), 1);
+    d
+}
+
+pub fn load() -> Array<Int> with Io {
+    let d = array(cells(), 0);
+    let n = file_load(file(), d);
+    if n < 1 || d.get(0) != version() { fresh() } else { d }
+}
+
+pub fn store(d: Array<Int>) with Io {
+    file_save(file(), d, cells());
+}
+
+pub fn get(d: Array<Int>, k: Int) -> Int { d.get(k) }
+pub fn set(d: Array<Int>, k: Int, v: Int) { d.set(k, v) }
+pub fn has_bit(d: Array<Int>, k: Int, b: Int) -> Bool { (d.get(k) >> b) & 1 == 1 }
+pub fn set_bit(d: Array<Int>, k: Int, b: Int) { d.set(k, d.get(k) | (1 << b)) }
+
+// ---- the almanac: every seed and tool ever seen (at a market, or to start)
+
+pub fn see_seed(d: Array<Int>, s: Int) { if s >= 0 { set_bit(d, sv_seeds_seen(), s) } }
+pub fn see_tool(d: Array<Int>, t: Int) { if t >= 0 { set_bit(d, sv_tools_seen(), t) } }
+pub fn seen_seed(d: Array<Int>, s: Int) -> Bool { has_bit(d, sv_seeds_seen(), s) }
+pub fn seen_tool(d: Array<Int>, t: Int) -> Bool { has_bit(d, sv_tools_seen(), t) }
+
+// what a run has, seen; whether anything was new
+pub fn see_run(d: Array<Int>, r: Run) -> Bool {
+    let before = d.get(sv_seeds_seen()) + d.get(sv_tools_seen()) * 1000003;
+    let mut i = 0;
+    while i < max_plots() {
+        see_seed(d, r.plot_seed.get(i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_tools() {
+        see_tool(d, r.tools.get(i));
+        i = i + 1;
+    }
+    before != d.get(sv_seeds_seen()) + d.get(sv_tools_seen()) * 1000003
+}
+
+// ---- the run in progress
+
+pub fn has_run(d: Array<Int>) -> Bool { d.get(rv()) == 1 }
+pub fn clear_run(d: Array<Int>) { d.set(rv(), 0) }
+
+pub fn keep_run(d: Array<Int>, r: Run) {
+    let o = rv();
+    d.set(o, 1);
+    d.set(o + 1, r.farm);
+    d.set(o + 2, r.farmer);
+    d.set(o + 3, r.ribbon);
+    d.set(o + 4, r.season);
+    d.set(o + 5, r.week);
+    d.set(o + 6, r.year);
+    d.set(o + 7, r.money);
+    d.set(o + 8, r.balls);
+    d.set(o + 9, r.save_secs);
+    d.set(o + 10, r.plots_open);
+    d.set(o + 11, r.fair);
+    d.set(o + 12, r.seed);
+    d.set(o + 13, r.total);
+    d.set(o + 14, r.harvests);
+    d.set(o + 15, r.best_bank);
+    d.set(o + 16, r.weeks_paid);
+    let mut i = 0;
+    while i < max_plots() {
+        d.set(o + 20 + i, r.plot_seed.get(i));
+        d.set(o + 32 + i, r.plot_level.get(i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_tools() {
+        d.set(o + 44 + i, r.tools.get(i));
+        d.set(o + 49 + i, r.tool_val.get(i));
+        i = i + 1;
+    }
+}
+
+pub fn restore_run(d: Array<Int>, n_plots: Int) -> Run {
+    let o = rv();
+    let r = new_run(d.get(o + 1), d.get(o + 2), d.get(o + 3), d.get(o + 12), n_plots);
+    r.season = d.get(o + 4);
+    r.week = d.get(o + 5);
+    r.year = d.get(o + 6);
+    r.money = d.get(o + 7);
+    r.balls = d.get(o + 8);
+    r.save_secs = d.get(o + 9);
+    r.plots_open = d.get(o + 10);
+    r.fair = d.get(o + 11);
+    r.total = d.get(o + 13);
+    r.harvests = d.get(o + 14);
+    r.best_bank = d.get(o + 15);
+    r.weeks_paid = d.get(o + 16);
+    let mut i = 0;
+    while i < max_plots() {
+        r.plot_seed.set(i, d.get(o + 20 + i));
+        r.plot_level.set(i, d.get(o + 32 + i).max(1));
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_tools() {
+        r.tools.set(i, d.get(o + 44 + i));
+        r.tool_val.set(i, d.get(o + 49 + i));
+        i = i + 1;
+    }
+    r
+}
+
+// what a finished run unlocks, as lines to tell
+pub fn record_run(d: Array<Int>, r: Run, won: Bool) -> List<String> {
+    set(d, sv_runs(), get(d, sv_runs()) + 1);
+    set(d, sv_harvests(), get(d, sv_harvests()) + r.harvests);
+    set(d, sv_weeks(), get(d, sv_weeks()) + r.weeks_paid);
+    if r.best_bank > get(d, sv_best_bank()) { set(d, sv_best_bank(), r.best_bank) }
+    if r.total > get(d, sv_best_run()) { set(d, sv_best_run(), r.total) }
+    let reached = r.year * 12 + week_index(r);
+    if reached > get(d, sv_furthest()) { set(d, sv_furthest(), reached) }
+    let mut news = [];
+    if reached >= 6 && !has_bit(d, sv_farms(), 1) {
+        set_bit(d, sv_farms(), 1);
+        news = Cons("New farm: The Orchard", news);
+    }
+    if won {
+        set(d, sv_wins(), get(d, sv_wins()) + 1);
+        if r.ribbon + 1 > get(d, sv_ribbon(r.farmer)) { set(d, sv_ribbon(r.farmer), r.ribbon + 1) }
+        if r.ribbon + 2 > get(d, sv_ribbons_open()) && r.ribbon < 3 {
+            set(d, sv_ribbons_open(), r.ribbon + 2);
+            news = Cons("New ribbon: " ++ ribbon_name(r.ribbon + 1), news);
+        }
+    }
+    // the farmers: each by a feat
+    let feats = [reached >= 3, r.harvests >= 150, won];
+    let mut f = 1;
+    let mut rest = feats;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(ok, tail) => {
+                if ok && !has_bit(d, sv_farmers(), f) {
+                    set_bit(d, sv_farmers(), f);
+                    news = Cons("New farmer: " ++ farmer_name(f), news);
+                }
+                f = f + 1;
+                rest = tail;
+            }
+        }
+    }
+    clear_run(d);
+    news
+}
+
+pub fn farmer_lock(f: Int) -> String {
+    if f == 1 { "Reach summer" } else if f == 2 { "Harvest 150 crops in one run" } else { "Keep the farm a whole year" }
+}
+
+pub fn farm_lock(f: Int) -> String { if f == 1 { "Reach autumn" } else { "" } }
+
+pub fn ribbon_count() -> Int { 4 }
+pub fn ribbon_name(k: Int) -> String {
+    if k == 0 { "White" } else if k == 1 { "Red" } else if k == 2 { "Blue" } else { "Gold" }
+}
+pub fn ribbon_color(k: Int) -> Int {
+    if k == 0 { 0xf4f0e8 } else if k == 1 { 0xe8483a } else if k == 2 { 0x3a7ae8 } else { 0xf0c030 }
+}
+pub fn ribbon_text(k: Int) -> String {
+    if k == 0 { "The rent as it is." } else if k == 1 { "A quarter more rent." } else if k == 2 { "Half as much more rent." } else { "Three quarters more rent." }
+}

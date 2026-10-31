@@ -1,0 +1,233 @@
+// Minesweeper. Click a square to open it: a number says how many of the
+// eight around it are mines, and a square with none opens those around
+// it too, and so on (a flood fill, by recursion). Right-click (or F and
+// click) flags a square. Open every square that isn't a mine. The first
+// click is never a mine. R starts over.
+
+mod screen;
+mod draw;
+mod math;
+
+use screen::*;
+use draw::{Canvas, canvas, clear, fill_rect, pixel, show, text, text_width};
+use math::{rng, random};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+// 16 x 11 squares of 10 pixels, under a bar of 10
+fn cols() -> Int { 16 }
+fn rows() -> Int { 11 }
+fn size() -> Int { 10 }
+fn top() -> Int { 10 }
+fn mines() -> Int { 24 }
+
+// each square: whether it's a mine, how many mines are around it, and
+// whether it's open, or flagged
+struct Board { mine: Array<Bool>, around: Array<Int>, open: Array<Bool>, flag: Array<Bool> }
+
+enum State { Fresh, Playing, Won, Lost }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern mines") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let r = rng(screen_ticks());
+    let b = Board { mine: array(cols() * rows(), false), around: array(cols() * rows(), 0), open: array(cols() * rows(), false), flag: array(cols() * rows(), false) };
+    let mut state = Fresh;
+    let mut started = 0;
+    let mut time = 0;
+    loop {
+        let mx = mouse_x() / size();
+        let my = (mouse_y() - top()) / size();
+        let on_board = mouse_y() >= top() && mx < cols() && my < rows();
+        let i = my * cols() + mx;
+        let flagging = mouse_right() || mouse_clicked() && key_down(key("f"));
+        if key_pressed(key("r")) {
+            reset(b);
+            state = Fresh;
+        } else {
+            match state {
+                Fresh => {
+                    if on_board && mouse_clicked() && !flagging {
+                        // (the mines go in only now, none here or next to here)
+                        lay(b, r, mx, my);
+                        state = Playing;
+                        started = screen_ticks();
+                        reveal(b, mx, my);
+                    }
+                }
+                Playing => {
+                    if on_board && flagging && !array_get(b.open, i) {
+                        array_set(b.flag, i, !array_get(b.flag, i));
+                    } else if on_board && mouse_clicked() && !array_get(b.flag, i) {
+                        if array_get(b.mine, i) {
+                            array_set(b.open, i, true);
+                            state = Lost;
+                            screen_beep(true);
+                        } else {
+                            reveal(b, mx, my);
+                            if opened(b) == cols() * rows() - mines() { state = Won }
+                        }
+                    }
+                    time = (screen_ticks() - started) / 1000;
+                }
+                Won => (),
+                Lost => (),
+            }
+        }
+        render(c, b, state, time, flags(b));
+        let lost = match state { Lost => true, _ => false };
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+        if lost { screen_beep(false) }
+    }
+    screen_beep(false);
+}
+
+fn reset(b: Board) {
+    let mut i = 0;
+    while i < cols() * rows() {
+        array_set(b.mine, i, false);
+        array_set(b.open, i, false);
+        array_set(b.flag, i, false);
+        array_set(b.around, i, 0);
+        i = i + 1;
+    }
+}
+
+// the mines, away from (sx, sy), and the counts
+fn lay(b: Board, r: Array<Int>, sx: Int, sy: Int) {
+    let mut placed = 0;
+    while placed < mines() {
+        let x = random(r, cols());
+        let y = random(r, rows());
+        let close = abs(x - sx) <= 1 && abs(y - sy) <= 1;
+        if !close && !array_get(b.mine, y * cols() + x) {
+            array_set(b.mine, y * cols() + x, true);
+            placed = placed + 1;
+        }
+    }
+    let mut i = 0;
+    while i < cols() * rows() {
+        array_set(b.around, i, count_around(b, i % cols(), i / cols()));
+        i = i + 1;
+    }
+}
+
+fn abs(n: Int) -> Int { if n < 0 { -n } else { n } }
+
+fn inside(x: Int, y: Int) -> Bool { x >= 0 && y >= 0 && x < cols() && y < rows() }
+
+fn count_around(b: Board, x: Int, y: Int) -> Int {
+    let mut n = 0;
+    let mut dy = -1;
+    while dy <= 1 {
+        let mut dx = -1;
+        while dx <= 1 {
+            if inside(x + dx, y + dy) && array_get(b.mine, (y + dy) * cols() + x + dx) { n = n + 1 }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    n
+}
+
+// opens (x, y), and if no mine's around it, everything around it
+fn reveal(b: Board, x: Int, y: Int) {
+    if inside(x, y) {
+        let i = y * cols() + x;
+        if !array_get(b.open, i) && !array_get(b.flag, i) {
+            array_set(b.open, i, true);
+            if array_get(b.around, i) == 0 {
+                let mut dy = -1;
+                while dy <= 1 {
+                    let mut dx = -1;
+                    while dx <= 1 {
+                        reveal(b, x + dx, y + dy);
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+            }
+        }
+    }
+}
+
+fn opened(b: Board) -> Int { tally(b.open) }
+fn flags(b: Board) -> Int { tally(b.flag) }
+
+fn tally(a: Array<Bool>) -> Int {
+    let mut i = 0;
+    let mut n = 0;
+    while i < array_length(a) {
+        if array_get(a, i) { n = n + 1 }
+        i = i + 1;
+    }
+    n
+}
+
+// ---- drawing
+
+fn render(c: Canvas, b: Board, state: State, time: Int, flagged: Int) {
+    clear(c, rgb(30, 32, 44));
+    let lost = match state { Lost => true, _ => false };
+    let mut i = 0;
+    while i < cols() * rows() {
+        let x = i % cols() * size();
+        let y = top() + i / cols() * size();
+        if array_get(b.open, i) {
+            fill_rect(c, x, y, size(), size(), if array_get(b.mine, i) { rgb(200, 50, 50) } else { rgb(190, 192, 200) });
+            fill_rect(c, x, y, size(), 1, rgb(150, 152, 165));
+            fill_rect(c, x, y, 1, size(), rgb(150, 152, 165));
+            let n = array_get(b.around, i);
+            if array_get(b.mine, i) {
+                mine(c, x, y);
+            } else if n > 0 {
+                text(c, n.show(), x + 4, y + 3, 1, number_color(n));
+            }
+        } else {
+            // a raised square
+            fill_rect(c, x, y, size(), size(), rgb(110, 115, 140));
+            fill_rect(c, x, y, size(), 1, rgb(170, 175, 200));
+            fill_rect(c, x, y, 1, size(), rgb(170, 175, 200));
+            fill_rect(c, x, y + size() - 1, size(), 1, rgb(60, 62, 80));
+            fill_rect(c, x + size() - 1, y, 1, size(), rgb(60, 62, 80));
+            if array_get(b.flag, i) {
+                fill_rect(c, x + 4, y + 2, 1, 6, rgb(30, 30, 30));
+                fill_rect(c, x + 5, y + 2, 3, 2, rgb(230, 50, 50));
+                fill_rect(c, x + 2, y + 7, 5, 1, rgb(30, 30, 30));
+            } else if lost && array_get(b.mine, i) {
+                mine(c, x, y);
+            }
+        }
+        i = i + 1;
+    }
+    let white = rgb(230, 230, 240);
+    text(c, "MINES " ++ (mines() - flagged).show(), 3, 3, 1, white);
+    let t = time.show();
+    text(c, t, width() - text_width(t, 1) - 3, 3, 1, white);
+    let msg = match state { Fresh => "CLICK ANYWHERE", Playing => "", Won => "CLEARED!", Lost => "BOOM - R" };
+    text(c, msg, (width() - text_width(msg, 1)) / 2, 3, 1, match state { Won => rgb(120, 255, 140), Lost => rgb(255, 100, 100), _ => white });
+}
+
+fn mine(c: Canvas, x: Int, y: Int) {
+    fill_rect(c, x + 3, y + 3, 4, 4, rgb(20, 20, 20));
+    fill_rect(c, x + 2, y + 4, 6, 2, rgb(20, 20, 20));
+    fill_rect(c, x + 4, y + 2, 2, 6, rgb(20, 20, 20));
+    pixel(c, x + 4, y + 4, rgb(240, 240, 240));
+}
+
+fn number_color(n: Int) -> Int {
+    match n {
+        1 => rgb(40, 60, 220),
+        2 => rgb(30, 130, 40),
+        3 => rgb(210, 40, 40),
+        4 => rgb(30, 30, 130),
+        5 => rgb(130, 30, 30),
+        6 => rgb(30, 130, 130),
+        7 => rgb(20, 20, 20),
+        _ => rgb(100, 100, 100),
+    }
+}

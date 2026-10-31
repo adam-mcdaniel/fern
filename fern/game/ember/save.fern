@@ -1,0 +1,106 @@
+// What's kept between nights: cinders and what they've bought at the
+// hearth, who and where's been unlocked, the best nights, and the
+// settings. A file of numbers in the user's own folder (screen.c's
+// file_save), one cell each.
+
+use crate::screen::{file_save, file_load};
+
+pub fn version() -> Int { 1 }
+pub fn cells() -> Int { 64 }
+
+pub fn sv_cinders() -> Int { 1 }
+// the hearth's upgrades: 2 to 11
+pub fn sv_hearth(h: Int) -> Int { 2 + h }
+// which characters are unlocked: a bit each
+pub fn sv_chars() -> Int { 12 }
+// how many regions are open (1 to 3)
+pub fn sv_regions() -> Int { 13 }
+// the longest each region's night has been survived (seconds), and how
+// often it's been seen through to dawn
+pub fn sv_best(region: Int) -> Int { 14 + region }
+pub fn sv_wins(region: Int) -> Int { 17 + region }
+pub fn sv_kills() -> Int { 20 }
+pub fn sv_music() -> Int { 21 }
+pub fn sv_sfx() -> Int { 22 }
+pub fn sv_full() -> Int { 23 }
+pub fn sv_shake() -> Int { 24 }
+pub fn sv_numbers() -> Int { 25 }
+pub fn sv_nights() -> Int { 26 }
+pub fn sv_taught() -> Int { 27 }
+
+fn file() -> String { "emberwake.sav" }
+
+pub fn fresh() -> Array<Int> {
+    let d = array(cells(), 0);
+    array_set(d, 0, version());
+    array_set(d, sv_chars(), 1);
+    array_set(d, sv_regions(), 1);
+    array_set(d, sv_music(), 70);
+    array_set(d, sv_sfx(), 80);
+    array_set(d, sv_shake(), 1);
+    array_set(d, sv_numbers(), 1);
+    d
+}
+
+pub fn load() -> Array<Int> with Io {
+    let d = array(cells(), 0);
+    let n = file_load(file(), d);
+    if n < 1 || array_get(d, 0) != version() { fresh() } else { d }
+}
+
+pub fn store(d: Array<Int>) with Io {
+    file_save(file(), d, cells());
+}
+
+pub fn get(d: Array<Int>, k: Int) -> Int { array_get(d, k) }
+pub fn set(d: Array<Int>, k: Int, v: Int) { array_set(d, k, v) }
+
+pub fn hearth_levels(d: Array<Int>) -> Array<Int> {
+    let m = array(10, 0);
+    let mut h = 0;
+    while h < 10 {
+        array_set(m, h, array_get(d, sv_hearth(h)));
+        h = h + 1;
+    }
+    m
+}
+
+pub fn has_char(d: Array<Int>, c: Int) -> Bool { (array_get(d, sv_chars()) >> c) & 1 == 1 }
+
+// what unlocks each character
+pub fn char_lock(c: Int) -> String {
+    if c == 1 { "SURVIVE 5 MINUTES" } else if c == 2 { "SEE WHISPERWOOD TO DAWN" } else { "SEE THE DROWNED FEN TO DAWN" }
+}
+
+pub fn region_name(region: Int) -> String {
+    if region == 0 { "WHISPERWOOD" } else if region == 1 { "THE DROWNED FEN" } else { "THE ASHEN RUINS" }
+}
+
+pub fn region_text(region: Int) -> String {
+    if region == 0 { "AN OLD FOREST, DEEP AND DARK." } else if region == 1 { "BLACK WATER, AND LIGHTS THAT LURE." } else { "WHERE THE LAST FIRES FELL." }
+}
+
+// a night's end, kept: what it unlocked, as lines to tell
+pub fn record(d: Array<Int>, region: Int, seconds: Int, won: Bool, kills: Int, earned: Int) -> List<String> {
+    set(d, sv_cinders(), get(d, sv_cinders()) + earned);
+    set(d, sv_kills(), get(d, sv_kills()) + kills);
+    set(d, sv_nights(), get(d, sv_nights()) + 1);
+    set(d, sv_taught(), 1);
+    if seconds > get(d, sv_best(region)) { set(d, sv_best(region), seconds) }
+    let mut news = [];
+    if won { set(d, sv_wins(region), get(d, sv_wins(region)) + 1) }
+    let unlock = |c: Int, why: Bool| {
+        if why && !has_char(d, c) {
+            set(d, sv_chars(), get(d, sv_chars()) | (1 << c));
+            news = Cons(c, news);
+        }
+    };
+    unlock(1, seconds >= 300);
+    unlock(2, won && region == 0);
+    unlock(3, won && region == 1);
+    let chars = news.map(|c| "NEW CHARACTER: " ++ (if c == 1 { "WICK" } else if c == 2 { "CINDER" } else { "PYRE" }));
+    if won && region + 2 > get(d, sv_regions()) && region < 2 {
+        set(d, sv_regions(), region + 2);
+        Cons("NEW REGION: " ++ region_name(region + 1), chars)
+    } else { chars }
+}

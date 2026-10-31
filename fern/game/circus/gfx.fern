@@ -1,0 +1,607 @@
+// The picture: a framebuffer of 480 x 270 colors (0xRRGGBB), and drawing
+// into it: rectangles, discs, lines, colors blended over what's there,
+// sprites (pictures with see-through pixels, drawn at any size), and
+// writing in a font of our own (capitals, small letters and numbers,
+// each letter its own width).
+//
+// `ox` and `oy` move what's drawn in the world, for the screen shaking.
+
+pub fn sw() -> Int { 480 }
+pub fn sh() -> Int { 270 }
+
+pub struct Gfx {
+    px: Array<Int>,
+    font: Font,
+    // pictures loaded once (the upgrade cards' icons)
+    icons: Array<Sprite>,
+    // where the world is drawn from, shaken
+    ox: Int,
+    oy: Int,
+}
+
+pub fn gfx(font: Font) -> Gfx {
+    Gfx { px: array(sw() * sh(), 0), font: font, icons: array(0, blank(1, 1)), ox: 0, oy: 0 }
+}
+
+// ---- colors
+
+pub fn rgb(r: Int, g: Int, b: Int) -> Int { (r.clamp(0, 255) << 16) + (g.clamp(0, 255) << 8) + b.clamp(0, 255) }
+pub fn red(c: Int) -> Int { (c >> 16) & 255 }
+pub fn green(c: Int) -> Int { (c >> 8) & 255 }
+pub fn blue(c: Int) -> Int { c & 255 }
+
+// a color between two, t out of 256
+pub fn mix(a: Int, b: Int, t: Int) -> Int {
+    let u = 256 - t;
+    ((((a >> 16) & 255) * u + ((b >> 16) & 255) * t) >> 8 << 16) + ((((a >> 8) & 255) * u + ((b >> 8) & 255) * t) >> 8 << 8) + (((a & 255) * u + (b & 255) * t) >> 8)
+}
+
+// a color brighter or darker (k out of 256; past 256 brightens)
+pub fn scale(c: Int, k: Int) -> Int { rgb(red(c) * k >> 8, green(c) * k >> 8, blue(c) * k >> 8) }
+
+// two colors added, each channel up to 255
+pub fn add_colors(a: Int, b: Int) -> Int {
+    (((a >> 16) & 255) + ((b >> 16) & 255)).min(255) * 65536 + (((a >> 8) & 255) + ((b >> 8) & 255)).min(255) * 256 + ((a & 255) + (b & 255)).min(255)
+}
+
+// ---- pixels
+
+pub fn put(g: Gfx, x: Int, y: Int, color: Int) {
+    if x >= 0 && y >= 0 && x < sw() && y < sh() { g.px.set(y * sw() + x, color) }
+}
+
+// a color over a pixel, t out of 256 of it
+pub fn blend(g: Gfx, x: Int, y: Int, color: Int, t: Int) {
+    if x >= 0 && y >= 0 && x < sw() && y < sh() {
+        let i = y * sw() + x;
+        g.px.set(i, mix(g.px.get(i), color, t));
+    }
+}
+
+// a color added to a pixel (light)
+pub fn add(g: Gfx, x: Int, y: Int, color: Int) {
+    if x >= 0 && y >= 0 && x < sw() && y < sh() {
+        let i = y * sw() + x;
+        g.px.set(i, add_colors(g.px.get(i), color));
+    }
+}
+
+pub fn rect(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int) {
+    let x0 = x.max(0);
+    let x1 = (x + w).min(sw());
+    let mut yy = y.max(0);
+    let y1 = (y + h).min(sh());
+    let px = g.px;
+    while yy < y1 {
+        let mut i = yy * sw() + x0;
+        let end = yy * sw() + x1;
+        while i < end {
+            px.set(i, color);
+            i = i + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+// a rectangle of a color over what's there, t out of 256
+pub fn rect_blend(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int, t: Int) {
+    let x0 = x.max(0);
+    let x1 = (x + w).min(sw());
+    let mut yy = y.max(0);
+    let y1 = (y + h).min(sh());
+    let px = g.px;
+    let cr = red(color) * t;
+    let cg = green(color) * t;
+    let cb = blue(color) * t;
+    let u = 256 - t;
+    while yy < y1 {
+        let mut i = yy * sw() + x0;
+        let end = yy * sw() + x1;
+        while i < end {
+            let o = px.get(i);
+            px.set(i, ((((o >> 16) & 255) * u + cr) >> 8 << 16) + ((((o >> 8) & 255) * u + cg) >> 8 << 8) + (((o & 255) * u + cb) >> 8));
+            i = i + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+pub fn outline(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int) {
+    rect(g, x, y, w, 1, color);
+    rect(g, x, y + h - 1, w, 1, color);
+    rect(g, x, y, 1, h, color);
+    rect(g, x + w - 1, y, 1, h, color);
+}
+
+// a rectangle with its corners cut round (r pixels)
+pub fn round_rect(g: Gfx, x: Int, y: Int, w: Int, h: Int, r: Int, color: Int) {
+    let mut row = 0;
+    while row < h {
+        let dy = if row < r { r - row } else if row >= h - r { row - (h - r - 1) } else { 0 };
+        let cut = if dy == 0 { 0 } else { r - isqrt_small(r * r - dy * dy + r) };
+        rect(g, x + cut, y + row, w - cut * 2, 1, color);
+        row = row + 1;
+    }
+}
+
+pub fn round_blend(g: Gfx, x: Int, y: Int, w: Int, h: Int, r: Int, color: Int, t: Int) {
+    let mut row = 0;
+    while row < h {
+        let dy = if row < r { r - row } else if row >= h - r { row - (h - r - 1) } else { 0 };
+        let cut = if dy == 0 { 0 } else { r - isqrt_small(r * r - dy * dy + r) };
+        rect_blend(g, x + cut, y + row, w - cut * 2, 1, color, t);
+        row = row + 1;
+    }
+}
+
+pub fn isqrt_small(n: Int) -> Int {
+    if n <= 0 { 0 } else {
+        let mut x = 0;
+        while (x + 1) * (x + 1) <= n { x = x + 1 }
+        x
+    }
+}
+
+pub fn disc(g: Gfx, x: Int, y: Int, r: Int, color: Int) {
+    let r2 = r * r + r;
+    let mut dy = -r;
+    while dy <= r {
+        let w = isqrt_small(r2 - dy * dy);
+        rect(g, x - w, y + dy, w * 2 + 1, 1, color);
+        dy = dy + 1;
+    }
+}
+
+pub fn disc_blend(g: Gfx, x: Int, y: Int, r: Int, color: Int, t: Int) {
+    let r2 = r * r + r;
+    let mut dy = -r;
+    while dy <= r {
+        let w = isqrt_small(r2 - dy * dy);
+        rect_blend(g, x - w, y + dy, w * 2 + 1, 1, color, t);
+        dy = dy + 1;
+    }
+}
+
+// an ellipse of shadow (what's there darkened, t out of 256)
+pub fn shadow(g: Gfx, x: Int, y: Int, rx: Int, ry: Int, t: Int) {
+    let mut dy = -ry;
+    let ry2 = (ry * ry).max(1);
+    while dy <= ry {
+        let w = isqrt_small((rx * rx) * (ry2 - dy * dy) / ry2);
+        rect_blend(g, x - w, y + dy, w * 2 + 1, 1, 0x1a2a10, t);
+        dy = dy + 1;
+    }
+}
+
+// a ring, thick pixels wide, of a color over what's there
+pub fn ring(g: Gfx, x: Int, y: Int, r: Int, thick: Int, color: Int, t: Int) {
+    let ro = r + thick;
+    let mut dy = -ro;
+    while dy <= ro {
+        let outer = isqrt_small(ro * ro - dy * dy);
+        let inner = if dy * dy < r * r { isqrt_small(r * r - dy * dy) } else { -1 };
+        let mut dx = -outer;
+        while dx <= outer {
+            if dx > -inner && dx < inner { dx = inner } else {
+                blend(g, x + dx, y + dy, color, t);
+                dx = dx + 1;
+            }
+        }
+        dy = dy + 1;
+    }
+}
+
+// a soft glow of light added round (x, y), fading out to r
+pub fn glow(g: Gfx, x: Int, y: Int, r: Int, color: Int) {
+    let r2 = (r * r).max(1);
+    let cr = red(color);
+    let cg = green(color);
+    let cb = blue(color);
+    let x0 = (x - r).max(0);
+    let x1 = (x + r + 1).min(sw());
+    let mut yy = (y - r).max(0);
+    let y1 = (y + r + 1).min(sh());
+    let px = g.px;
+    while yy < y1 {
+        let dy2 = (yy - y) * (yy - y);
+        let mut xx = x0;
+        while xx < x1 {
+            let d2 = (xx - x) * (xx - x) + dy2;
+            if d2 < r2 {
+                let k0 = 256 - d2 * 256 / r2;
+                let k = k0 * k0 >> 8;
+                let i = yy * sw() + xx;
+                let o = px.get(i);
+                px.set(i, ((((o >> 16) & 255) + ((cr * k) >> 8)).min(255) << 16) + ((((o >> 8) & 255) + ((cg * k) >> 8)).min(255) << 8) + ((o & 255) + ((cb * k) >> 8)).min(255));
+            }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+// a line, by Bresenham's way, of a color over what's there (t of 256)
+pub fn line(g: Gfx, x0: Int, y0: Int, x1: Int, y1: Int, color: Int, t: Int) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+    let mut n = 0;
+    while n < 1000 {
+        if t >= 256 { put(g, x, y, color) } else { blend(g, x, y, color, t) }
+        if x == x1 && y == y1 { n = 1000 } else {
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err = err + dy;
+                x = x + sx;
+            }
+            if e2 <= dx {
+                err = err + dx;
+                y = y + sy;
+            }
+            n = n + 1;
+        }
+    }
+}
+
+// a thick line: a capsule from (ax, ay) to (bx, by), r wide each side, in
+// 16ths of a pixel
+pub fn capsule(g: Gfx, ax: Int, ay: Int, bx: Int, by: Int, r: Int, color: Int) {
+    let x0 = ((ax.min(bx) - r) >> 4) - 1;
+    let x1 = ((ax.max(bx) + r) >> 4) + 1;
+    let y0 = ((ay.min(by) - r) >> 4) - 1;
+    let y1 = ((ay.max(by) + r) >> 4) + 1;
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len2 = (abx * abx + aby * aby).max(1);
+    let r2 = r * r;
+    let mut y = y0;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            let qx = x * 16 + 8;
+            let qy = y * 16 + 8;
+            let t = (((qx - ax) * abx + (qy - ay) * aby) * 256 / len2).clamp(0, 256);
+            let cx = ax + abx * t / 256;
+            let cy = ay + aby * t / 256;
+            if (qx - cx) * (qx - cx) + (qy - cy) * (qy - cy) <= r2 { put(g, x, y, color) }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// ---- sprites: w x h pixels, each a color or -1 for nothing
+
+pub struct Sprite { w: Int, h: Int, px: Array<Int> }
+
+pub fn blank(w: Int, h: Int) -> Sprite { Sprite { w: w, h: h, px: array(w * h, -1) } }
+
+// a sprite from rows of text: each character the color at its place in
+// `keys` among `colors`, anything else nothing
+pub fn sprite(rows: List<String>, keys: String, colors: List<Int>) -> Sprite {
+    let h = rows.len();
+    let w = rows.fold(0, |m, r| m.max(r.len()));
+    let px = array(w * h, -1);
+    let table = Array::from_list(colors, -1);
+    let mut y = 0;
+    let mut rest = rows;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(r, tail) => {
+                let mut x = 0;
+                while x < r.len() {
+                    let ch = r.char_at(x);
+                    let mut k = 0;
+                    while k < keys.len() {
+                        if keys.char_at(k) == ch { px.set(y * w + x, table.get(k)) }
+                        k = k + 1;
+                    }
+                    x = x + 1;
+                }
+                y = y + 1;
+                rest = tail;
+            }
+        }
+    }
+    Sprite { w: w, h: h, px: px }
+}
+
+// a sprite with its top left at (x, y)
+pub fn draw(g: Gfx, s: Sprite, x: Int, y: Int) {
+    let px = g.px;
+    let mut sy = 0;
+    while sy < s.h {
+        let yy = y + sy;
+        if yy >= 0 && yy < sh() {
+            let mut sx = 0;
+            let row = sy * s.w;
+            while sx < s.w {
+                let xx = x + sx;
+                if xx >= 0 && xx < sw() {
+                    let v = s.px.get(row + sx);
+                    if v >= 0 { px.set(yy * sw() + xx, v) }
+                }
+                sx = sx + 1;
+            }
+        }
+        sy = sy + 1;
+    }
+}
+
+// a sprite in one color (a silhouette), with its top left at (x, y), t of 256
+pub fn draw_tinted(g: Gfx, s: Sprite, x: Int, y: Int, color: Int, t: Int) {
+    let mut sy = 0;
+    while sy < s.h {
+        let mut sx = 0;
+        while sx < s.w {
+            let v = s.px.get(sy * s.w + sx);
+            if v >= 0 { if t >= 256 { put(g, x + sx, y + sy, color) } else { put(g, x + sx, y + sy, mix(v, color, t)) } }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+}
+
+// a sprite with its middle at (cx, cy), stretched to kx and ky (256ths:
+// 256 as it is), mirrored if flip; what it covers gets t of 256 of it
+pub fn draw_scaled(g: Gfx, s: Sprite, cx: Int, cy: Int, kx: Int, ky: Int, flip: Bool, t: Int) {
+    let w = (s.w * kx) >> 8;
+    let h = (s.h * ky) >> 8;
+    if w > 0 && h > 0 {
+        let x0 = cx - w / 2;
+        let y0 = cy - h / 2;
+        let px = g.px;
+        let mut y = 0;
+        while y < h {
+            let yy = y0 + y;
+            if yy >= 0 && yy < sh() {
+                let sy = (y * s.h / h).min(s.h - 1);
+                let mut x = 0;
+                while x < w {
+                    let xx = x0 + x;
+                    if xx >= 0 && xx < sw() {
+                        let sx0 = (x * s.w / w).min(s.w - 1);
+                        let sx = if flip { s.w - 1 - sx0 } else { sx0 };
+                        let v = s.px.get(sy * s.w + sx);
+                        if v >= 0 {
+                            let i = yy * sw() + xx;
+                            px.set(i, if t >= 256 { v } else { mix(px.get(i), v, t) });
+                        }
+                    }
+                    x = x + 1;
+                }
+            }
+            y = y + 1;
+        }
+    }
+}
+
+// a sprite's shape as a shadow on what's under it
+pub fn draw_shadow(g: Gfx, s: Sprite, x: Int, y: Int, t: Int) {
+    let mut sy = 0;
+    while sy < s.h {
+        let mut sx = 0;
+        while sx < s.w {
+            if s.px.get(sy * s.w + sx) >= 0 { blend(g, x + sx, y + sy, 0x1a2a10, t) }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+}
+
+// a sprite drawn at a whole number of times its size, top left at (x, y)
+pub fn draw_big(g: Gfx, s: Sprite, x: Int, y: Int, k: Int) {
+    let mut sy = 0;
+    while sy < s.h {
+        let mut sx = 0;
+        while sx < s.w {
+            let v = s.px.get(sy * s.w + sx);
+            if v >= 0 { rect(g, x + sx * k, y + sy * k, k, k, v) }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+}
+
+// ---- writing
+
+// a glyph is up to 9 rows (7 above the line, 2 below), each its pixels as
+// bits, the leftmost highest; and how wide it is
+pub struct Font { rows: Array<Int>, widths: Array<Int> }
+
+pub fn glyph_rows() -> Int { 9 }
+
+// glyphs written as rows of # and ., split by spaces: ("A", ".#. #.# ...")
+pub fn font(glyphs: List<(String, String)>) -> Font {
+    let rows = array(128 * 9, 0);
+    let widths = array(128, 0);
+    widths.set(32, 3);
+    let mut rest = glyphs;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(gl, tail) => {
+                let (ch, art) = gl;
+                let code = ch.char_at(0);
+                let mut row = 0;
+                let mut bits = 0;
+                let mut w = 0;
+                let mut col = 0;
+                let mut i = 0;
+                while i <= art.len() {
+                    let c = if i < art.len() { art.char_at(i) } else { 32 };
+                    if c == 32 {
+                        if row < 9 { rows.set(code * 9 + row, bits) }
+                        w = w.max(col);
+                        row = row + 1;
+                        bits = 0;
+                        col = 0;
+                    } else {
+                        bits = bits * 2 + (if c == 35 { 1 } else { 0 });
+                        col = col + 1;
+                    }
+                    i = i + 1;
+                }
+                widths.set(code, w);
+                rest = tail;
+            }
+        }
+    }
+    Font { rows: rows, widths: widths }
+}
+
+fn code_of(ch: Int) -> Int { if ch < 0 || ch > 127 { 63 } else { ch } }
+
+pub fn char_w(g: Gfx, ch: Int) -> Int { g.font.widths.get(code_of(ch)) }
+
+// how wide s is, at a scale
+pub fn text_w(g: Gfx, s: String, k: Int) -> Int {
+    let mut w = 0;
+    let mut i = 0;
+    while i < s.len() {
+        w = w + (g.font.widths.get(code_of(s.char_at(i))) + 1) * k;
+        i = i + 1;
+    }
+    (w - k).max(0)
+}
+
+fn glyph(g: Gfx, code: Int, x: Int, y: Int, k: Int, color: Int) -> Int {
+    let w = g.font.widths.get(code);
+    let mut row = 0;
+    while row < 9 {
+        let bits = g.font.rows.get(code * 9 + row);
+        if bits != 0 {
+            let mut col = 0;
+            while col < w {
+                if (bits >> (w - 1 - col)) & 1 == 1 {
+                    if k == 1 { put(g, x + col, y + row, color) } else { rect(g, x + col * k, y + row * k, k, k, color) }
+                }
+                col = col + 1;
+            }
+        }
+        row = row + 1;
+    }
+    w
+}
+
+// s with its top left at (x, y)
+pub fn text(g: Gfx, s: String, x: Int, y: Int, k: Int, color: Int) {
+    let mut cx = x;
+    let mut i = 0;
+    while i < s.len() {
+        let w = glyph(g, code_of(s.char_at(i)), cx, y, k, color);
+        cx = cx + (w + 1) * k;
+        i = i + 1;
+    }
+}
+
+// part of s (from, up to to) with its top left at (x, y), and how wide that is
+pub fn text_range(g: Gfx, s: String, from: Int, to: Int, x: Int, y: Int, k: Int, color: Int) {
+    let mut cx = x;
+    let mut i = from;
+    while i < to {
+        let w = glyph(g, code_of(s.char_at(i)), cx, y, k, color);
+        cx = cx + (w + 1) * k;
+        i = i + 1;
+    }
+}
+
+pub fn text_w_range(g: Gfx, s: String, from: Int, to: Int, k: Int) -> Int {
+    let mut w = 0;
+    let mut i = from;
+    while i < to {
+        w = w + (g.font.widths.get(code_of(s.char_at(i))) + 1) * k;
+        i = i + 1;
+    }
+    (w - k).max(0)
+}
+
+// s with a dark edge all round, to read over anything
+pub fn say(g: Gfx, s: String, x: Int, y: Int, k: Int, color: Int, edge: Int) {
+    text(g, s, x - k, y, k, edge);
+    text(g, s, x + k, y, k, edge);
+    text(g, s, x, y - k, k, edge);
+    text(g, s, x, y + k, k, edge);
+    text(g, s, x + k, y + k, k, edge);
+    text(g, s, x - k, y + k, k, edge);
+    text(g, s, x + k, y - k, k, edge);
+    text(g, s, x - k, y - k, k, edge);
+    text(g, s, x, y + k * 2, k, edge);
+    text(g, s, x, y, k, color);
+}
+
+// s with a shadow under it
+pub fn print(g: Gfx, s: String, x: Int, y: Int, k: Int, color: Int, under: Int) {
+    text(g, s, x, y + k, k, under);
+    text(g, s, x, y, k, color);
+}
+
+pub fn text_mid(g: Gfx, s: String, x: Int, y: Int, k: Int, color: Int) { text(g, s, x - text_w(g, s, k) / 2, y, k, color) }
+pub fn say_mid(g: Gfx, s: String, x: Int, y: Int, k: Int, color: Int, edge: Int) { say(g, s, x - text_w(g, s, k) / 2, y, k, color, edge) }
+pub fn print_mid(g: Gfx, s: String, x: Int, y: Int, k: Int, color: Int, under: Int) { print(g, s, x - text_w(g, s, k) / 2, y, k, color, under) }
+pub fn text_right(g: Gfx, s: String, x: Int, y: Int, k: Int, color: Int) { text(g, s, x - text_w(g, s, k), y, k, color) }
+
+// ---- numbers, without making strings: digits into a scratch array
+
+// how wide n is written (with commas every three digits)
+pub fn num_w(g: Gfx, n: Int, k: Int) -> Int {
+    let mut w = 0;
+    let mut m = n.abs();
+    let mut digits = 0;
+    loop {
+        w = w + (g.font.widths.get(48 + m % 10) + 1) * k;
+        digits = digits + 1;
+        m = m / 10;
+        if m == 0 { break; }
+        if digits % 3 == 0 { w = w + (g.font.widths.get(44) + 1) * k }
+    }
+    if n < 0 { w = w + (g.font.widths.get(45) + 1) * k }
+    (w - k).max(0)
+}
+
+// n written with its right edge at x (and commas)
+pub fn num_right(g: Gfx, n: Int, x: Int, y: Int, k: Int, color: Int) {
+    let mut cx = x + k;
+    let mut m = n.abs();
+    let mut digits = 0;
+    loop {
+        let code = 48 + m % 10;
+        cx = cx - (g.font.widths.get(code) + 1) * k;
+        glyph(g, code, cx, y, k, color);
+        digits = digits + 1;
+        m = m / 10;
+        if m == 0 { break; }
+        if digits % 3 == 0 {
+            cx = cx - (g.font.widths.get(44) + 1) * k;
+            glyph(g, 44, cx, y, k, color);
+        }
+    }
+    if n < 0 {
+        cx = cx - (g.font.widths.get(45) + 1) * k;
+        glyph(g, 45, cx, y, k, color);
+    }
+}
+
+pub fn num(g: Gfx, n: Int, x: Int, y: Int, k: Int, color: Int) { num_right(g, n, x + num_w(g, n, k), y, k, color) }
+pub fn num_mid(g: Gfx, n: Int, x: Int, y: Int, k: Int, color: Int) { num_right(g, n, x + num_w(g, n, k) / 2, y, k, color) }
+
+// n with an edge round it, centered on x or from x
+pub fn say_num(g: Gfx, n: Int, x: Int, y: Int, k: Int, color: Int, edge: Int) {
+    let w = num_w(g, n, k);
+    let r = x + w;
+    num_right(g, n, r - k, y, k, edge);
+    num_right(g, n, r + k, y, k, edge);
+    num_right(g, n, r, y - k, k, edge);
+    num_right(g, n, r, y + k, k, edge);
+    num_right(g, n, r + k, y + k, k, edge);
+    num_right(g, n, r - k, y + k, k, edge);
+    num_right(g, n, r + k, y - k, k, edge);
+    num_right(g, n, r - k, y - k, k, edge);
+    num_right(g, n, r, y + k * 2, k, edge);
+    num_right(g, n, r, y, k, color);
+}

@@ -1,0 +1,125 @@
+// Gravity in 3D, in real time: two galaxies, each a heavy core in a disk of
+// stars, falling through each other, every star pulling on every other (by
+// an octree: see gravity.fern), a step a frame. Stars glow where they are
+// and leave trails, brighter the nearer they are.
+//
+// Drag with the mouse (or the arrows) to turn the view, Z and X zoom in and
+// out, space pauses, T turns the trails off and on, 1 starts one galaxy and
+// 2 two, escape quits.
+
+mod screen;
+mod draw;
+mod math;
+mod gravity;
+mod space;
+
+use screen::*;
+use draw::{Canvas, canvas, show, text};
+use math::sines;
+use gravity::{Fx, V3, Star, Disk, galaxy, step};
+use space::{View, project, spark, ball, fade};
+
+fn width() -> Int { 320 }
+fn height() -> Int { 240 }
+
+// ---- the scenes
+
+fn one_galaxy() -> List<Star> {
+    galaxy(Disk { at: V3::zero(), vel: V3::zero(), n: 240, spin: 1, cos: Fx::of(1), sin: Fx::zero(), first: 0, kind: 1, seed: 7 })
+}
+
+// the second one tilted by 60 degrees, turning the other way, and passing a
+// little off to the side
+fn two_galaxies() -> List<Star> {
+    let speed = Fx::ratio(1, 5);
+    let a = galaxy(Disk { at: V3::new(Fx::of(-5), Fx::ratio(-3, 2), Fx::zero()), vel: V3::new(speed, Fx::ratio(1, 25), Fx::zero()), n: 120, spin: 1, cos: Fx::of(1), sin: Fx::zero(), first: 0, kind: 1, seed: 7 });
+    let b = galaxy(Disk { at: V3::new(Fx::of(5), Fx::ratio(3, 2), Fx::zero()), vel: V3::new(-speed, Fx::ratio(-1, 25), Fx::zero()), n: 120, spin: -1, cos: Fx::ratio(1, 2), sin: Fx::ratio(866, 1000), first: 1000, kind: 2, seed: 99 });
+    a.append(b)
+}
+
+// each star's color: its galaxy's (and a core's, white)
+fn hue(kind: Int) -> (Int, Int, Int) {
+    if kind == 0 { (255, 255, 255) } else if kind == 1 { (120, 170, 255) } else { (255, 160, 90) }
+}
+
+// a star: a point of light, brighter the nearer it is (and a core, bigger)
+fn draw_star(c: Canvas, v: View, s: Star) {
+    match project(c, v, s.pos) {
+        None => {}
+        Some((x, y, depth)) => {
+            let (r, g, b) = hue(s.kind);
+            let near = (Fx::of(4096) / depth).round().clamp(40, 512);
+            if s.kind == 0 { ball(c, x, y, 1, r, g, b) } else { spark(c, x, y, r, g, b, near) }
+        }
+    }
+}
+
+fn main() {
+    if !screen_open(width(), height(), 3, "fern gravity") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let table = sines();
+    let mut stars = two_galaxies();
+    let mut view = View { center: V3::zero(), yaw: 0, pitch: 150, distance: Fx::of(22), focal: Fx::of(220), table: table };
+    let mut paused = false;
+    let mut trails = true;
+    let mut last_x = mouse_x();
+    let mut last_y = mouse_y();
+    let mut frames = 0;
+    let mut since = screen_ticks();
+    let mut fps = 0;
+    let mut work = 0;
+    let dt = Fx::ratio(1, 40);
+    let theta = Fx::ratio(7, 10);
+    let away = Fx::of(40);
+    loop {
+        // the controls
+        let (mx, my) = (mouse_x(), mouse_y());
+        let mut yaw = view.yaw;
+        let mut pitch = view.pitch;
+        let mut distance = view.distance;
+        if mouse_down() {
+            yaw = yaw - (mx - last_x) * 3;
+            pitch = pitch + (my - last_y) * 3;
+        } else if !paused {
+            // (turning slowly by itself)
+            yaw = yaw + 1;
+        }
+        if key_down(key_left()) { yaw = yaw + 6 }
+        if key_down(key_right()) { yaw = yaw - 6 }
+        if key_down(key_up()) { pitch = pitch + 6 }
+        if key_down(key_down_arrow()) { pitch = pitch - 6 }
+        if key_down(key("z")) { distance = (distance * Fx::ratio(97, 100)).max(Fx::of(4)) }
+        if key_down(key("x")) { distance = (distance * Fx::ratio(103, 100)).min(Fx::of(120)) }
+        if key_pressed(key_space()) { paused = !paused }
+        if key_pressed(key("t")) { trails = !trails }
+        if key_pressed(key("1")) { stars = one_galaxy() }
+        if key_pressed(key("2")) { stars = two_galaxies() }
+        last_x = mx;
+        last_y = my;
+        view = View { center: V3::zero(), yaw: yaw & 1023, pitch: pitch.clamp(-250, 250), distance: distance, focal: Fx::of(220), table: table };
+
+        // a step of the simulation
+        let start = screen_ticks();
+        if !paused {
+            stars = step(stars, dt, theta, away);
+        }
+        work = screen_ticks() - start;
+
+        // the picture
+        fade(c, if trails { 3 } else { 0 });
+        stars.each(|s| draw_star(c, view, s));
+        frames = frames + 1;
+        if screen_ticks() - since >= 1000 {
+            fps = frames;
+            frames = 0;
+            since = screen_ticks();
+        }
+        text(c, stars.len().show() ++ " STARS  " ++ fps.show() ++ " FPS  STEP " ++ work.show() ++ " MS", 4, 4, 1, 0x808080);
+        text(c, "DRAG TO TURN  Z X ZOOM  SPACE  T  1 2", 4, height() - 9, 1, 0x505050);
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+}

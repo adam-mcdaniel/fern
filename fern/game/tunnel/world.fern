@@ -1,0 +1,486 @@
+// The ant farm: a cross-section of a garden behind glass, as a grid of
+// cells six pixels square, 80 across and 38 down. The top rows are air,
+// the one just over the grass is the surface the ants walk on; below is
+// soil, in layers, with clay (twice the digging), rock and roots (no
+// digging at all), and things people lost long ago.
+//
+// What's dug is tunnel. Chambers are rooms of the colony, each of a kind:
+// the queen's (where ants hatch), the granary (for seeds), the fungus
+// garden (leaves) and the nursery (honeydew). Food turns up at sources,
+// at the surface or buried, and piles up until ants carry it off.
+//
+// The ants find their way by distance fields: for each kind of chamber,
+// and each source, how many steps every tunnel cell is from it (a
+// breadth-first flood through the tunnels), worked out again whenever
+// the tunnels change. An ant just steps to whichever neighbour is
+// nearer.
+
+use crate::math::isqrt;
+
+pub fn gw() -> Int { 80 }
+pub fn gh() -> Int { 38 }
+pub fn cell() -> Int { 6 }
+// the pixel row the grid starts at
+pub fn y0() -> Int { 42 }
+// the surface: the row the ants walk on, over the grass
+pub fn surface() -> Int { 2 }
+pub fn far() -> Int { 1000000 }
+
+// what a cell is
+pub fn c_air() -> Int { 0 }
+pub fn c_path() -> Int { 1 }
+pub fn c_soil() -> Int { 2 }
+pub fn c_clay() -> Int { 3 }
+pub fn c_rock() -> Int { 4 }
+pub fn c_root() -> Int { 5 }
+
+// chamber kinds (and the food each takes: the same number)
+pub fn k_queen() -> Int { 0 }
+pub fn k_granary() -> Int { 1 }
+pub fn k_garden() -> Int { 2 }
+pub fn k_nursery() -> Int { 3 }
+// a sump drinks water (it takes no food); soldiers wait at a guard post
+pub fn k_sump() -> Int { 4 }
+pub fn k_guard() -> Int { 5 }
+// food kinds: seed 1, leaf 2, honeydew 3 (the chamber that takes them)
+pub fn f_seed() -> Int { 1 }
+pub fn f_leaf() -> Int { 2 }
+pub fn f_dew() -> Int { 3 }
+
+pub fn max_chambers() -> Int { 16 }
+pub fn max_sources() -> Int { 30 }
+// trinkets: buried things found by digging into them
+pub fn max_trinkets() -> Int { 12 }
+
+pub struct World {
+    map: Int,
+    kind: Array<Int>,
+    dug: Array<Bool>,
+    // the layer each cell's soil is (for drawing), and its shade of noise
+    layer: Array<Int>,
+    // water standing in each cell, 0 to 255
+    water: Array<Int>,
+    // which chamber each cell is part of, or -1
+    room: Array<Int>,
+    // chambers: kind, top-left cell, size in cells
+    ch_kind: Array<Int>,
+    ch_x: Array<Int>,
+    ch_y: Array<Int>,
+    ch_w: Array<Int>,
+    ch_h: Array<Int>,
+    // what each's been given (to draw it filling up)
+    ch_store: Array<Int>,
+    n_ch: Int,
+    // sources: kind, cell (where it sits), whether it's buried, pile,
+    // capacity, frames to the next item and between items, how close to
+    // spoiling (0 up to `spoil`), how many ants are on their way, alive
+    src_kind: Array<Int>,
+    src_x: Array<Int>,
+    src_y: Array<Int>,
+    src_buried: Array<Bool>,
+    src_pile: Array<Int>,
+    src_cap: Array<Int>,
+    src_timer: Array<Int>,
+    src_every: Array<Int>,
+    src_rot: Array<Int>,
+    src_coming: Array<Int>,
+    src_alive: Array<Bool>,
+    src_age: Array<Int>,
+    // how long a source lasts before it's done (frames)
+    src_life: Array<Int>,
+    // the trinkets: where (cells), what, whether found
+    tr_x: Array<Int>,
+    tr_y: Array<Int>,
+    tr_what: Array<Int>,
+    tr_found: Array<Bool>,
+    n_tr: Int,
+    // the distance fields: one per chamber kind, one per source, and one
+    // to the beetles in the tunnels (for the soldiers)
+    to_kind: Array<Array<Int>>,
+    to_beetle: Array<Int>,
+    to_src: Array<Array<Int>>,
+    fields_dirty: Bool,
+    // the flood's queue
+    queue: Array<Int>,
+    // which cells changed since they were last drawn (to redraw them)
+    changed: Array<Bool>,
+    any_changed: Bool,
+    seed: Int,
+}
+
+pub fn idx(x: Int, y: Int) -> Int { y * gw() + x }
+pub fn inside(x: Int, y: Int) -> Bool { x >= 0 && y >= 0 && x < gw() && y < gh() }
+
+pub fn walkable(w: World, i: Int) -> Bool {
+    w.kind.get(i) == c_path() || w.dug.get(i)
+}
+
+pub fn diggable(w: World, i: Int) -> Bool {
+    let k = w.kind.get(i);
+    (k == c_soil() || k == c_clay()) && !w.dug.get(i)
+}
+
+// what digging a cell costs
+pub fn dig_cost(w: World, i: Int) -> Int { if w.kind.get(i) == c_clay() { 2 } else { 1 } }
+
+pub fn wroll(w: World, n: Int) -> Int {
+    w.seed = (w.seed * 1103515245 + 12345) & 0x7fffffff;
+    (w.seed >> 16) % n.max(1)
+}
+
+// ---- noise
+
+pub fn hash(x: Int, y: Int, s: Int) -> Int {
+    let mut h = x * 374761393 + y * 668265263 + s * 2147483647;
+    h = (h ^ (h >> 13)) * 1274126177;
+    (h ^ (h >> 16)) & 255
+}
+
+pub fn vnoise(x: Int, y: Int, c: Int, s: Int) -> Int {
+    let gx = x.div_floor(c);
+    let gy = y.div_floor(c);
+    let fx = (x - gx * c) * 256 / c;
+    let fy = (y - gy * c) * 256 / c;
+    let ex = fx * fx * (768 - 2 * fx) >> 16;
+    let ey = fy * fy * (768 - 2 * fy) >> 16;
+    let a = hash(gx, gy, s);
+    let b = hash(gx + 1, gy, s);
+    let cc = hash(gx, gy + 1, s);
+    let d = hash(gx + 1, gy + 1, s);
+    let top = a + ((b - a) * ex >> 8);
+    let bottom = cc + ((d - cc) * ex >> 8);
+    top + ((bottom - top) * ey >> 8)
+}
+
+// ---- making a map
+
+pub fn map_count() -> Int { 4 }
+pub fn map_name(m: Int) -> String {
+    if m == 0 { "The Backyard" } else if m == 1 { "The Beach" } else if m == 2 { "The Woods" } else { "The Desert" }
+}
+pub fn map_text(m: Int) -> String {
+    if m == 0 { "Soft soil, a few stones, a rosebush's roots. A gentle start." }
+    else if m == 1 { "Sand digs easily, but the tide comes in twice a week." }
+    else if m == 2 { "Roots everywhere, and rain most weeks." }
+    else { "Hard clay and rock. Dry, at least." }
+}
+
+pub fn world(map: Int, seed: Int) -> World {
+    let n = gw() * gh();
+    let empty = array(0, 0);
+    let w = World {
+        map: map,
+        kind: array(n, c_soil()), dug: array(n, false), layer: array(n, 0), water: array(n, 0), room: array(n, -1),
+        ch_kind: array(max_chambers(), 0), ch_x: array(max_chambers(), 0), ch_y: array(max_chambers(), 0),
+        ch_w: array(max_chambers(), 0), ch_h: array(max_chambers(), 0), ch_store: array(max_chambers(), 0), n_ch: 0,
+        src_kind: array(max_sources(), 0), src_x: array(max_sources(), 0), src_y: array(max_sources(), 0),
+        src_buried: array(max_sources(), false), src_pile: array(max_sources(), 0), src_cap: array(max_sources(), 10),
+        src_timer: array(max_sources(), 0), src_every: array(max_sources(), 600), src_rot: array(max_sources(), 0),
+        src_coming: array(max_sources(), 0), src_alive: array(max_sources(), false), src_age: array(max_sources(), 0), src_life: array(max_sources(), 0),
+        tr_x: array(max_trinkets(), 0), tr_y: array(max_trinkets(), 0), tr_what: array(max_trinkets(), 0),
+        tr_found: array(max_trinkets(), false), n_tr: 0,
+        to_kind: array(6, empty), to_beetle: array(n, far()), to_src: array(max_sources(), empty),
+        fields_dirty: true,
+        queue: array(n, 0),
+        changed: array(n, true), any_changed: true,
+        seed: seed,
+    };
+    let mut k = 0;
+    while k < 6 {
+        w.to_kind.set(k, array(n, far()));
+        k = k + 1;
+    }
+    k = 0;
+    while k < max_sources() {
+        w.to_src.set(k, array(n, far()));
+        k = k + 1;
+    }
+    lay_soil(w);
+    // the colony to start: the queen's chamber, a granary and a garden,
+    // joined by a tunnel up to an entrance on the surface
+    let qx = 36;
+    let qy = 15;
+    chamber(w, k_queen(), qx, qy, 7, 3);
+    chamber(w, k_granary(), qx - 12, qy + 4, 5, 3);
+    chamber(w, k_garden(), qx + 13, qy + 3, 5, 3);
+    dig_line(w, qx + 3, qy, qx + 2, surface() + 1);
+    dig_line(w, qx, qy + 2, qx - 8, qy + 5);
+    dig_line(w, qx + 6, qy + 2, qx + 13, qy + 4);
+    w
+}
+
+// the soil: layers like poured sand, warped by noise, with clay in some,
+// rock in blobs, roots under the bushes, and trinkets buried
+fn lay_soil(w: World) {
+    let m = w.map;
+    let mut y = 0;
+    while y < gh() {
+        let mut x = 0;
+        while x < gw() {
+            let i = idx(x, y);
+            if y < surface() {
+                w.kind.set(i, c_air());
+            } else if y == surface() {
+                w.kind.set(i, c_path());
+            } else {
+                // (which layer: depth, warped)
+                let px = x * cell() + cell() / 2;
+                let py = y * cell() + cell() / 2 + y0();
+                let warp = vnoise(px, py, 40, 3) - 128;
+                let d = (py - y0()) + warp / 6;
+                let layer = if d < 24 { 0 } else { 1 + ((d - 24) / 28).min(6) };
+                w.layer.set(i, layer);
+                let clay_layer = if m == 3 { layer >= 2 } else if m == 1 { false } else { layer == 4 };
+                let rocky = vnoise(x * cell(), y * cell(), 26, 11 + m * 7) > (if m == 3 { 196 } else if m == 1 { 236 } else { 212 }) && y > 4;
+                w.kind.set(i, if rocky { c_rock() } else if clay_layer { c_clay() } else { c_soil() });
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // roots, down from the bushes at the surface
+    let roots = if m == 2 { 7 } else if m == 1 { 1 } else if m == 3 { 1 } else { 3 };
+    let mut r = 0;
+    while r < roots {
+        let mut x = 4 + wroll(w, gw() - 8);
+        // (not through where the colony starts)
+        if x > 20 && x < 60 && m != 2 { x = if x < 40 { 14 + r * 2 } else { 64 + r * 2 } }
+        let mut y = surface() + 1;
+        let depth = 9 + wroll(w, 12);
+        let mut k = 0;
+        while k < depth {
+            let i = idx(x, y);
+            w.kind.set(i, c_root());
+            // (each step down, now and then sideways, and side roots)
+            if wroll(w, 3) == 0 { x = (x + wroll(w, 3) - 1).clamp(1, gw() - 2) }
+            if wroll(w, 5) == 0 {
+                let dir = if wroll(w, 2) == 0 { -1 } else { 1 };
+                let mut j = 1;
+                while j < 4 {
+                    let sx = (x + dir * j).clamp(0, gw() - 1);
+                    w.kind.set(idx(sx, (y + j / 2).min(gh() - 1)), c_root());
+                    j = j + 1;
+                }
+            }
+            y = (y + 1).min(gh() - 1);
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+    // the trinkets
+    let mut t = 0;
+    while t < 8 {
+        let x = 3 + wroll(w, gw() - 6);
+        let y = 7 + wroll(w, gh() - 10);
+        let i = idx(x, y);
+        if w.kind.get(i) == c_soil() || w.kind.get(i) == c_clay() {
+            let n = w.n_tr;
+            w.tr_x.set(n, x);
+            w.tr_y.set(n, y);
+            w.tr_what.set(n, wroll(w, 6));
+            w.n_tr = n + 1;
+        }
+        t = t + 1;
+    }
+}
+
+// a chamber dug out: kind, its top left and size (cells); its index
+pub fn chamber(w: World, kind: Int, x: Int, y: Int, cw: Int, ch: Int) -> Int {
+    let n = w.n_ch;
+    if n < max_chambers() {
+        w.ch_kind.set(n, kind);
+        w.ch_x.set(n, x);
+        w.ch_y.set(n, y);
+        w.ch_w.set(n, cw);
+        w.ch_h.set(n, ch);
+        w.ch_store.set(n, 0);
+        let mut yy = y;
+        while yy < y + ch {
+            let mut xx = x;
+            while xx < x + cw {
+                // (the corners left round)
+                let corner = (xx == x || xx == x + cw - 1) && (yy == y || yy == y + ch - 1);
+                if inside(xx, yy) && !corner {
+                    let i = idx(xx, yy);
+                    w.kind.set(i, c_soil());
+                    set_dug(w, i, true);
+                    w.room.set(i, n);
+                }
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        w.n_ch = n + 1;
+    }
+    n
+}
+
+// whether a chamber of this size fits with its top left at (x, y): in
+// soil, clear of rock, roots, the surface and other chambers
+pub fn room_fits(w: World, x: Int, y: Int, cw: Int, ch: Int) -> Bool {
+    let mut ok = x >= 1 && y >= surface() + 3 && x + cw < gw() - 1 && y + ch < gh() - 1;
+    let mut yy = y - 1;
+    while ok && yy <= y + ch {
+        let mut xx = x - 1;
+        while ok && xx <= x + cw {
+            let i = idx(xx, yy);
+            let k = w.kind.get(i);
+            if k == c_rock() || k == c_root() || w.room.get(i) >= 0 { ok = false }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    ok
+}
+
+pub fn set_dug(w: World, i: Int, d: Bool) {
+    if w.dug.get(i) != d {
+        w.dug.set(i, d);
+        w.fields_dirty = true;
+        w.changed.set(i, true);
+        w.any_changed = true;
+    }
+}
+
+// a straight tunnel between two cells (for the start), at no cost
+fn dig_line(w: World, x0: Int, y0: Int, x1: Int, y1: Int) {
+    let n = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    let mut k = 0;
+    while k <= n {
+        let x = x0 + (x1 - x0) * k / n;
+        let y = y0 + (y1 - y0) * k / n;
+        let i = idx(x, y);
+        if w.kind.get(i) != c_air() && w.kind.get(i) != c_path() {
+            w.kind.set(i, c_soil());
+            set_dug(w, i, true);
+        }
+        k = k + 1;
+    }
+}
+
+// ---- the distance fields
+
+// every walkable cell's steps to the nearest of the starting cells in
+// `starts` (count of them), into `field`
+pub fn flood(w: World, field: Array<Int>, starts: Array<Int>, count: Int) {
+    let n = gw() * gh();
+    let mut i = 0;
+    while i < n {
+        field.set(i, far());
+        i = i + 1;
+    }
+    let q = w.queue;
+    let mut head = 0;
+    let mut tail = 0;
+    i = 0;
+    while i < count {
+        let s = starts.get(i);
+        if field.get(s) != 0 {
+            field.set(s, 0);
+            q.set(tail, s);
+            tail = tail + 1;
+        }
+        i = i + 1;
+    }
+    let width = gw();
+    while head < tail {
+        let c = q.get(head);
+        head = head + 1;
+        let d = field.get(c) + 1;
+        let x = c % width;
+        let y = c / width;
+        // (the eight neighbours: a step is a step, diagonal or not)
+        let mut dy = -1;
+        while dy <= 1 {
+            let ny = y + dy;
+            if ny >= 0 && ny < gh() {
+                let mut dx = -1;
+                while dx <= 1 {
+                    let nx = x + dx;
+                    if nx >= 0 && nx < width && (dx != 0 || dy != 0) {
+                        let j = ny * width + nx;
+                        if field.get(j) > d && walkable(w, j) && w.water.get(j) < 128 {
+                            field.set(j, d);
+                            q.set(tail, j);
+                            tail = tail + 1;
+                        }
+                    }
+                    dx = dx + 1;
+                }
+            }
+            dy = dy + 1;
+        }
+    }
+}
+
+// the fields worked out again, if the tunnels have changed
+pub fn refresh_fields(w: World) {
+    if w.fields_dirty {
+        w.fields_dirty = false;
+        let starts = array(gw() * gh() / 4, 0);
+        let mut k = 0;
+        while k < 6 {
+            let mut count = 0;
+            let mut c = 0;
+            while c < w.n_ch {
+                if w.ch_kind.get(c) == k {
+                    let x0 = w.ch_x.get(c);
+                    let y0v = w.ch_y.get(c);
+                    let mut yy = y0v;
+                    while yy < y0v + w.ch_h.get(c) {
+                        let mut xx = x0;
+                        while xx < x0 + w.ch_w.get(c) {
+                            let i = idx(xx, yy);
+                            if w.room.get(i) == c && count < starts.len() {
+                                starts.set(count, i);
+                                count = count + 1;
+                            }
+                            xx = xx + 1;
+                        }
+                        yy = yy + 1;
+                    }
+                }
+                c = c + 1;
+            }
+            flood(w, w.to_kind.get(k), starts, count);
+            k = k + 1;
+        }
+        let mut s = 0;
+        while s < max_sources() {
+            if w.src_alive.get(s) {
+                starts.set(0, src_cell(w, s));
+                flood(w, w.to_src.get(s), starts, 1);
+            }
+            s = s + 1;
+        }
+    }
+}
+
+// the cell an ant stands on to take from a source: its own (on the
+// surface), or a tunnel cell touching it (buried), or -1 if none yet
+pub fn src_cell(w: World, s: Int) -> Int {
+    let x = w.src_x.get(s);
+    let y = w.src_y.get(s);
+    if !w.src_buried.get(s) { idx(x, y) } else {
+        let mut found = -1;
+        let mut dy = -1;
+        while dy <= 1 {
+            let mut dx = -1;
+            while dx <= 1 {
+                if inside(x + dx, y + dy) && found < 0 {
+                    let i = idx(x + dx, y + dy);
+                    if walkable(w, i) { found = i }
+                }
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+        if found < 0 { idx(x, y) } else { found }
+    }
+}
+
+// whether a source's food can get to a chamber of its kind
+pub fn connected(w: World, s: Int) -> Bool {
+    let c = src_cell(w, s);
+    walkable(w, c) && w.to_kind.get(w.src_kind.get(s)).get(c) < far()
+}

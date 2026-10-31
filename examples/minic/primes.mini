@@ -1,0 +1,20 @@
+// The primes up to a number from the input, with a sieve in an array.
+fn main() {
+    let n = read();
+    let composite = array(n + 1);
+    let count = 0;
+    let i = 2;
+    while i <= n {
+        if !composite[i] {
+            print(i, " ");
+            count = count + 1;
+            let j = i * i;
+            while j <= n {
+                composite[j] = 1;
+                j = j + i;
+            }
+        }
+        i = i + 1;
+    }
+    print("\n", count, " primes\n");
+}

@@ -1,0 +1,299 @@
+// A maze in 3D, drawn by raycasting as Wolfenstein 3D was: for each column
+// of the screen, a ray goes out from the player until it hits a wall, and
+// the nearer the wall, the taller its column. Find the green door.
+//
+// W and S (or up and down) walk, A and D step sideways, left and right
+// turn, M shows the map. There are no floats here: positions are in
+// 4096ths of a tile, and angles in 1024ths of a turn, with a table of sines
+// worked out at the start.
+
+mod screen;
+mod draw;
+
+use screen::*;
+use draw::{Canvas, canvas, fill_rect, show, text, text_width};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+// a tile, in the units of positions
+fn one() -> Int { 4096 }
+
+// the maze: digits are walls of different kinds, 5 the way out
+fn plan() -> List<String> {
+    ["1111111111111111",
+     "1......2.......1",
+     "1.22.2.2.3333..1",
+     "1.2..2...3.....1",
+     "1.2.222223.444.1",
+     "1.2.....3..4...1",
+     "1.33333.3.44.4.1",
+     "1.....3.3....4.1",
+     "1.444.3.33334..1",
+     "1.4...3......4.1",
+     "1.4.2222222.44.1",
+     "1.4.......2....1",
+     "1.44444.2.2.33.1",
+     "1.....4.2...3..1",
+     "1.....4.2...3..5",
+     "1111111111111111"]
+}
+
+fn size() -> Int { 16 }
+
+struct Player { x: Int, y: Int, angle: Int }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern maze") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let map = load_map();
+    let sines = make_sines();
+    let mut player = start();
+    let mut started = screen_ticks();
+    let mut finished = -1;
+    let mut show_map = true;
+    loop {
+        if finished < 0 {
+            let (p, out) = walk(player, map, sines);
+            player = p;
+            if out { finished = screen_ticks() - started }
+        } else if key_pressed(key("r")) {
+            player = start();
+            started = screen_ticks();
+            finished = -1;
+        }
+        if key_pressed(key("m")) { show_map = !show_map }
+        render(c, map, sines, player);
+        if show_map { minimap(c, map, player) }
+        let white = rgb(240, 240, 240);
+        if finished < 0 {
+            let t = ((screen_ticks() - started) / 1000).show();
+            text(c, t, width() - text_width(t, 1) - 3, 3, 1, white);
+        } else {
+            let msg = "OUT IN " ++ (finished / 1000).show() ++ " SECONDS";
+            fill_rect(c, 0, 48, width(), 26, rgb(0, 0, 0));
+            text(c, msg, (width() - text_width(msg, 1)) / 2, 53, 1, rgb(120, 255, 140));
+            text(c, "R TO PLAY AGAIN", (width() - text_width("R TO PLAY AGAIN", 1)) / 2, 63, 1, white);
+        }
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+}
+
+fn start() -> Player {
+    Player { x: one() * 3 / 2, y: one() * 3 / 2, angle: 0 }
+}
+
+// ---- the map
+
+fn load_map() -> Array<Int> {
+    let map = array(size() * size(), 0);
+    let mut y = 0;
+    let mut rows = plan();
+    loop {
+        match rows {
+            Nil => { break; }
+            Cons(row, rest) => {
+                let mut x = 0;
+                while x < size() {
+                    let ch = char_at(row, x);
+                    // (a digit's code, less the code of 0)
+                    array_set(map, y * size() + x, if ch == char_at(".", 0) { 0 } else { ch - 48 });
+                    x = x + 1;
+                }
+                y = y + 1;
+                rows = rest;
+            }
+        }
+    }
+    map
+}
+
+// what's at tile (x, y): 0 if nothing (outside the map is wall)
+fn tile(map: Array<Int>, x: Int, y: Int) -> Int {
+    if x < 0 || y < 0 || x >= size() || y >= size() { 1 } else { array_get(map, y * size() + x) }
+}
+
+// ---- moving
+
+// the player a frame later, and whether they reached the way out
+fn walk(p: Player, map: Array<Int>, sines: Array<Int>) -> (Player, Bool) with Io {
+    let mut angle = p.angle;
+    if key_down(key_left()) { angle = angle - 10 }
+    if key_down(key_right()) { angle = angle + 10 }
+    angle = angle & 1023;
+    let dx = cos(sines, angle) / 16;
+    let dy = sin(sines, angle) / 16;
+    let mut mx = 0;
+    let mut my = 0;
+    if key_down(key("w")) || key_down(key_up()) { mx = mx + dx; my = my + dy }
+    if key_down(key("s")) || key_down(key_down_arrow()) { mx = mx - dx; my = my - dy }
+    if key_down(key("a")) { mx = mx + dy; my = my - dx }
+    if key_down(key("d")) { mx = mx - dy; my = my + dx }
+    // each way on its own, so walking into a wall slides along it
+    let (x, out_x) = try_move(map, p.x + mx, p.y, p.x, mx);
+    let (y, out_y) = try_move_y(map, x, p.y + my, p.y, my);
+    (Player { x: x, y: y, angle: angle }, out_x || out_y)
+}
+
+// keeping a fifth of a tile from walls
+fn margin() -> Int { one() / 5 }
+
+fn try_move(map: Array<Int>, nx: Int, y: Int, old: Int, d: Int) -> (Int, Bool) {
+    let edge = if d > 0 { nx + margin() } else { nx - margin() };
+    let t = tile(map, edge / one(), y / one());
+    if t == 0 { (nx, false) } else { (old, t == 5) }
+}
+
+fn try_move_y(map: Array<Int>, x: Int, ny: Int, old: Int, d: Int) -> (Int, Bool) {
+    let edge = if d > 0 { ny + margin() } else { ny - margin() };
+    let t = tile(map, x / one(), edge / one());
+    if t == 0 { (ny, false) } else { (old, t == 5) }
+}
+
+// ---- drawing
+
+fn render(c: Canvas, map: Array<Int>, sines: Array<Int>, p: Player) {
+    let dir_x = cos(sines, p.angle);
+    let dir_y = sin(sines, p.angle);
+    // the camera's plane: at right angles to the view, 2/3 as long, for a
+    // view about 66 degrees wide
+    let plane_x = -dir_y * 2 / 3;
+    let plane_y = dir_x * 2 / 3;
+    let mut col = 0;
+    while col < width() {
+        let cam = 2 * col * one() / width() - one();
+        column(c, map, p, col, dir_x + plane_x * cam / one(), dir_y + plane_y * cam / one());
+        col = col + 1;
+    }
+}
+
+// one column: the ray (rx, ry) stepped from one tile's edge to the next
+// until it's in a wall (a "DDA")
+fn column(c: Canvas, map: Array<Int>, p: Player, col: Int, rx: Int, ry: Int) {
+    let mut mx = p.x / one();
+    let mut my = p.y / one();
+    // how far along the ray from one x edge to the next, and y edge
+    let ddx = if rx == 0 { 1 << 40 } else { abs(one() * one() / rx) };
+    let ddy = if ry == 0 { 1 << 40 } else { abs(one() * one() / ry) };
+    let step_x = if rx < 0 { -1 } else { 1 };
+    let step_y = if ry < 0 { -1 } else { 1 };
+    let mut side_x = if rx < 0 { (p.x - mx * one()) * ddx / one() } else { ((mx + 1) * one() - p.x) * ddx / one() };
+    let mut side_y = if ry < 0 { (p.y - my * one()) * ddy / one() } else { ((my + 1) * one() - p.y) * ddy / one() };
+    let mut side = 0;
+    let mut t = 0;
+    while t == 0 {
+        if side_x < side_y {
+            side_x = side_x + ddx;
+            mx = mx + step_x;
+            side = 0;
+        } else {
+            side_y = side_y + ddy;
+            my = my + step_y;
+            side = 1;
+        }
+        t = tile(map, mx, my);
+    }
+    // the distance, square to the camera (not along the ray, which would
+    // bend straight walls)
+    let dist = (if side == 0 { side_x - ddx } else { side_y - ddy }).max(one() / 16);
+    let h = height() * one() / dist;
+    let top = (height() - h) / 2;
+    // where along the wall it hit, 0 to 63
+    let hit = if side == 0 { p.y + dist * ry / one() } else { p.x + dist * rx / one() };
+    let tx = (hit & (one() - 1)) * 64 / one();
+    // nearer is brighter, and walls facing north and south are darker
+    let light = (256 - dist * 256 / (9 * one())).max(40) * (if side == 1 { 3 } else { 4 }) / 4;
+    let mut y = 0;
+    while y < height() {
+        let color = if y < top {
+            // the ceiling, darker further up
+            rgb(12 + y / 4, 14 + y / 4, 28 + y / 3)
+        } else if y >= top + h {
+            // the floor, lighter nearer
+            let d = y - height() / 2;
+            rgb(20 + d, 18 + d * 3 / 4, 16 + d / 2)
+        } else {
+            dim(texture(t, tx, (y - top) * 64 / h), light)
+        };
+        array_set(c.pixels, y * width() + col, color);
+        y = y + 1;
+    }
+}
+
+// a wall's color at (x, y), each 0 to 63
+fn texture(kind: Int, x: Int, y: Int) -> Int {
+    match kind {
+        // red bricks, every other row offset
+        1 => if y % 16 == 0 || (x + y / 16 % 2 * 16) % 32 == 0 { rgb(110, 100, 95) } else { rgb(170 + (x * 7 + y * 3) % 20, 60, 50) },
+        // big blue stones
+        2 => if y % 32 < 2 || (x + y / 32 % 2 * 24) % 48 < 2 { rgb(40, 50, 70) } else { rgb(80 + (x ^ y) % 16, 110, 170) },
+        // green planks, with knots
+        3 => {
+            let knot = (x % 16 - 8) * (x % 16 - 8) + (y % 40 - 20) * (y % 40 - 20) < 6;
+            if x % 16 == 0 || knot { rgb(30, 60, 30) } else { rgb(70, 140 + y % 8 * 3, 70) }
+        }
+        // gold panels
+        4 => if x < 3 || y < 3 || x > 60 || y > 60 { rgb(120, 90, 20) } else if x < 6 || y < 6 { rgb(255, 230, 120) } else { rgb(210, 170, 50) },
+        // the way out: glowing green, with bars
+        _ => if y % 12 < 3 { rgb(220, 255, 220) } else { rgb(60, 230, 110) },
+    }
+}
+
+// a color at brightness light (256 is as it is)
+fn dim(color: Int, light: Int) -> Int {
+    rgb((color >> 16) * light / 256, (color >> 8 & 255) * light / 256, (color & 255) * light / 256)
+}
+
+fn minimap(c: Canvas, map: Array<Int>, p: Player) {
+    let s = 3;
+    let mut i = 0;
+    while i < size() * size() {
+        let t = array_get(map, i);
+        let color = if t == 0 { rgb(10, 10, 16) } else if t == 5 { rgb(60, 230, 110) } else { rgb(120, 120, 140) };
+        fill_rect(c, 2 + i % size() * s, 2 + i / size() * s, s, s, color);
+        i = i + 1;
+    }
+    fill_rect(c, 2 + p.x * s / one() - 1, 2 + p.y * s / one() - 1, 2, 2, rgb(255, 80, 80));
+}
+
+// ---- angles
+
+fn sin(sines: Array<Int>, a: Int) -> Int { array_get(sines, a & 1023) }
+fn cos(sines: Array<Int>, a: Int) -> Int { array_get(sines, a + 256 & 1023) }
+
+// the sine of each angle, in one()ths: the first quarter of a turn by its
+// Taylor series, and the rest by symmetry
+fn make_sines() -> Array<Int> {
+    let t = array(1024, 0);
+    let mut i = 0;
+    while i <= 256 {
+        let s = quarter_sine(i);
+        array_set(t, i, s);
+        array_set(t, 512 - i, s);
+        array_set(t, 512 + i & 1023, -s);
+        array_set(t, 1024 - i & 1023, -s);
+        i = i + 1;
+    }
+    t
+}
+
+// sin(x) = x - x^3/3! + x^5/5! - ..., with x in 65536ths
+fn quarter_sine(i: Int) -> Int {
+    // (2 pi is 411775 65536ths)
+    let x = i * 411775 / 1024;
+    let x2 = x * x >> 16;
+    let mut term = x;
+    let mut sum = x;
+    let mut k = 1;
+    while k < 7 {
+        term = -(term * x2 >> 16) / (2 * k * (2 * k + 1));
+        sum = sum + term;
+        k = k + 1;
+    }
+    sum * one() >> 16
+}
+
+fn abs(n: Int) -> Int { if n < 0 { -n } else { n } }

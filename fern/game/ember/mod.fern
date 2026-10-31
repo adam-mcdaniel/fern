@@ -1,0 +1,14 @@
+// EMBERWAKE's parts (see emberwake.fern)
+pub mod gfx;
+pub mod art;
+pub mod world;
+pub mod light;
+pub mod run;
+pub mod arms;
+pub mod foes;
+pub mod play;
+pub mod icons;
+pub mod scene;
+pub mod sound;
+pub mod save;
+pub mod ui;

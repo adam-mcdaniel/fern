@@ -1,0 +1,53 @@
+// Closures capture variables, `let mut` makes mutable ones (shared with
+// the closures that capture them), and functions are values.
+
+fn make_counter() {
+    let mut n = 0;
+    || { n = n + 1; n }
+}
+
+fn compose(f, g) { |x| f(g(x)) }
+
+fn apply_n(f, n: Int, x) {
+    let mut i = 0;
+    let mut v = x;
+    while i < n {
+        v = f(v);
+        i = i + 1;
+    }
+    v
+}
+
+fn main() {
+    let next = make_counter();
+    next();
+    next();
+    println(next().show());
+    let add1 = |x| x + 1;
+    let times3 = |x| x * 3;
+    println(compose(add1, times3)(5).show());
+    println(apply_n(times3, 4, 1).show());
+    println((1..6).map(|x| x * x).show());
+    println((0..20).filter(|x| x % 7 == 0).show());
+    let words = ["fern", "is", "a", "language"];
+    println(words.map(|w| w ++ "!").join(" "));
+    let mut total = 0;
+    (1..=10).each(|x| { total = total + x; });
+    println(total.show());
+    // early return and break
+    let mut found = -1;
+    let mut i = 0;
+    loop {
+        if i * i > 50 { found = i; break; }
+        i = i + 1;
+    }
+    println(found.show());
+}
+// expect: 3
+// expect: 16
+// expect: 81
+// expect: [1, 4, 9, 16, 25]
+// expect: [0, 7, 14]
+// expect: fern! is! a! language!
+// expect: 55
+// expect: 8

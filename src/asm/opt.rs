@@ -81,7 +81,7 @@
 //! arithmetic on one, can print something else.
 
 use crate::Op;
-use std::collections::{HashMap, HashSet};
+use crate::asm::fx::{HashMap, HashSet};
 
 /// Optimizes a program for speed: fewest steps, whatever it costs in size.
 pub fn opt_fast(ops: Vec<Op>) -> Vec<Op> {
@@ -104,6 +104,14 @@ pub enum Goal {
 
 /// Optimizes a program for `goal`, given what's promised about it.
 pub fn opt_with(ops: Vec<Op>, facts: &Facts, goal: Goal) -> Vec<Op> {
+    let mut phase = crate::asm::log::phase(crate::asm::log::INFO, "asm optimizer");
+    let before = ops.len();
+    let out = opt_ops(ops, facts, goal);
+    phase.done(format!("{before} ops to {}", out.len()));
+    out
+}
+
+fn opt_ops(ops: Vec<Op>, facts: &Facts, goal: Goal) -> Vec<Op> {
     let mut items = parse(ops);
     // (routines as their form for the goal, which nothing changes after)
     let kept = routines_in(&items);
@@ -124,10 +132,10 @@ pub fn opt_with(ops: Vec<Op>, facts: &Facts, goal: Goal) -> Vec<Op> {
         }
     }
     swap(&mut items, &kept, goal);
-    let mut items = optimize(items, facts, goal, &kept, &HashSet::new());
+    let mut items = optimize(items, facts, goal, &kept, &HashSet::default());
     // (the routines as they were, after the last tidying up, which doesn't
     // see into them)
-    let mut bodies = HashMap::new();
+    let mut bodies = HashMap::default();
     fn hollow(items: &mut [Item], kept: &HashSet<Label>, bodies: &mut HashMap<Label, Vec<Item>>) {
         for item in items {
             match item {
@@ -161,19 +169,27 @@ pub fn opt_with(ops: Vec<Op>, facts: &Facts, goal: Goal) -> Vec<Op> {
 /// The optimizations, until nothing changes (or a dozen times), leaving
 /// `kept` functions as they are and not inlining `pinned` ones.
 fn optimize(mut items: Vec<Item>, facts: &Facts, goal: Goal, kept: &HashSet<Label>, pinned: &HashSet<Label>) -> Vec<Item> {
+    let mut t = crate::asm::log::Tally::default();
+    let mut rounds = 0;
     for _ in 0..12 {
-        let mut changed = inline(&mut items, goal, kept, pinned);
-        changed |= dead_acc(&mut items, true, kept);
-        changed |= remove_unused(&mut items);
-        let sums = Summaries::of(&items, facts);
+        rounds += 1;
+        let mut changed = t.time("inline", || inline(&mut items, goal, kept, pinned));
+        changed |= t.time("dead acc", || dead_acc(&mut items, true, kept));
+        changed |= t.time("remove unused", || remove_unused(&mut items));
+        let sums = t.time("summaries", || Summaries::of(&items, facts));
         let mut o = Optimizer { tokens: Tokens::default(), sums, kept, changed: false };
-        items = o.program(items);
+        items = t.time("peephole", || o.program(items));
         changed |= o.changed;
-        let sums = Summaries::of(&items, facts);
-        changed |= dead_stores(&mut items, &sums, kept);
+        let sums = t.time("summaries", || Summaries::of(&items, facts));
+        changed |= t.time("dead stores", || dead_stores(&mut items, &sums, kept));
         if !changed {
             break;
         }
+    }
+    // (once for the program; the routines' own optimizations aren't logged)
+    if pinned.is_empty() {
+        crate::log!(crate::asm::log::DEBUG, "{rounds} rounds");
+        t.report("the asm optimizer's passes");
     }
     items
 }
@@ -191,11 +207,11 @@ const RUN: usize = 48;
 /// functions go at the end of the program, and their own runs are looked at
 /// too. `kept` functions are left as they are.
 fn outline(items: &mut Vec<Item>, kept: &HashSet<Label>) {
-    let mut taken = HashSet::new();
-    let mut uses = HashMap::new();
+    let mut taken = HashSet::default();
+    let mut uses = HashMap::default();
     references(items, &mut uses);
     taken.extend(uses.keys().copied());
-    let mut defs = HashMap::new();
+    let mut defs = HashMap::default();
     functions(items, &mut defs);
     taken.extend(defs.keys().copied());
     let mut made = 0usize;
@@ -274,7 +290,7 @@ fn outline(items: &mut Vec<Item>, kept: &HashSet<Label>) {
             /// The block the last one counted was in, and where it ended.
             last: (usize, usize),
         }
-        let mut found: HashMap<u64, Found> = HashMap::new();
+        let mut found: HashMap<u64, Found> = HashMap::default();
         for (b, path) in paths.iter().enumerate() {
             let seq = block(items, path);
             let flats: Vec<Vec<Op>> = seq.iter().map(flat).collect();
@@ -407,10 +423,10 @@ fn outline(items: &mut Vec<Item>, kept: &HashSet<Label>) {
 /// then optimized for speed, then for size, on its own (called from
 /// anywhere, with everything it leaves read after), which these
 /// optimizations leave it in, and which targets that know it know.
-pub fn routine_forms() -> &'static HashMap<String, Vec<Vec<Op>>> {
-    static FORMS: std::sync::OnceLock<HashMap<String, Vec<Vec<Op>>>> = std::sync::OnceLock::new();
+pub fn routine_forms() -> &'static std::collections::HashMap<String, Vec<Vec<Op>>> {
+    static FORMS: std::sync::OnceLock<std::collections::HashMap<String, Vec<Vec<Op>>>> = std::sync::OnceLock::new();
     FORMS.get_or_init(|| {
-        let mut forms = HashMap::new();
+        let mut forms = std::collections::HashMap::new();
         for (label, body) in routines() {
             // (called after and before calls to something not in the
             // program: from anywhere, and then anything can be read)
@@ -421,8 +437,8 @@ pub fn routine_forms() -> &'static HashMap<String, Vec<Vec<Op>>> {
             ops.push(Op::EndFunc);
             let mut all = vec![body.clone()];
             for goal in [Goal::Fast, Goal::Size] {
-                let items = optimize(parse(ops.clone()), &Facts::default(), goal, &HashSet::new(), &HashSet::from([*label]));
-                let mut defs = HashMap::new();
+                let items = optimize(parse(ops.clone()), &Facts::default(), goal, &HashSet::default(), &HashSet::from_iter([*label]));
+                let mut defs = HashMap::default();
                 functions(&items, &mut defs);
                 let mut form = vec![];
                 flatten(defs.remove(label).unwrap_or_default(), &mut form);
@@ -462,11 +478,11 @@ fn routines() -> &'static HashMap<Label, Vec<Op>> {
             |o, x, _| xor_const(o, x, 5),
             |o, x, y| div_assign(o, x, y),
         ];
-        let mut out = HashMap::new();
+        let mut out = HashMap::default();
         for build in builds {
             let mut ops = vec![];
             build(&mut ops, x, y);
-            let mut found = HashMap::new();
+            let mut found = HashMap::default();
             functions(&parse(ops), &mut found);
             for (label, body) in found {
                 let mut ops = vec![];
@@ -481,7 +497,7 @@ fn routines() -> &'static HashMap<Label, Vec<Op>> {
 /// The functions in `items` that are exactly routines `asm` writes, in
 /// one of their forms (see `routine_forms`).
 fn routines_in(items: &[Item]) -> HashSet<Label> {
-    let mut defs = HashMap::new();
+    let mut defs = HashMap::default();
     functions(items, &mut defs);
     let forms = routine_forms();
     defs.into_iter()
@@ -628,7 +644,7 @@ fn references(items: &[Item], uses: &mut HashMap<Label, (usize, usize)>) {
 
 /// Whether a function's body calls it directly.
 fn calls_itself(label: &Label, body: &[Item]) -> bool {
-    let mut uses = HashMap::new();
+    let mut uses = HashMap::default();
     references(body, &mut uses);
     uses.contains_key(label)
 }
@@ -662,9 +678,9 @@ const INLINE: usize = 64;
 /// called once (keeping the label leaves `acc` as the call would have).
 fn inline(items: &mut Vec<Item>, goal: Goal, kept: &HashSet<Label>, pinned: &HashSet<Label>) -> bool {
     let most = if goal == Goal::Fast { INLINE } else { 1 };
-    let mut defs = HashMap::new();
+    let mut defs = HashMap::default();
     functions(items, &mut defs);
-    let mut uses = HashMap::new();
+    let mut uses = HashMap::default();
     references(items, &mut uses);
     let candidates: HashMap<Label, Vec<Item>> = defs
         .into_iter()
@@ -761,7 +777,7 @@ struct Live {
 
 impl Live {
     fn everything() -> Live {
-        Live { all: true, memory: true, cells: HashSet::new() }
+        Live { all: true, memory: true, cells: HashSet::default() }
     }
 
     fn union(&mut self, other: &Live) {
@@ -803,7 +819,7 @@ struct Flow {
 
 impl Flow {
     fn build(items: &[Item], sums: &Summaries) -> Flow {
-        let mut flow = Flow { effects: vec![], pair: HashMap::new(), frames: 0 };
+        let mut flow = Flow { effects: vec![], pair: HashMap::default(), frames: 0 };
         flow.walk(items, Some((0, 0)), sums);
         flow
     }
@@ -957,11 +973,62 @@ struct Liveness {
 /// Works out what's live in a sequence, given what's live after it.
 /// `absolute` says whether the
 /// sequence starts at the first cell (so private cells are known there).
+///
+/// (As it goes, the sets of cells are bits: each place the sequence, what's
+/// live after it, and what its callees read name gets a number. A sequence
+/// names few places, so a set is a word or two, where a set of places
+/// itself would be a table to copy and compare at each node.)
 fn liveness(items: &[Item], end: &Live, absolute: bool, sums: &Summaries, reads: &HashMap<Label, Live>) -> Liveness {
     let flow = Flow::build(items, sums);
     let n = flow.effects.len();
     let private = |p: &(u32, i64)| absolute && p.0 == 0 && sums.private(p.1);
-    let contains = |live: &Live, p: &(u32, i64)| live.all || live.cells.contains(p) || (live.memory && !private(p));
+    // the sequences a call can go to (None: anything)
+    let targets_of = |callee: &Option<Label>| -> Option<Vec<Label>> {
+        match callee {
+            Some(l) => Some(vec![*l]),
+            None if sums.facts.labels_only => Some(sums.taken.iter().copied().collect()),
+            None => None,
+        }
+    };
+    // the places, numbered
+    let mut number: HashMap<(u32, i64), usize> = HashMap::default();
+    let mut places: Vec<(u32, i64)> = vec![];
+    let name = |p: (u32, i64), number: &mut HashMap<(u32, i64), usize>, places: &mut Vec<(u32, i64)>| {
+        number.entry(p).or_insert_with(|| {
+            places.push(p);
+            places.len() - 1
+        });
+    };
+    for p in &end.cells {
+        name(*p, &mut number, &mut places);
+    }
+    for e in &flow.effects {
+        match e {
+            Effect::Store(Some(p)) | Effect::Read(Some(p)) => name(*p, &mut number, &mut places),
+            Effect::Call(callee, _) => {
+                for t in targets_of(callee).into_iter().flatten() {
+                    for p in reads.get(&t).map(|l| &l.cells).into_iter().flatten() {
+                        name(*p, &mut number, &mut places);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let words = places.len().div_ceil(64);
+    let bits = |live: &Live| -> Bits {
+        let mut b = Bits { all: live.all, memory: live.memory, w: vec![0; words] };
+        for p in &live.cells {
+            let i = number[p];
+            b.w[i / 64] |= 1 << (i % 64);
+        }
+        b
+    };
+    let everything = Bits { all: true, memory: true, w: vec![0; words] };
+    let contains = |live: &Bits, p: &(u32, i64)| {
+        let i = number[p];
+        live.all || live.w[i / 64] >> (i % 64) & 1 == 1 || (live.memory && !private(p))
+    };
     let successors = |i: usize| -> [Option<usize>; 2] {
         // `[` can skip past its `]`, and `]` go back to after its `[`
         match flow.pair.get(&i) {
@@ -976,11 +1043,26 @@ fn liveness(items: &[Item], end: &Live, absolute: bool, sums: &Summaries, reads:
             predecessors[s].push(i);
         }
     }
+    // what each call's callees read before writing, as bits (None: anything)
+    let exposed_at: Vec<Option<Bits>> = flow
+        .effects
+        .iter()
+        .map(|e| match e {
+            Effect::Call(callee, from_start) => targets_of(callee).filter(|_| absolute && *from_start).and_then(|ts| {
+                let mut exposed = Bits { all: false, memory: true, w: vec![0; words] };
+                for t in ts {
+                    exposed.union(&bits(reads.get(&t)?));
+                }
+                Some(exposed)
+            }),
+            _ => None,
+        })
+        .collect();
     // what's live before each node; node n is the end
-    let mut before: Vec<Option<Live>> = vec![None; n + 1];
-    before[n] = Some(end.clone());
-    let after = |before: &Vec<Option<Live>>, i: usize| -> Live {
-        let mut out = Live::default();
+    let mut before: Vec<Option<Bits>> = vec![None; n + 1];
+    before[n] = Some(bits(end));
+    let after = |before: &Vec<Option<Bits>>, i: usize| -> Bits {
+        let mut out = Bits { all: false, memory: false, w: vec![0; words] };
         for s in successors(i).into_iter().flatten() {
             if let Some(l) = &before[s] {
                 out.union(l);
@@ -995,35 +1077,25 @@ fn liveness(items: &[Item], end: &Live, absolute: bool, sums: &Summaries, reads:
         let mut live = after(&before, i);
         match &flow.effects[i] {
             Effect::Store(Some(p)) => {
-                live.cells.remove(p);
+                let k = number[p];
+                live.w[k / 64] &= !(1 << (k % 64));
             }
             Effect::Read(Some(p)) => {
                 if !live.all {
-                    live.cells.insert(*p);
+                    let k = number[p];
+                    live.w[k / 64] |= 1 << (k % 64);
                 }
             }
             Effect::Read(None) => live.memory = true,
-            Effect::Call(callee, from_start) => {
+            Effect::Call(..) => {
                 // the callee reads the private cells it reads before it
                 // writes them, and anything else
-                let targets: Option<Vec<Label>> = match callee {
-                    Some(l) => Some(vec![*l]),
-                    None if sums.facts.labels_only => Some(sums.taken.iter().copied().collect()),
-                    None => None,
-                };
-                let exposed = targets.filter(|_| absolute && *from_start).and_then(|ts| {
-                    let mut exposed = Live { all: false, memory: true, cells: HashSet::new() };
-                    for t in ts {
-                        exposed.union(reads.get(&t)?);
-                    }
-                    Some(exposed)
-                });
-                match exposed {
-                    Some(exposed) => live.union(&exposed),
-                    None => live = Live::everything(),
+                match &exposed_at[i] {
+                    Some(exposed) => live.union(exposed),
+                    None => live = everything.clone(),
                 }
             }
-            Effect::Everything => live = Live::everything(),
+            Effect::Everything => live = everything.clone(),
             Effect::Store(None) | Effect::Nothing => {}
         }
         if before[i].as_ref() != Some(&live) {
@@ -1036,15 +1108,19 @@ fn liveness(items: &[Item], end: &Live, absolute: bool, sums: &Summaries, reads:
             }
         }
     }
-    let entry = if n == 0 { end.clone() } else { before[0].clone().unwrap_or_default() };
-    let mut out = Liveness { dead: HashSet::new(), calls: vec![], entry };
+    let to_live = |b: &Bits| -> Live {
+        let cells = places.iter().enumerate().filter(|(i, _)| b.w[i / 64] >> (i % 64) & 1 == 1).map(|(_, p)| *p).collect();
+        Live { all: b.all, memory: b.memory, cells }
+    };
+    let entry = if n == 0 { end.clone() } else { before[0].as_ref().map(to_live).unwrap_or_default() };
+    let mut out = Liveness { dead: HashSet::default(), calls: vec![], entry };
     for i in 0..n {
         match &flow.effects[i] {
             Effect::Store(Some(p)) if !contains(&after(&before, i), p) => {
                 out.dead.insert(i);
             }
             Effect::Call(callee, from_start) => {
-                let live = after(&before, i);
+                let live = to_live(&after(&before, i));
                 // as the callee sees it: places are cells if this is
                 // absolute and the call is from the first cell
                 let seen = if absolute && *from_start {
@@ -1058,6 +1134,33 @@ fn liveness(items: &[Item], end: &Live, absolute: bool, sums: &Summaries, reads:
         }
     }
     out
+}
+
+/// A set of places as bits (see `liveness`), with what `Live` has besides.
+#[derive(Clone, PartialEq)]
+struct Bits {
+    all: bool,
+    memory: bool,
+    w: Vec<u64>,
+}
+
+impl Bits {
+    // (as `Live::union`: everything stays everything, with no cells)
+    fn union(&mut self, other: &Bits) {
+        if self.all {
+            return;
+        }
+        if other.all {
+            self.all = true;
+            self.memory = true;
+            self.w.iter_mut().for_each(|w| *w = 0);
+            return;
+        }
+        self.memory |= other.memory;
+        for (a, b) in self.w.iter_mut().zip(&other.w) {
+            *a |= *b;
+        }
+    }
 }
 
 /// Removes stores whose values are never read: overwritten first on every
@@ -1095,8 +1198,8 @@ fn dead_stores(items: &mut Vec<Item>, sums: &Summaries, kept: &HashSet<Label>) -
         }
     };
     // the sequences that call each one
-    let mut callers: Vec<HashSet<usize>> = vec![HashSet::new(); code.len()];
-    let mut callees: Vec<HashSet<usize>> = vec![HashSet::new(); code.len()];
+    let mut callers: Vec<HashSet<usize>> = vec![HashSet::default(); code.len()];
+    let mut callees: Vec<HashSet<usize>> = vec![HashSet::default(); code.len()];
     for (i, c) in code.iter().enumerate() {
         for callee in calls_in(c) {
             for t in targets(&callee) {
@@ -1107,7 +1210,7 @@ fn dead_stores(items: &mut Vec<Item>, sums: &Summaries, kept: &HashSet<Label>) -
     }
     // the sequences in groups that call each other, callees' groups first
     let groups = components(&callees);
-    let start = Live { all: false, memory: true, cells: HashSet::new() };
+    let start = Live { all: false, memory: true, cells: HashSet::default() };
     // first, the private cells each function reads before writing them, as
     // it sees them: what's live where it starts, if nothing private is
     // live when it returns (found together, for recursion)
@@ -1135,7 +1238,7 @@ fn dead_stores(items: &mut Vec<Item>, sums: &Summaries, kept: &HashSet<Label>) -
         .map(|i| if i == 0 { Live::default() } else if callers[i].is_empty() { Live::everything() } else { start.clone() })
         .collect();
     // what each sequence's calls say is live after them, for each callee
-    let mut said: Vec<HashMap<usize, Live>> = vec![HashMap::new(); code.len()];
+    let mut said: Vec<HashMap<usize, Live>> = vec![HashMap::default(); code.len()];
     let mut found: Vec<Option<Liveness>> = (0..code.len()).map(|_| None).collect();
     // callers' groups first, so each function's callers are done before it
     let mut work: Vec<usize> = groups.iter().flatten().copied().collect();
@@ -1143,7 +1246,7 @@ fn dead_stores(items: &mut Vec<Item>, sums: &Summaries, kept: &HashSet<Label>) -
     while let Some(i) = work.pop() {
         queued[i] = false;
         let result = liveness(code[i], &returns[i], absolute[i], sums, &reads);
-        let mut says: HashMap<usize, Live> = HashMap::new();
+        let mut says: HashMap<usize, Live> = HashMap::default();
         for (callee, live) in &result.calls {
             for t in targets(callee) {
                 let seen = if absolute[t] { live.clone() } else { Live::everything() };
@@ -1259,7 +1362,7 @@ fn moves_back(body: &[Item], sums: &Summaries) -> bool {
 /// definition can put the function's address in `acc`, so it only goes if
 /// something sets `acc` before anything could see it (or the program ends).
 fn remove_unused(items: &mut Vec<Item>) -> bool {
-    let mut uses = HashMap::new();
+    let mut uses = HashMap::default();
     references(items, &mut uses);
     fn walk(items: &mut Vec<Item>, uses: &HashMap<Label, (usize, usize)>, top: bool) -> bool {
         let mut changed = false;
@@ -1432,7 +1535,7 @@ impl Summaries {
     /// as good as can be, and then made as bad as it turns out to be under
     /// those assumptions, until that holds up.
     fn of(items: &[Item], facts: &Facts) -> Summaries {
-        let mut defs = HashMap::new();
+        let mut defs = HashMap::default();
         functions(items, &mut defs);
         let taken = taken_labels(items);
         let mut sums = Summaries {
@@ -1447,17 +1550,38 @@ impl Summaries {
             // whether each function is only called with the pointer at the
             // first cell
             let mut at_start: HashMap<Label, bool> = defs.keys().map(|l| (*l, true)).collect();
-            let mut next = HashMap::new();
+            let mut next = HashMap::default();
             let mut main = Summarize { sums: &sums, absolute: true, summary: Summary::hopeful(), sites: vec![], lost: false };
             main.walk(items, Place::Cell(0));
             let mut sites = main.sites;
-            for (l, body) in &defs {
-                let mut w = Summarize { sums: &sums, absolute: sums.funcs[l].absolute, summary: Summary::hopeful(), sites: vec![], lost: false };
-                let end = w.walk(body, Place::Cell(0));
-                let mut summary = w.summary;
-                summary.balanced = !w.lost && end == Place::Cell(0);
-                next.insert(*l, summary);
-                sites.extend(w.sites);
+            // (each function walked on its own: on as many threads as there
+            // are cores, each taking the next function there is to do)
+            let order: Vec<(&Label, &Vec<Item>)> = defs.iter().collect();
+            let walked = std::sync::atomic::AtomicUsize::new(0);
+            let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(order.len().max(1));
+            let done: Vec<Vec<(Label, Summary, Vec<(Option<Label>, bool)>)>> = std::thread::scope(|scope| {
+                let workers: Vec<_> = (0..threads)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let mut out = vec![];
+                            loop {
+                                let k = walked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(&(l, body)) = order.get(k) else { break };
+                                let mut w = Summarize { sums: &sums, absolute: sums.funcs[l].absolute, summary: Summary::hopeful(), sites: vec![], lost: false };
+                                let end = w.walk(body, Place::Cell(0));
+                                let mut summary = w.summary;
+                                summary.balanced = !w.lost && end == Place::Cell(0);
+                                out.push((*l, summary, w.sites));
+                            }
+                            out
+                        })
+                    })
+                    .collect();
+                workers.into_iter().map(|w| w.join().unwrap()).collect()
+            });
+            for (l, summary, more) in done.into_iter().flatten() {
+                next.insert(l, summary);
+                sites.extend(more);
             }
             for (callee, at_cell0) in sites {
                 let callees: Vec<Label> = match callee {
@@ -1485,7 +1609,7 @@ impl Summaries {
 /// The labels a program uses for something other than calling the
 /// function right away.
 fn taken_labels(items: &[Item]) -> HashSet<Label> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     fn walk(items: &[Item], out: &mut HashSet<Label>) {
         for (i, item) in items.iter().enumerate() {
             match item {
@@ -1763,8 +1887,8 @@ impl State {
     }
 
     fn at(pos: Pos, tokens: &mut Tokens) -> State {
-        let span = HashMap::from([(pos.region, (pos.offset, pos.offset))]);
-        State { pos, real: pos, acc: tokens.fresh(false), cells: HashMap::new(), stack: vec![], pending: None, span, absolute: false }
+        let span = HashMap::from_iter([(pos.region, (pos.offset, pos.offset))]);
+        State { pos, real: pos, acc: tokens.fresh(false), cells: HashMap::default(), stack: vec![], pending: None, span, absolute: false }
     }
 
     /// Notes that the program has had the pointer at `p`.
@@ -1895,8 +2019,8 @@ impl Optimizer<'_> {
         // through (a loop, a call, or the end), so it can become a move
         let matched = matched_derefs(&items);
         // stores nothing's read since, by place: where they are in `out`
-        let mut unread: HashMap<Pos, usize> = HashMap::new();
-        let mut dead: HashSet<usize> = HashSet::new();
+        let mut unread: HashMap<Pos, usize> = HashMap::default();
+        let mut dead: HashSet<usize> = HashSet::default();
         let mut lost = false;
         for (index, item) in items.into_iter().enumerate() {
             let op = match item {
@@ -1962,7 +2086,7 @@ impl Optimizer<'_> {
                             .filter(|(p, _)| written.is_empty() || (p.region == here.region && !written.contains(&(p.offset - here.offset))))
                             .map(|(p, t)| (*p, *t))
                             .collect(),
-                        None => HashMap::new(),
+                        None => HashMap::default(),
                     };
                     // and for a loop with no loops inside, whatever else
                     // turns out to be the same at the end of its body as at
@@ -2292,7 +2416,7 @@ fn writes(body: &[Item]) -> Option<HashSet<i64>> {
         }
         Some(())
     }
-    let (mut d, mut out) = (0, HashSet::new());
+    let (mut d, mut out) = (0, HashSet::default());
     walk(body, &mut d, &mut out)?;
     (d == 0).then_some(out)
 }
@@ -2461,7 +2585,7 @@ mod tests {
     fn keeps(ops: &[Op], facts: &Facts) -> bool {
         let mut pair = vec![0; ops.len()];
         let mut open = vec![];
-        let mut funcs = HashMap::new();
+        let mut funcs = HashMap::default();
         for (i, op) in ops.iter().enumerate() {
             match op {
                 Op::While | Op::Func => open.push(i),

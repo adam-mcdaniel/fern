@@ -1,0 +1,288 @@
+// Stella herself: how she moves. Standing on a platform, a press makes
+// her leap. In the air, holding grabs the nearest hook in reach ahead of
+// her: a rope from her hands to it, as long as she was from it, that
+// only pulls (she can swing up slack), and a little whip of speed as it
+// catches, so a good chain gets faster. Letting go flies her off at the
+// speed she had. (The rope is rigid while she holds it: her speed as she
+// grabs is turned along the swing, none lost, so a swing never stalls.)
+// Holding with no hook in reach tucks her into a ball,
+// spinning faster: flips, for the crowd. She lands on platforms (on her
+// feet, if she's upright), bounces on trampolines, and falls into the
+// net if she misses.
+//
+// Positions in 256ths of a pixel; speeds a frame.
+
+use crate::math::isqrt;
+use super::acts::*;
+
+pub fn sub() -> Int { 256 }
+pub fn gravity() -> Int { 104 }
+pub fn reach() -> Int { 118 }
+pub fn top_speed() -> Int { 13 * 256 }
+
+// what she's doing
+pub fn s_stand() -> Int { 0 }
+pub fn s_air() -> Int { 1 }
+pub fn s_swing() -> Int { 2 }
+pub fn s_done() -> Int { 3 }
+pub fn s_fallen() -> Int { 4 }
+
+pub struct Stella {
+    x: Int, y: Int, vx: Int, vy: Int,
+    state: Int,
+    // the hook she's on, and the rope's length
+    hook: Int,
+    rope: Int,
+    // how she's turned (a 1024th of a turn; 0 upright), how fast, whether tucked
+    angle: Int,
+    spin: Int,
+    tuck: Bool,
+    // turned this flight (for flips), and on which platform she stands
+    turned: Int,
+    plat: Int,
+    // how long she's been in this state, and the squash on landing
+    t: Int,
+    squash: Int,
+    // her scarf: a chain of points trailing from her neck
+    sx: Array<Int>,
+    sy: Array<Int>,
+}
+
+pub fn scarf_len() -> Int { 7 }
+
+pub fn stella(a: Act) -> Stella { stella_on(a, 0) }
+
+// Stella standing on platform p, ready to leap (on the start, near its end;
+// on one to rest on, at its middle)
+pub fn stella_on(a: Act, p: Int) -> Stella {
+    let x = (if p == 0 { 40 } else { (a.px0.get(p) + a.px1.get(p)) / 2 }) * 256;
+    let y = (a.py.get(p) - 6) * 256;
+    let s = Stella { x: x, y: y, vx: 0, vy: 0, state: s_stand(), hook: -1, rope: 0, angle: 0, spin: 0, tuck: false, turned: 0, plat: p, t: 0, squash: 0, sx: array(scarf_len(), x), sy: array(scarf_len(), y) };
+    s
+}
+
+// the hook she'd grab now, if she held: the nearest in reach that isn't
+// behind her (or -1)
+pub fn target(s: Stella, a: Act, t: Int, sines: Array<Int>) -> Int {
+    let px = s.x / 256;
+    let py = s.y / 256;
+    let mut best = -1;
+    let mut best_d = reach() * reach();
+    let mut i = 0;
+    while i < a.n_hooks {
+        let hx = hook_x(a, i, t, sines);
+        let hy = hook_y(a, i, t, sines);
+        let dx = hx - px;
+        let dy = hy - py;
+        let d2 = dx * dx + dy * dy;
+        if dx > -24 && hy < py + 10 && d2 < best_d && i != s.hook {
+            best_d = d2;
+            best = i;
+        }
+        i = i + 1;
+    }
+    best
+}
+
+// what happened in a step (for the play to score and sound)
+pub fn e_none() -> Int { 0 }
+pub fn e_leap() -> Int { 1 }
+pub fn e_grab() -> Int { 2 }
+pub fn e_release() -> Int { 3 }
+pub fn e_land() -> Int { 4 }
+pub fn e_fall() -> Int { 5 }
+pub fn e_bounce() -> Int { 6 }
+
+// a frame of her, with the button held or not; what happened
+pub fn move_stella(s: Stella, a: Act, held: Bool, pressed: Bool, t: Int, sines: Array<Int>) -> Int {
+    s.t = s.t + 1;
+    if s.squash > 0 { s.squash = s.squash - 1 }
+    let mut ev = e_none();
+    let st = s.state;
+    if st == s_stand() {
+        // standing: a press, and she leaps
+        if pressed && s.plat != a.end {
+            s.vx = 3 * 256 + 64;
+            s.vy = -(4 * 256 + 128);
+            s.state = s_air();
+            s.t = 0;
+            s.turned = 0;
+            ev = e_leap();
+        }
+    } else if st == s_air() {
+        // holding: grab the hook in reach, else tuck
+        if held {
+            let h = target(s, a, t, sines);
+            if h >= 0 && (pressed || s.hook < 0 || s.t > 6) {
+                grab(s, a, h, t, sines);
+                ev = e_grab();
+            } else {
+                s.tuck = true;
+            }
+        } else {
+            s.tuck = false;
+        }
+        if s.state == s_air() {
+            s.vy = s.vy + gravity();
+            s.vx = s.vx * 511 / 512;
+            s.x = s.x + s.vx;
+            s.y = s.y + s.vy;
+            // (spinning: faster tucked)
+            let rate = if s.tuck { 46 } else { s.spin };
+            s.angle = (s.angle + rate) & 1023;
+            s.turned = s.turned + rate.abs();
+            let landed = land(s, a);
+            if landed > 0 { ev = landed }
+        }
+    } else if st == s_swing() {
+        if !held {
+            // let go
+            s.state = s_air();
+            s.t = 0;
+            s.turned = 0;
+            // (a spin from the swing's speed)
+            s.spin = (s.vx / 40).clamp(-14, 14);
+            ev = e_release();
+        } else {
+            let hx = hook_x(a, s.hook, t, sines) * 256;
+            let hy = hook_y(a, s.hook, t, sines) * 256;
+            s.vy = s.vy + gravity();
+            s.vx = s.vx * 1023 / 1024;
+            s.x = s.x + s.vx;
+            s.y = s.y + s.vy;
+            // the rope holds her at its length, her speed along the swing
+            let dx = s.x - hx;
+            let dy = s.y - hy;
+            let d = isqrt(dx * dx + dy * dy).max(1);
+            s.x = hx + dx * s.rope / d;
+            s.y = hy + dy * s.rope / d;
+            let nx = dx * 4096 / d;
+            let ny = dy * 4096 / d;
+            let vr = (s.vx * nx + s.vy * ny) >> 12;
+            s.vx = s.vx - ((vr * nx) >> 12);
+            s.vy = s.vy - ((vr * ny) >> 12);
+            // (she pumps, kicking at the bottom of the swing, enough to
+            // keep it rising most of the way to the hook: a swing never dies)
+            if dy > 0 && dx.abs() * 3 < d {
+                let need = isqrt(2 * gravity() * (s.rope >> 8) * 85 / 100) << 4;
+                let sp = speed(s);
+                if sp < need && sp > 0 {
+                    let boost = (sp + 24).min(need);
+                    s.vx = s.vx * boost / sp;
+                    s.vy = s.vy * boost / sp;
+                    if s.vx == 0 { s.vx = if dx < 0 { 64 } else { -64 } }
+                }
+            }
+            // she hangs along the rope: her feet away from the hook
+            s.angle = rope_angle(dx, dy);
+            cap(s);
+        }
+    }
+    trail(s);
+    if s.y > net_y() * 256 && s.state != s_fallen() && s.state != s_done() {
+        s.state = s_fallen();
+        s.t = 0;
+        ev = e_fall();
+    }
+    ev
+}
+
+fn grab(s: Stella, a: Act, h: Int, t: Int, sines: Array<Int>) {
+    let hx = hook_x(a, h, t, sines) * 256;
+    let hy = hook_y(a, h, t, sines) * 256;
+    let dx = s.x - hx;
+    let dy = s.y - hy;
+    s.hook = h;
+    s.rope = isqrt(dx * dx + dy * dy).max(20 * 256);
+    s.state = s_swing();
+    s.tuck = false;
+    s.t = 0;
+    // her speed turned along the swing (the way she was going across), with a
+    // whip of a little more as the rope catches
+    let d = s.rope.max(1);
+    let tx = -dy * 4096 / d;
+    let ty = dx * 4096 / d;
+    let sp = speed(s) * 9 / 8 + 128;
+    // (always swinging the way she was going across)
+    let dir = if (tx >= 0) == (s.vx >= 0) { 1 } else { -1 };
+    s.vx = (tx * sp >> 12) * dir;
+    s.vy = (ty * sp >> 12) * dir;
+    cap(s);
+}
+
+fn cap(s: Stella) {
+    let sp2 = s.vx * s.vx + s.vy * s.vy;
+    if sp2 > top_speed() * top_speed() {
+        let sp = isqrt(sp2);
+        s.vx = s.vx * top_speed() / sp;
+        s.vy = s.vy * top_speed() / sp;
+    }
+}
+
+// the angle her body hangs at on a rope (dx, dy from the hook to her)
+fn rope_angle(dx: Int, dy: Int) -> Int {
+    // (an approximation of the angle: good enough to draw by)
+    let ax = dx.abs();
+    let ay = dy.abs().max(1);
+    let a = if ax < ay { ax * 128 / ay } else { 256 - ay * 128 / ax.max(1) };
+    let q = if dy >= 0 { a } else { 512 - a };
+    if dx >= 0 { (1024 - q) & 1023 } else { q }
+}
+
+// landing on a platform, or bouncing on a trampoline; what happened
+fn land(s: Stella, a: Act) -> Int {
+    let mut ev = e_none();
+    let px = s.x / 256;
+    let feet = s.y / 256 + 6;
+    if s.vy > 0 {
+        let mut p = 0;
+        while p < a.n_plats {
+            let top = a.py.get(p);
+            if px >= a.px0.get(p) - 2 && px <= a.px1.get(p) + 2 && feet >= top && feet - s.vy / 256 - 2 <= top {
+                s.y = (top - 6) * 256;
+                s.vy = 0;
+                s.vx = 0;
+                s.plat = p;
+                s.state = if p == a.end { s_done() } else { s_stand() };
+                s.squash = 10;
+                s.t = 0;
+                ev = e_land();
+            }
+            p = p + 1;
+        }
+        let mut b = 0;
+        while b < a.n_bits {
+            if a.bk.get(b) == b_tramp() {
+                let tx = a.bx.get(b);
+                let ty = a.by.get(b);
+                if (px - tx).abs() < 16 && feet >= ty && feet - s.vy / 256 - 2 <= ty {
+                    s.y = (ty - 6) * 256;
+                    s.vy = -(s.vy * 21 / 20).max(8 * 256);
+                    s.squash = 8;
+                    ev = e_bounce();
+                }
+            }
+            b = b + 1;
+        }
+    }
+    ev
+}
+
+// the scarf follows her neck, each point dragging the next
+fn trail(s: Stella) {
+    s.sx.set(0, s.x - (s.vx >> 4));
+    s.sy.set(0, s.y - 7 * 256);
+    let mut i = 1;
+    while i < scarf_len() {
+        let dx = s.sx.get(i) - s.sx.get(i - 1);
+        let dy = s.sy.get(i) - s.sy.get(i - 1) + 50;
+        let d = isqrt(dx * dx + dy * dy).max(1);
+        let seg = 4 * 256;
+        s.sx.set(i, s.sx.get(i - 1) + dx * seg / d);
+        s.sy.set(i, s.sy.get(i - 1) + dy * seg / d);
+        i = i + 1;
+    }
+}
+
+// how fast she's going (pixels a frame, 256ths)
+pub fn speed(s: Stella) -> Int { isqrt(s.vx * s.vx + s.vy * s.vy) }

@@ -1,0 +1,708 @@
+// Drawing the shift: the light first (what stays, then everything that
+// gives light this frame, the robot's with shadows), the deck in it, then
+// what's on the deck, lit by the light where it stands, then what glows,
+// and the HUD over it all.
+
+use crate::math::{sin, cos, isqrt};
+use super::gfx::*;
+use super::art::{Art};
+use super::run::*;
+use super::arms::*;
+use super::play::{light_radius, online_count};
+use super::foes::{boss_name};
+use super::light::{bake, cast, relay_reach, half};
+use super::world::{size, relay_count, hash};
+use super::icons::{icon};
+
+// where the camera is: its top left in whole pixels (where the deck's drawn
+// from), and in 16ths of a pixel, which everything on the deck is drawn
+// relative to, so that the robot and what moves round it keep their places
+// against each other however the camera's pixels round
+pub struct View { x: Int, y: Int, x16: Int, y16: Int }
+
+pub fn camera(r: Run) -> View {
+    let s = r.shake;
+    let (ox, oy) = if s > 0 { (roll(r, s * 2 + 1) - s, roll(r, s * 2 + 1) - s) } else { (0, 0) };
+    let x16 = ((r.camx + ox) * 16 + r.camfx).clamp(0, (size() - sw()) * 16);
+    let y16 = ((r.camy + oy) * 16 + r.camfy).clamp(0, (size() - sh()) * 16);
+    View { x: x16 >> 4, y: y16 >> 4, x16: x16, y16: y16 }
+}
+
+// how much of the station's own lighting is on: none, until the power comes back
+pub fn mains(r: Run) -> Int { (r.power * 256 / 420).min(256) }
+
+pub fn draw_shift(g: Gfx, a: Art, r: Run, show_numbers: Bool) {
+    // the relays lit or put out since the light that stays was worked out
+    let mut b = 0;
+    while b < relay_count(r.w) {
+        if r.lit.get(b) != r.baked.get(b) {
+            let (bx, by) = (r.w.relays.get(b * 2), r.w.relays.get(b * 2 + 1));
+            let reach = relay_reach() + 4;
+            if r.baked.get(b) < 0 { () } else { bake(r.still, g, r.w, r.lit, bx - reach, by - reach, bx + reach, by + reach, r.table) }
+            r.baked.set(b, r.lit.get(b));
+        }
+        b = b + 1;
+    }
+    let v = camera(r);
+    let frame = r.frame;
+    lights(g, r, v, frame);
+    let power = mains(r);
+    render(g, r.w.idx, size(), r.still.lamp, r.still.bloom, half(), v.x, v.y, power * 3 / 4, 0);
+    draw_things(g, a, r, v, frame, show_numbers);
+}
+
+// ---- the light
+
+fn lights(g: Gfx, r: Run, v: View, frame: Int) {
+    let (px, py) = ((r.x >> 4), (r.y >> 4));
+    let t = r.table;
+    // the robot's own: its headlamp, a cone the way it faces, and a little
+    // glow all round; when it's badly hurt the lamp stutters
+    let failing = r.hp * 10 < stat(r, st_maxhp()) * 16 * 3 && roll(r, 9) == 0;
+    if r.dead == 0 && !failing {
+        let face = r.face;
+        let reach = light_radius(r) * 17 / 10;
+        cast(g, r.still, r.w, px, py - 4, reach, face - 105, 210, 56, 235, 0, v.x, v.y, t);
+        cast(g, r.still, r.w, px, py - 4, 50, frame & 7, 1024, 64, 120, 0, v.x, v.y, t);
+    }
+    // the lasers
+    let beams = if r.lv.get(laser()) > 0 { beam_count(r) } else { 0 };
+    let mut bm = 0;
+    while bm < beams {
+        let a = r.beam + bm * 1024 / beams;
+        let wdt = beam_width(r);
+        cast(g, r.still, r.w, px, py - 4, beam_length(r), a - wdt / 2, wdt, 12, 255, 90, v.x, v.y, t);
+        bm = bm + 1;
+    }
+    // the drones' lights
+    if r.lv.get(drones()) > 0 {
+        let n = drone_count(r);
+        let rad = drone_radius(r);
+        let mut k = 0;
+        while k < n {
+            let a = r.drones + k * 1024 / n;
+            light_add(g, px + ((cos(t, a) * rad) >> 16) - v.x, py + ((sin(t, a) * rad) >> 16) - v.y, 26, 90, 0);
+            k = k + 1;
+        }
+    }
+    // shots
+    let s = r.shots;
+    let mut i = 0;
+    while i < count(s) {
+        let (x, y) = (((col(s, sh_x()).get(i) - v.x16) >> 4), ((col(s, sh_y()).get(i) - v.y16) >> 4));
+        let k = col(s, sh_kind()).get(i);
+        if x > -40 && y > -40 && x < sw() + 40 && y < sh() + 40 {
+            if k == 0 { light_add(g, x, y, 24, 110, 0) }
+            else if k == 1 { light_add(g, x, y, 30, 150, 0) }
+            else { light_add(g, x, y, 14, 40, 0) }
+        }
+        i = i + 1;
+    }
+    // puddles of cleaner, faintly glowing
+    let fi = r.puddles;
+    i = 0;
+    while i < count(fi) {
+        let life = col(fi, pu_life()).get(i);
+        let fade = (life * 256 / 40).min(256);
+        light_add(g, ((col(fi, pu_x()).get(i) - v.x16) >> 4), ((col(fi, pu_y()).get(i) - v.y16) >> 4), col(fi, pu_r()).get(i) * 2, 60 * fade / 256, 0);
+        i = i + 1;
+    }
+    // bursts of light
+    let fl = r.flashes;
+    i = 0;
+    while i < count(fl) {
+        let k = col(fl, fl_life()).get(i) * 256 / col(fl, fl_max()).get(i).max(1);
+        light_add(g, col(fl, fl_x()).get(i) - v.x, col(fl, fl_y()).get(i) - v.y, col(fl, fl_r()).get(i), col(fl, fl_lamp()).get(i) * k / 256, col(fl, fl_bloom()).get(i) * k / 256);
+        i = i + 1;
+    }
+    // the creatures' bolts: the bloom's own light
+    let bo = r.bolts;
+    i = 0;
+    while i < count(bo) {
+        let (x, y) = (((col(bo, bo_x()).get(i) - v.x16) >> 4), ((col(bo, bo_y()).get(i) - v.y16) >> 4));
+        if x > -20 && y > -20 && x < sw() + 20 && y < sh() + 20 { light_add(g, x, y, 24, 0, 170) }
+        i = i + 1;
+    }
+    // scrap on the floor, glinting (the bigger, the brighter)
+    let d = r.drops;
+    i = 0;
+    let mut shown = 0;
+    while i < count(d) && shown < 70 {
+        let (x, y) = (((col(d, dr_x()).get(i) - v.x16) >> 4), ((col(d, dr_y()).get(i) - v.y16) >> 4));
+        if x > 0 && y > 0 && x < sw() && y < sh() {
+            let v = col(d, dr_value()).get(i);
+            let k = col(d, dr_kind()).get(i);
+            if k == 0 { if v >= 5 { light_add(g, x, y, 16, 70, 0) } else { light_add(g, x, y, 10, 40, 0) } }
+            else if k == 3 { light_add(g, x, y, 40, 140, 0) }
+            else { light_add(g, x, y, 14, 60, 0) }
+            shown = shown + 1;
+        }
+        i = i + 1;
+    }
+    // the zaps
+    let z = r.zaps;
+    i = 0;
+    while i < count(z) {
+        light_add(g, col(z, za_x1()).get(i) - v.x, col(z, za_y1()).get(i) - v.y, 30, 170, 30);
+        i = i + 1;
+    }
+}
+
+// ---- what's on the deck
+
+fn draw_things(g: Gfx, a: Art, r: Run, v: View, frame: Int, show_numbers: Bool) {
+    let t = r.table;
+    // the relays
+    let mut b = 0;
+    while b < relay_count(r.w) {
+        let (x, y) = (r.w.relays.get(b * 2) - v.x, r.w.relays.get(b * 2 + 1) - v.y);
+        if x > -20 && y > -30 && x < sw() + 20 && y < sh() + 20 {
+            shadow(g, x + 1, y + 4, 7, 2);
+            draw_sprite(g, a.relay, x, y, false, lit_at(g, x, y), false);
+            if r.lit.get(b) > 0 {
+                // on: its lamp lit, humming, a light blinking on its foot
+                let hum = (sin(t, frame * 13 + b * 100) >> 13) + 8;
+                rect(g, x - 2, y - 4, 4, 1, 0xf0ffff);
+                glow(g, x, y - 4, 10 + hum / 4, 0x206070);
+                if (frame + b * 17) / 30 % 2 == 0 { put(g, x + 4, y + 4, 0x60ff90) }
+            } else {
+                if (frame + b * 11) / 45 % 2 == 0 { put(g, x + 4, y + 4, 0xff3030) }
+                let heat = r.heat.get(b);
+                if heat > 0 {
+                    // (rebooting: a ring filling up round it)
+                    let mut k = 0;
+                    while k < heat * 64 / 80 {
+                        let an = k * 16 - 256;
+                        put(g, x + ((cos(t, an) * 14) >> 16), y - 2 + ((sin(t, an) * 14) >> 16), 0x80e0ff);
+                        k = k + 1;
+                    }
+                    if heat / 4 % 2 == 0 { rect(g, x - 2, y - 4, 4, 1, 0x60a0b0) }
+                }
+                // (down and near: a hint)
+                let (dx, dy) = (((r.x - v.x16) >> 4) - x, ((r.y - v.y16) >> 4) - y);
+                if dx * dx + dy * dy < 70 * 70 && heat == 0 && frame / 20 % 2 == 0 { say_at(g, "STAND HERE TO REBOOT", x, y - 24, 1, 0xa0e8ff) }
+            }
+        }
+        b = b + 1;
+    }
+    // puddles of cleaner: a sickly green sheen, bubbling
+    let pu = r.puddles;
+    let mut q = 0;
+    while q < count(pu) {
+        let (x, y) = (((col(pu, pu_x()).get(q) - v.x16) >> 4), ((col(pu, pu_y()).get(q) - v.y16) >> 4));
+        let fade = (col(pu, pu_life()).get(q) * 256 / 40).min(256);
+        let rad = col(pu, pu_r()).get(q);
+        glow(g, x, y, rad + 2, scale(0x184a20, fade));
+        if (frame + q * 7) % 9 == 0 { ring(g, x + (q * 37 + frame) % (rad + 1) - rad / 2, y + (q * 53) % (rad / 2 + 1) - rad / 4, 1, 1, scale(0x60c070, fade)) }
+        q = q + 1;
+    }
+    draw_drops(g, a, r, v, frame);
+    draw_foes(g, a, r, v, frame);
+    draw_robot(g, r, v, frame);
+    draw_shots(g, r, v, frame);
+    // sparks, added to what's under them
+    let s = r.sparks;
+    let (xs, ys, life, max, colors, kinds) = (col(s, sp_x()), col(s, sp_y()), col(s, sp_life()), col(s, sp_max()), col(s, sp_color()), col(s, sp_kind()));
+    let mut i = 0;
+    while i < count(s) {
+        let (x, y) = (((xs.get(i) - v.x16) >> 4), ((ys.get(i) - v.y16) >> 4));
+        let k = life.get(i) * 256 / max.get(i).max(1);
+        let c = scale(colors.get(i), k.min(256));
+        add(g, x, y, c);
+        if kinds.get(i) == 0 && k > 128 { add(g, x + 1, y, scale(c, 128)) }
+        i = i + 1;
+    }
+    if show_numbers {
+        let nu = r.nums;
+        i = 0;
+        while i < count(nu) {
+            let (x, y) = (((col(nu, nu_x()).get(i) - v.x16) >> 4), ((col(nu, nu_y()).get(i) - v.y16) >> 4));
+            if x > 0 && y > 0 && x < sw() && y < sh() {
+                say_at(g, col(nu, nu_value()).get(i).show(), x, y, 1, col(nu, nu_color()).get(i));
+            }
+            i = i + 1;
+        }
+    }
+}
+
+fn draw_drops(g: Gfx, a: Art, r: Run, v: View, frame: Int) {
+    let d = r.drops;
+    let t = r.table;
+    let mut i = 0;
+    while i < count(d) {
+        let (x, y) = (((col(d, dr_x()).get(i) - v.x16) >> 4), ((col(d, dr_y()).get(i) - v.y16) >> 4));
+        if x > -10 && y > -10 && x < sw() + 10 && y < sh() + 10 {
+            let k = col(d, dr_kind()).get(i);
+            let v = col(d, dr_value()).get(i);
+            let tt = col(d, dr_t()).get(i);
+            let bob = (sin(t, tt * 12) >> 15);
+            if k == 0 {
+                // scrap: a glinting chip, bronze, blue or gold by its worth
+                let (c1, c2) = if v >= 20 { (0xffffff, 0xffd040) } else if v >= 5 { (0xd0f4ff, 0x3090ff) } else { (0xfff0d0, 0xb08050) };
+                let yy = y + bob;
+                put(g, x, yy - 1, c2);
+                put(g, x - 1, yy, c2);
+                put(g, x + 1, yy, c2);
+                put(g, x, yy + 1, c2);
+                put(g, x, yy, c1);
+                if v >= 5 {
+                    put(g, x, yy - 2, c2);
+                    put(g, x, yy + 2, c2);
+                }
+            } else if k == 1 {
+                // a repair kit: a white box with a green cross
+                rect(g, x - 2, y + bob - 2, 5, 5, 0xe8f0f0);
+                rect(g, x, y + bob - 1, 1, 3, 0x30d060);
+                rect(g, x - 1, y + bob, 3, 1, 0x30d060);
+            } else if k == 2 {
+                let tw = if tt / 6 % 2 == 0 { 0xe0ffff } else { 0x60e0ff };
+                put(g, x, y - 2 + bob, tw);
+                put(g, x, y + 2 + bob, tw);
+                put(g, x - 2, y + bob, tw);
+                put(g, x + 2, y + bob, tw);
+                put(g, x, y + bob, 0xffffff);
+                glow(g, x, y + bob, 7, 0x104050);
+            } else if k == 3 {
+                shadow(g, x, y + 5, 7, 2);
+                draw_sprite(g, a.crate, x, y + bob / 2, false, lit_at(g, x, y), false);
+                glow(g, x, y, 12 + ((sin(t, tt * 8) + 65536) >> 14), 0x103038);
+            } else {
+                // a credit chip
+                rect(g, x - 1, y + bob - 1, 3, 2, 0x40c0a0);
+                put(g, x, y + bob - 1, 0xc0fff0);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn draw_foes(g: Gfx, a: Art, r: Run, v: View, frame: Int) {
+    let f = r.foes;
+    let (px, py) = (((r.x - v.x16) >> 4), ((r.y - v.y16) >> 4));
+    let mut i = 0;
+    while i < count(f.p) {
+        let (x, y) = (((f.x.get(i) - v.x16) >> 4), ((f.y.get(i) - v.y16) >> 4));
+        if x > -40 && y > -40 && x < sw() + 40 && y < sh() + 40 {
+            let kind = f.kind.get(i);
+            let t = f.t.get(i);
+            let flip = px < x;
+            let flash = f.flash.get(i) > 0;
+            let level = lit_at(g, x, y);
+            let elite = f.elite.get(i) > 0;
+            if kind == boss() {
+                draw_boss(g, r, i, x, y, frame);
+            } else {
+                let sprite = if kind == sporeling() { if t / 12 % 2 == 0 { a.sporeling } else { a.sporeling2 } }
+                    else if kind == flicker() { a.flicker } else if kind == bloater() { a.bloater }
+                    else if kind == drifter() { if t / 5 % 2 == 0 { a.drifter } else { a.drifter2 } }
+                    else if kind == spitter() { a.spitter } else if kind == chewer() { a.chewer } else { a.stalker };
+                // (walkers bob as they go; the flying float)
+                let bob = if kind == drifter() || kind == stalker() || kind == flicker() { sin(r.table, t * 9 + i * 50) >> 15 } else { (t / 8) % 2 };
+                if kind != drifter() && kind != stalker() && kind != flicker() { shadow(g, x, y + sprite.h / 2 * (if elite { 2 } else { 1 }) - 1, sprite.w / 3 * (if elite { 2 } else { 1 }), 2) }
+                if kind == flicker() && brightness(level) < 40 && !flash {
+                    // (a shade in the dark: only its eyes)
+                    put(g, x - 2, y - 2 + bob, 0x80f0ff);
+                    put(g, x + 1, y - 2 + bob, 0x80f0ff);
+                } else if elite {
+                    glow(g, x, y + bob, 22, 0x401808);
+                    draw_big(g, sprite, x, y + bob, flip, level, flash, 2);
+                } else {
+                    draw_sprite(g, sprite, x, y + bob, flip, level, flash);
+                }
+                if kind == chewer() && f.state.get(i) > 0 {
+                    // (chewing through its cables: a ring closing in)
+                    let s = f.state.get(i);
+                    ring(g, x, y, 18 - s * 14 / 120, 1, 0x305070);
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// the boss: a great dark body that heaves, crowned with eyes, its limbs
+// reaching
+fn draw_boss(g: Gfx, r: Run, i: Int, x: Int, y: Int, frame: Int) {
+    let t = r.table;
+    let f = r.foes;
+    let region = r.region;
+    let flash = f.flash.get(i) > 0;
+    let state = f.state.get(i);
+    let st = f.t.get(i);
+    shadow(g, x, y + 20, 22, 5);
+    // the limbs: curving lines, swaying
+    let limbs = 7 + region;
+    let mut k = 0;
+    while k < limbs {
+        let a = k * 1024 / limbs + (sin(t, frame * 6 + k * 90) >> 11);
+        let mut s = 0;
+        let mut lx = x;
+        let mut ly = y;
+        while s < 8 {
+            let bend = a + (sin(t, frame * 11 + k * 70 + s * 60) >> 10);
+            let nx = lx + ((cos(t, bend) * 5) >> 16);
+            let ny = ly + ((sin(t, bend) * 5) >> 16);
+            let c = if flash { 0xffffff } else if s < 6 { 0x1a0c22 } else { 0x2c1438 };
+            disc(g, nx, ny, (4 - s / 2).max(1), c);
+            lx = nx;
+            ly = ny;
+            s = s + 1;
+        }
+        k = k + 1;
+    }
+    // the body
+    let heave = sin(t, frame * 8) >> 14;
+    let level = lit_at(g, x, y);
+    let mut dy = -22;
+    while dy <= 22 {
+        let mut dx = -24;
+        while dx <= 24 {
+            let rr = 20 + heave + as_noise(hash(dx / 3, dy / 3, frame / 6) & 3);
+            if dx * dx + dy * dy * 5 / 4 < rr * rr {
+                let shade_i = 124 + ((3 - (dx + dy + 30) / 18).clamp(0, 3));
+                let c = if flash { 0xfff0e0 } else { g.shade.get((level << 7) + shade_i) };
+                put(g, x + dx, y + dy, c);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    // the eyes: a crown of them, red, gold in the middle; wide when it attacks
+    let eyes = 5 + region * 2;
+    let open = if state == 0 { 1 } else { 2 };
+    let mut e = 0;
+    while e < eyes {
+        // (spread over the top of it)
+        let a = 600 + e * 330 / (eyes - 1).max(1);
+        let ex = x + ((cos(t, a) * 13) >> 16);
+        let ey = y - 2 + ((sin(t, a) * 9) >> 16);
+        let c = if e == eyes / 2 { 0xffe070 } else { 0xff3828 };
+        rect(g, ex - 1, ey - open / 2, 2, open, c);
+        glow(g, ex, ey, 5, 0x401008);
+        e = e + 1;
+    }
+    if state == 3 && st < 45 {
+        // (gathering itself to charge: glowing red)
+        glow(g, x, y, 30 + st / 2, 0x300804);
+    }
+}
+
+// (a hash's lowest bits as a little wobble, -1 to 2)
+fn as_noise(h: Int) -> Int { h - 1 }
+
+fn draw_robot(g: Gfx, r: Run, v: View, frame: Int) {
+    if r.dead == 0 {
+        let (x, y) = (((r.x - v.x16) >> 4), ((r.y - v.y16) >> 4));
+        let blink = r.iframes > 0 && frame / 3 % 2 == 0;
+        shadow(g, x, y + 6, 6, 2);
+        if !blink {
+            let moving = r.moving > 0;
+            bot(g, x, y, 1, char_color(r.char), r.face, if moving { frame } else { 0 }, frame, r.table, lit_at(g, x, y), r.hurt > 0);
+        }
+        // its integrity, as a bar beneath it
+        let max = stat(r, st_maxhp()) * 16;
+        let hp = r.hp.max(0);
+        rect(g, x - 10, y + 10, 20, 3, 0x0c1014);
+        rect(g, x - 9, y + 11, 18 * hp / max.max(1), 1, if hp * 3 < max { 0xff4030 } else { 0x50e0d0 });
+    }
+}
+
+// a maintenance robot, its middle at (x, y), each of its pixels s x s:
+// treads, a white body with a stripe of its own color, a head with a
+// visor and a lens looking the way it faces (an angle), an antenna. Lit by
+// a level of light (see gfx), or all white if flash; its treads turn with
+// `rolling`
+pub fn bot(g: Gfx, x: Int, y: Int, s: Int, stripe: Int, face: Int, rolling: Int, frame: Int, t: Array<Int>, level: Int, flash: Bool) {
+    let lit = |c: Int| if flash { 0xffffff } else { g.shade.get((level << 7) + c) };
+    let dot = |gx: Int, gy: Int, c: Int| rect(g, x + gx * s, y + gy * s, s, s, c);
+    let (white, light, mid, dark) = (lit(95), lit(94), lit(93), lit(92));
+    let metal = lit(97);
+    // treads
+    let mut ty = 2;
+    while ty <= 5 {
+        let mark = if (ty + rolling / 4) % 2 == 0 { lit(98) } else { lit(96) };
+        dot(-6, ty, metal);
+        dot(-5, ty, mark);
+        dot(4, ty, mark);
+        dot(5, ty, metal);
+        ty = ty + 1;
+    }
+    // the body: a box with its corners off, lit from above
+    let mut by = -3;
+    while by <= 3 {
+        let mut bx = -4;
+        while bx <= 4 {
+            let corner = (bx == -4 || bx == 4) && (by == -3 || by == 3);
+            if !corner {
+                let c = if by == 0 { if flash { 0xffffff } else { stripe } } else if by == -3 { white } else if by == 3 { dark } else if bx == 4 { mid } else { light };
+                dot(bx, by, c);
+            }
+            bx = bx + 1;
+        }
+        by = by + 1;
+    }
+    // the head
+    let mut hy = -8;
+    while hy <= -4 {
+        let w = if hy == -8 { 2 } else { 3 };
+        let mut hx = -w;
+        while hx <= w {
+            dot(hx, hy, if hy == -8 { white } else if hx == w { mid } else { light });
+            hx = hx + 1;
+        }
+        hy = hy + 1;
+    }
+    // the visor, and the lens in it, toward where it's looking
+    let (lx, ly) = ((cos(t, face) * 2) >> 16, (sin(t, face) + 65536) >> 16);
+    dot(-2 + lx.clamp(-1, 1), -6 + ly.min(1), 0x10181c);
+    dot(-1 + lx.clamp(-1, 1), -6 + ly.min(1), 0x10181c);
+    dot(0 + lx.clamp(-1, 1), -6 + ly.min(1), 0x10181c);
+    dot(1 + lx.clamp(-1, 1), -6 + ly.min(1), 0x10181c);
+    dot(lx, -6 + ly.min(1), 0x80f8ff);
+    // the antenna, its tip blinking
+    dot(2, -9, mid);
+    dot(2, -10, mid);
+    dot(2, -11, if frame / 20 % 2 == 0 { 0xff4040 } else { 0x401010 });
+}
+
+fn draw_shots(g: Gfx, r: Run, v: View, frame: Int) {
+    let t = r.table;
+    let (px, py) = (((r.x - v.x16) >> 4), ((r.y - v.y16) >> 4));
+    // the lasers: from the robot, out to what stops them
+    if r.lv.get(laser()) > 0 {
+        let n = beam_count(r);
+        let len = beam_length(r);
+        let mut b = 0;
+        while b < n {
+            let a = r.beam + b * 1024 / n;
+            let far = super::light::reach(r.w, px + v.x, py + v.y - 4, a, len, t);
+            let (ex, ey) = (px + ((cos(t, a) * far) >> 16), py - 4 + ((sin(t, a) * far) >> 16));
+            ray(g, px, py - 4, ex, ey, 0xa02030);
+            ray(g, px + 1, py - 4, ex + 1, ey, 0x501018);
+            ray(g, px, py - 3, ex, ey + 1, 0x501018);
+            glow(g, ex, ey, 7, 0x902020);
+            put(g, ex, ey, 0xffe0e0);
+            b = b + 1;
+        }
+    }
+    // the drones: little round machines, a light on each
+    if r.lv.get(drones()) > 0 {
+        let n = drone_count(r);
+        let rad = drone_radius(r);
+        let evo = r.evo.get(drones()) > 0;
+        let mut k = 0;
+        while k < n {
+            let a = r.drones + k * 1024 / n;
+            let (x, y) = (px + ((cos(t, a) * rad) >> 16), py - 3 + ((sin(t, a) * rad) >> 16));
+            shadow(g, x, y + 6, 3, 1);
+            disc(g, x, y, if evo { 3 } else { 2 }, if evo { 0xe8f0f4 } else { 0xa8b4bc });
+            rect(g, x - 1, y - (if evo { 3 } else { 2 }), 3, 1, 0xffffff);
+            glow(g, x, y, if evo { 8 } else { 6 }, 0x105060);
+            put(g, x, y, 0x80ffff);
+            k = k + 1;
+        }
+    }
+    let s = r.shots;
+    let mut i = 0;
+    while i < count(s) {
+        let (x, y) = (((col(s, sh_x()).get(i) - v.x16) >> 4), ((col(s, sh_y()).get(i) - v.y16) >> 4));
+        let k = col(s, sh_kind()).get(i);
+        if k == 0 {
+            let (vx, vy) = (col(s, sh_vx()).get(i), col(s, sh_vy()).get(i));
+            let big = col(s, sh_r()).get(i) > 4;
+            // (a rivet, white-hot, a streak behind it)
+            ray(g, x, y, x - vx / 6, y - vy / 6, 0x604830);
+            ray(g, x, y, x - vx / 12, y - vy / 12, 0xa08860);
+            glow(g, x, y, if big { 8 } else { 4 }, if big { 0x406080 } else { 0x403020 });
+            put(g, x, y, 0xffffff);
+        } else if k == 1 {
+            // (a seeker: a tiny bot with a cyan eye, a trail behind)
+            let (vx, vy) = (col(s, sh_vx()).get(i), col(s, sh_vy()).get(i));
+            ray(g, x, y, x - vx / 5, y - vy / 5, 0x103848);
+            disc(g, x, y, 1, 0x90a0a8);
+            glow(g, x, y, 5, 0x104858);
+            put(g, x, y, 0xa0ffff);
+        } else {
+            // a crate falling: its shadow growing where it'll land, a
+            // warning ring, and the crate coming down
+            let left = col(s, sh_t()).get(i);
+            let radius = col(s, sh_r()).get(i);
+            ring(g, x, y, radius * left / 40 + 2, 1, if left / 4 % 2 == 0 { 0x604008 } else { 0x302004 });
+            shadow(g, x, y, 8 - left / 6, 3 - left / 16);
+            let cy = y - left * 6;
+            rect(g, x - 5, cy - 5, 11, 10, 0xd08030);
+            rect(g, x - 5, cy - 5, 11, 1, 0xffc070);
+            rect(g, x - 5, cy - 1, 11, 2, 0xe8c040);
+            rect(g, x - 5, cy + 4, 11, 1, 0x603010);
+        }
+        i = i + 1;
+    }
+    // shockwaves
+    let rg = r.rings;
+    i = 0;
+    while i < count(rg) {
+        let radius = col(rg, ri_r()).get(i);
+        if radius > 0 {
+            let (x, y) = ((col(rg, ri_x()).get(i) - v.x16) >> 4, (col(rg, ri_y()).get(i) - v.y16) >> 4);
+            let k = 256 - radius * 256 / col(rg, ri_max()).get(i).max(1);
+            ring(g, x, y, radius, 2, scale(0xa0f0ff, k));
+            ring(g, x, y, (radius - 6).max(0), 4, scale(0x103850, k));
+        }
+        i = i + 1;
+    }
+    // lightning: jagged strokes
+    let z = r.zaps;
+    i = 0;
+    while i < count(z) {
+        let (x0, y0, x1, y1) = (col(z, za_x0()).get(i) - v.x, col(z, za_y0()).get(i) - v.y, col(z, za_x1()).get(i) - v.x, col(z, za_y1()).get(i) - v.y);
+        let seed = col(z, za_seed()).get(i) + col(z, za_life()).get(i) / 3;
+        let life = col(z, za_life()).get(i);
+        let mut lx = x0;
+        let mut ly = y0;
+        let mut k = 1;
+        while k <= 6 {
+            let (tx, ty) = (x0 + (x1 - x0) * k / 6, y0 + (y1 - y0) * k / 6);
+            let j = if k == 6 { 0 } else { (hash(k, seed, 7) % 11) - 5 };
+            let (nx, ny) = (tx + j, ty + (hash(k, seed, 9) % 11) - 5);
+            ray(g, lx, ly, nx, ny, scale(0xe0f8ff, life * 21));
+            ray(g, lx + 1, ly, nx + 1, ny, scale(0x3070c0, life * 21));
+            lx = nx;
+            ly = ny;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    // the creatures' bolts
+    let bo = r.bolts;
+    i = 0;
+    while i < count(bo) {
+        let (x, y) = (((col(bo, bo_x()).get(i) - v.x16) >> 4), ((col(bo, bo_y()).get(i) - v.y16) >> 4));
+        if x > -10 && y > -10 && x < sw() + 10 && y < sh() + 10 {
+            glow(g, x, y, 6, 0x401060);
+            disc(g, x, y, 2, 0x200830);
+            put(g, x, y, 0xe0a0ff);
+        }
+        i = i + 1;
+    }
+}
+
+// ---- the HUD
+
+pub fn draw_hud(g: Gfx, r: Run, frame: Int) {
+    let w = sw();
+    // experience: a bar right across the top
+    let need = needed(r.level);
+    rect(g, 0, 0, w, 5, 0x060c10);
+    let fill = (w - 2) * r.xp / need.max(1);
+    let mut x = 0;
+    while x < fill {
+        let c = mix(0x105878, 0x70ffe0, x * 256 / w);
+        rect(g, 1 + x, 1, 1, 3, c);
+        x = x + 1;
+    }
+    rect(g, 1, 1, fill, 1, 0xd0fff8);
+    say(g, "LV " ++ r.level.show(), w - text_w(g, "LV " ++ r.level.show(), 1) - 4, 8, 1, 0xe8fcff);
+    // the time
+    let secs = r.time / 60;
+    let clock = (secs / 60).show().pad_left(2, "0") ++ ":" ++ (secs % 60).show().pad_left(2, "0");
+    say_mid(g, clock, 9, 2, if r.boss >= 0 { 0xff8070 } else { 0xfff4e0 });
+    // kills, credits, relays
+    say(g, r.kills.show() ++ " CLEARED", w - text_w(g, r.kills.show() ++ " CLEARED", 1) - 4, 18, 1, 0xc0d0d8);
+    say(g, r.credits.show() ++ " CREDITS", w - text_w(g, r.credits.show() ++ " CREDITS", 1) - 4, 28, 1, 0x70e0c0);
+    let lit = online_count(r);
+    say(g, lit.show() ++ "/" ++ relay_count(r.w).show() ++ " RELAYS", w - text_w(g, lit.show() ++ "/" ++ relay_count(r.w).show() ++ " RELAYS", 1) - 4, 38, 1, 0xa0e0ff);
+    // what the robot has: weapons on one row, modules beneath
+    let mut wn = 0;
+    let mut gn = 0;
+    let mut u = 0;
+    while u < 14 {
+        let lv = r.lv.get(u);
+        if lv > 0 {
+            let (ix, iy) = if is_weapon(u) { (4 + wn * 19, 8) } else { (4 + gn * 19, 28) };
+            // (only weapons evolve: there are eight of those)
+            let evolved = is_weapon(u) && r.evo.get(u) > 0;
+            rect(g, ix - 1, iy - 1, 18, 18, 0x080c10);
+            outline(g, ix - 1, iy - 1, 18, 18, if evolved { 0xffd060 } else { 0x2c4650 });
+            icon(g, u, ix, iy, 1, frame, r.table);
+            // its level, as pips
+            let mut p = 0;
+            while p < lv {
+                put(g, ix + 1 + p * 3, iy + 17, if evolved { 0xffe070 } else { 0x60e0d0 });
+                put(g, ix + 2 + p * 3, iy + 17, if evolved { 0xffe070 } else { 0x60e0d0 });
+                p = p + 1;
+            }
+            if is_weapon(u) { wn = wn + 1 } else { gn = gn + 1 }
+        }
+        u = u + 1;
+    }
+    // the nearest relay that's down, if it's off the screen: an arrow at the edge toward it
+    relay_arrow(g, r, frame);
+    // the boss's life
+    let bid = r.boss;
+    if bid >= 0 {
+        let f = r.foes;
+        let mut i = 0;
+        while i < count(f.p) {
+            if f.kind.get(i) == boss() {
+                let bw = 240;
+                let bx = (w - bw) / 2;
+                rect(g, bx - 2, sh() - 16, bw + 4, 8, 0x100608);
+                rect(g, bx, sh() - 14, bw * f.hp.get(i).max(0) / f.max.get(i).max(1), 4, 0xc02030);
+                rect(g, bx, sh() - 14, bw * f.hp.get(i).max(0) / f.max.get(i).max(1), 1, 0xff8080);
+                say_mid(g, boss_name(r.region), sh() - 27, 1, 0xffc0b0);
+            }
+            i = i + 1;
+        }
+    }
+    // the banner
+    let bt = r.banner_t;
+    if bt > 0 {
+        let s = r.banner;
+        let k = if bt > 190 { (210 - bt) * 12 } else if bt < 40 { bt * 6 } else { 240 };
+        let c = mix(0x000000, 0xe8fcff, k.min(256));
+        say_mid(g, s, 62, 2, c);
+    }
+}
+
+fn relay_arrow(g: Gfx, r: Run, frame: Int) {
+    let (px, py) = (r.x >> 4, r.y >> 4);
+    let mut best = -1;
+    let mut best_d = 1 << 40;
+    let mut b = 0;
+    while b < relay_count(r.w) {
+        if r.lit.get(b) == 0 {
+            let dx = r.w.relays.get(b * 2) - px;
+            let dy = r.w.relays.get(b * 2 + 1) - py;
+            if dx * dx + dy * dy < best_d {
+                best_d = dx * dx + dy * dy;
+                best = b;
+            }
+        }
+        b = b + 1;
+    }
+    if best >= 0 {
+        let dx = r.w.relays.get(best * 2) - px;
+        let dy = r.w.relays.get(best * 2 + 1) - py;
+        if dx.abs() > 230 || dy.abs() > 125 {
+            // (on the edge of a box inside the screen, in its direction)
+            let k = (dx.abs() * 256 / 215).max(dy.abs() * 256 / 112).max(1);
+            let (ax, ay) = (sw() / 2 + dx * 256 / k, sh() / 2 + dy * 256 / k);
+            let d = isqrt(best_d).max(1);
+            let (ux, uy) = (dx * 256 / d, dy * 256 / d);
+            let pulse = if frame / 15 % 2 == 0 { 0x90f0ff } else { 0x3090c0 };
+            let mut s = 0;
+            while s < 7 {
+                let w = (7 - s) / 2;
+                let cx = ax - ux * s / 256;
+                let cy = ay - uy * s / 256;
+                let mut q = -w;
+                while q <= w {
+                    put(g, cx - uy * q / 256, cy + ux * q / 256, pulse);
+                    q = q + 1;
+                }
+                s = s + 1;
+            }
+            glow(g, ax, ay, 8, 0x083040);
+        }
+    }
+}

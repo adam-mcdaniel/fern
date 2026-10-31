@@ -1,0 +1,63 @@
+// The standard library: numbers, comparing, Option and Result, lists,
+// and functions.
+
+fn numbers() {
+    println(2.pow(10).show() ++ " " ++ 84.gcd(36).show() ++ " " ++ 4.lcm(6).show() ++ " " ++ 1000000.isqrt().show() ++ " " ++ 1000.log2().show());
+    println((-7 / 2).show() ++ " " ++ (-7).div_floor(2).show() ++ " " ++ (-7 % 2).show() ++ " " ++ (-7).mod_floor(2).show());
+    println(255.to_base(16) ++ " " ++ (-10).to_base(2) ++ " " ++ 255.count_ones().show() ++ " " ++ 15.clamp(0, 10).show() ++ " " ++ (-3).sign().show());
+    println(max(3, 9).show() ++ " " ++ min("pear", "apple") ++ " " ++ ((1, "b") < (1, "c")).show() ++ " " ++ (false < true).show());
+}
+
+fn options() {
+    let parsed = ["42", "-17", "+3", "x9", ""].map(String::parse_int);
+    println(parsed.show());
+    println("ff".parse_base(16).show() ++ " " ++ "777".parse_base(8).show());
+    let doubled = Some(21).map(|x| x * 2);
+    println(doubled.show() ++ " " ++ Some(4).and_then(|x| if x > 5 { Some(x) } else { None }).show() ++ " " ++ None.or(Some(1)).show());
+    let r: Result<Int, String> = None.ok_or("missing");
+    let two: Result<Int, String> = Ok(2);
+    println(r.show() ++ " " ++ two.map(|x| x + 1).show() ++ " " ++ r.ok().show() ++ " " ++ r.is_err().show());
+}
+
+fn lists() {
+    let xs = (1..=10).to_list();
+    println(xs.take(3).show() ++ " " ++ xs.drop(7).show() ++ " " ++ xs.get(4).show() ++ " " ++ xs.last().show() ++ " " ++ xs.drop(20).head().show());
+    println(xs.filter(Int::is_even).show() ++ " " ++ xs.sum().show() ++ " " ++ (1..6).to_list().product().show() ++ " " ++ xs.count(|x| x % 3 == 0).show());
+    println(xs.take_while(|x| x < 4).show() ++ " " ++ xs.drop_while(|x| x < 8).show() ++ " " ++ (1..=10).step_by(3).show() ++ " " ++ (1..4).rev().show() ++ " " ++ (-2..3).show() ++ " " ++ (0..5).contains(5).show());
+    println([1, 2, 3].zip(["a", "b"]).show() ++ " " ++ ["x", "y"].enumerate().show() ++ " " ++ [(1, true), (2, false)].unzip().show());
+    println(xs.partition(|x| x > 6).show());
+    println(xs.chunks(4).show() ++ " " ++ [1, 2, 3].intersperse(0).show() ++ " " ++ [[1], [], [2, 3]].flatten().show());
+    println([1, 1, 2, 2, 2, 1].dedup().show() ++ " " ++ [3, 1, 3, 2, 1].unique().show() ++ " " ++ [1, 2, 3, 2].remove(2).show());
+    println([5, 3, 9, 1, 4, 1].sort().show() ++ " " ++ ["bb", "a", "ccc"].sort_by(|a, b| b.len() - a.len()).show() ++ " " ++ [(2, "two"), (1, "one")].sort_on(fst).show());
+    println([3, 8, 2].maximum().show() ++ " " ++ ["b", "a"].minimum().show() ++ " " ++ [1, 2, 3].reduce(|a, b| a * 10 + b).show() ++ " " ++ [1, 2, 3].fold_right(Nil, |x, acc| Cons(x * x, acc)).show());
+    println(xs.find(|x| x * x > 50).show() ++ " " ++ xs.position(|x| x > 4).show() ++ " " ++ ["a", "b"].index_of("b").show() ++ " " ++ xs.any(|x| x > 9).show() ++ " " ++ xs.all(|x| x > 1).show());
+    println([("one", 1), ("two", 2)].lookup("two").show() ++ " " ++ repeat("ab", 3).show() ++ " " ++ [1, 2].flat_map(|x| [x, x]).show());
+    let twice = compose(|x| x * 2, |x| x + 1);
+    println(twice(5).show() ++ " " ++ apply_n(|x| x * 3, 4, 1).show() ++ " " ++ flip(|a, b| a - b)(1, 10).show() ++ " " ++ id("same"));
+}
+
+fn main() {
+    numbers();
+    options();
+    lists();
+}
+// expect: 1024 12 12 1000 9
+// expect: -3 -4 -1 1
+// expect: ff -1010 8 10 -1
+// expect: 9 apple true true
+// expect: [Some(42), Some(-17), Some(3), None, None]
+// expect: Some(255) Some(511)
+// expect: Some(42) None Some(1)
+// expect: Err("missing") Ok(3) None true
+// expect: [1, 2, 3] [8, 9, 10] Some(5) Some(10) None
+// expect: [2, 4, 6, 8, 10] 55 120 3
+// expect: [1, 2, 3] [8, 9, 10] [1, 4, 7, 10] [3, 2, 1] -2..3 false
+// expect: [(1, "a"), (2, "b")] [(0, "x"), (1, "y")] ([1, 2], [true, false])
+// expect: ([7, 8, 9, 10], [1, 2, 3, 4, 5, 6])
+// expect: [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10]] [1, 0, 2, 0, 3] [1, 2, 3]
+// expect: [1, 2, 1] [3, 1, 2] [1, 3, 2]
+// expect: [1, 1, 3, 4, 5, 9] ["ccc", "bb", "a"] [(1, "one"), (2, "two")]
+// expect: Some(8) Some("a") Some(123) [1, 4, 9]
+// expect: Some(8) Some(4) Some(1) true false
+// expect: Some(2) ["ab", "ab", "ab"] [1, 1, 2, 2]
+// expect: 12 81 9 same

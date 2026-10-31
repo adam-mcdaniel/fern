@@ -1,0 +1,856 @@
+// What the ember fights with: eight weapons, each firing on its own, five
+// levels each and an evolution; six gifts that make the ember stronger;
+// what a hit does, and what a creature leaves when it dies.
+
+use crate::math::{sin, cos, isqrt};
+use super::run::*;
+use super::light::{reach};
+use super::gfx::{rgb};
+
+// ---- the upgrades: 0 to 7 the weapons, 8 to 13 the gifts
+
+pub fn flare() -> Int { 0 }
+pub fn halo() -> Int { 1 }
+pub fn sunbeam() -> Int { 2 }
+pub fn nova() -> Int { 3 }
+pub fn wisps() -> Int { 4 }
+pub fn kindle() -> Int { 5 }
+pub fn arc() -> Int { 6 }
+pub fn comet() -> Int { 7 }
+pub fn radiance() -> Int { 8 }
+pub fn kindling() -> Int { 9 }
+pub fn quickfoot() -> Int { 10 }
+pub fn ashheart() -> Int { 11 }
+pub fn lodestone() -> Int { 12 }
+pub fn fervor() -> Int { 13 }
+
+pub fn upgrades() -> Int { 14 }
+pub fn max_level() -> Int { 5 }
+pub fn is_weapon(u: Int) -> Bool { u < 8 }
+// how many of each the ember can carry
+pub fn slots() -> Int { 5 }
+
+pub fn name(u: Int) -> String {
+    if u == 0 { "FLARE" } else if u == 1 { "HALO" } else if u == 2 { "SUNBEAM" } else if u == 3 { "NOVA" }
+    else if u == 4 { "WISPS" } else if u == 5 { "KINDLE" } else if u == 6 { "ARC" } else if u == 7 { "COMET" }
+    else if u == 8 { "RADIANCE" } else if u == 9 { "KINDLING" } else if u == 10 { "QUICKFOOT" } else if u == 11 { "ASHHEART" }
+    else if u == 12 { "LODESTONE" } else { "FERVOR" }
+}
+
+// what a weapon becomes when it evolves, and the gift it needs to
+pub fn evolved_name(u: Int) -> String {
+    if u == 0 { "SUNSPEAR" } else if u == 1 { "CORONA" } else if u == 2 { "DAYBREAK" } else if u == 3 { "SUPERNOVA" }
+    else if u == 4 { "WILL-O-HOST" } else if u == 5 { "WILDFIRE" } else if u == 6 { "TEMPEST" } else { "STARFALL" }
+}
+
+pub fn partner(u: Int) -> Int {
+    if u == 0 { kindling() } else if u == 1 { radiance() } else if u == 2 { fervor() } else if u == 3 { ashheart() }
+    else if u == 4 { lodestone() } else if u == 5 { quickfoot() } else if u == 6 { radiance() } else { kindling() }
+}
+
+// what an upgrade does, for its card: (first line, second line), at the
+// level it'd go to
+pub fn describe(u: Int, level: Int) -> (String, String) {
+    if level == 1 {
+        if u == 0 { ("FIRES BOLTS OF FLAME", "AT THE NEAREST FOE") }
+        else if u == 1 { ("EMBERS CIRCLE YOU,", "BURNING WHAT THEY TOUCH") }
+        else if u == 2 { ("A BEAM OF SUNLIGHT", "SWEEPS AROUND YOU") }
+        else if u == 3 { ("A RING OF FIRE BURSTS", "OUT, HURLING FOES BACK") }
+        else if u == 4 { ("SPIRITS THAT HUNT", "THE DARK ON THEIR OWN") }
+        else if u == 5 { ("YOUR FOOTSTEPS", "LEAVE FIRE BEHIND") }
+        else if u == 6 { ("LIGHTNING THAT LEAPS", "FROM FOE TO FOE") }
+        else if u == 7 { ("STARS FALL ON FOES", "AND BURST") }
+        else if u == 8 { ("+10% AREA", "+12% LIGHT") }
+        else if u == 9 { ("+10% DAMAGE", "") }
+        else if u == 10 { ("+8% SPEED", "") }
+        else if u == 11 { ("+20 MAX FLAME", "MENDS SLOWLY") }
+        else if u == 12 { ("+30% REACH FOR", "EMBERS ON THE GROUND") }
+        else { ("WEAPONS FIRE 6%", "MORE OFTEN") }
+    } else if u < 8 {
+        let more = if u == 0 { if level == 2 || level == 4 { "+1 BOLT" } else if level == 5 { "+DAMAGE, PIERCES MORE" } else { "+DAMAGE, PIERCES" } }
+            else if u == 1 { if level == 3 { "+DAMAGE, WIDER" } else { "+1 EMBER" } }
+            else if u == 2 { if level == 4 { "A SECOND BEAM" } else { "+DAMAGE, LONGER" } }
+            else if u == 3 { "+DAMAGE, WIDER, SOONER" }
+            else if u == 4 { if level == 2 || level == 4 { "+1 SPIRIT" } else { "+DAMAGE" } }
+            else if u == 5 { "+DAMAGE, BIGGER, LONGER" }
+            else if u == 6 { "+1 LEAP, +DAMAGE" }
+            else { if level == 3 || level == 5 { "+1 STAR" } else { "+DAMAGE, BIGGER BURST" } };
+        (more, "")
+    } else {
+        describe(u, 1)
+    }
+}
+
+pub fn evolved_text(u: Int) -> (String, String) {
+    if u == 0 { ("LANCES OF THE SUN", "PIERCE EVERYTHING") }
+    else if u == 1 { ("A CROWN OF FIRE", "AROUND YOU") }
+    else if u == 2 { ("THREE BEAMS OF DAWN", "") }
+    else if u == 3 { ("TWO RINGS, AND", "THEY BURN TWICE AS HOT") }
+    else if u == 4 { ("A HOST OF SPIRITS", "THAT PASS THROUGH FOES") }
+    else if u == 5 { ("THE GROUND ITSELF", "CATCHES FIRE") }
+    else if u == 6 { ("A STORM: TWO ARCS", "THAT LEAP TEN TIMES") }
+    else { ("A RAIN OF STARS", "") }
+}
+
+// a number for each level, 1 to 5
+fn at(level: Int, a: Int, b: Int, c: Int, d: Int, e: Int) -> Int {
+    if level <= 1 { a } else if level == 2 { b } else if level == 3 { c } else if level == 4 { d } else { e }
+}
+
+// ---- the characters and their stats
+
+pub fn characters() -> Int { 4 }
+
+pub fn char_name(c: Int) -> String {
+    if c == 0 { "EMBER" } else if c == 1 { "WICK" } else if c == 2 { "CINDER" } else { "PYRE" }
+}
+
+pub fn char_text(c: Int) -> (String, String) {
+    if c == 0 { ("THE LAST SPARK OF THE SUN.", "STARTS WITH FLARE.") }
+    else if c == 1 { ("SLOW, AND HARD TO PUT OUT.", "STARTS WITH HALO. +40 FLAME, 1 ARMOR.") }
+    else if c == 2 { ("QUICK AND FIERCE, AND FRAIL.", "STARTS WITH SUNBEAM. +15% SPEED, -20 FLAME.") }
+    else { ("A FIRE THAT CALLS THE STARS.", "STARTS WITH COMET. +15% AREA, -5% SPEED.") }
+}
+
+pub fn first_weapon(c: Int) -> Int {
+    if c == 0 { flare() } else if c == 1 { halo() } else if c == 2 { sunbeam() } else { comet() }
+}
+
+// the ember's flame colors: (core, flame, edge)
+pub fn char_colors(c: Int) -> (Int, Int, Int) {
+    if c == 0 { (rgb(255, 250, 220), rgb(255, 170, 50), rgb(220, 70, 20)) }
+    else if c == 1 { (rgb(255, 255, 240), rgb(255, 225, 140), rgb(230, 150, 60)) }
+    else if c == 2 { (rgb(255, 235, 200), rgb(255, 100, 40), rgb(190, 30, 30)) }
+    else { (rgb(240, 245, 255), rgb(150, 160, 255), rgb(110, 60, 220)) }
+}
+
+// the hearth's upgrades, bought with cinders between nights
+pub fn hearth_count() -> Int { 10 }
+
+pub fn hearth_name(h: Int) -> String {
+    if h == 0 { "MIGHT" } else if h == 1 { "VITALITY" } else if h == 2 { "SWIFTNESS" } else if h == 3 { "REACH" }
+    else if h == 4 { "HASTE" } else if h == 5 { "MAGNETISM" } else if h == 6 { "WARDING" } else if h == 7 { "GREED" }
+    else if h == 8 { "FORESIGHT" } else { "REKINDLE" }
+}
+
+pub fn hearth_text(h: Int) -> String {
+    if h == 0 { "+5% DAMAGE A LEVEL" } else if h == 1 { "+10 FLAME A LEVEL" } else if h == 2 { "+4% SPEED A LEVEL" }
+    else if h == 3 { "+4% AREA A LEVEL" } else if h == 4 { "WEAPONS 3% QUICKER A LEVEL" } else if h == 5 { "+15% EMBER REACH A LEVEL" }
+    else if h == 6 { "1 LESS DAMAGE FROM EACH HIT" } else if h == 7 { "+10% CINDERS A LEVEL" }
+    else if h == 8 { "A FOURTH CHOICE AT EACH LEVEL" } else { "RISE AGAIN ONCE A NIGHT" }
+}
+
+pub fn hearth_max(h: Int) -> Int { if h == 8 || h == 9 { 1 } else if h == 6 { 3 } else { 5 } }
+
+pub fn hearth_cost(h: Int, level: Int) -> Int {
+    if h == 8 { 400 } else if h == 9 { 500 } else { 30 + level * 45 + level * level * 15 }
+}
+
+// the stats, worked out again from the character, the hearth and the gifts
+pub fn restat(r: Run) {
+    let c = get(r, k_char());
+    let m = r.meta;
+    let lv = r.lv;
+    let s = r.stat;
+    array_set(s, st_might(), 100 + array_get(m, 0) * 5 + array_get(lv, kindling()) * 10);
+    array_set(s, st_area(), 100 + array_get(m, 3) * 4 + array_get(lv, radiance()) * 10 + (if c == 3 { 15 } else { 0 }));
+    array_set(s, st_speed(), 100 + array_get(m, 2) * 4 + array_get(lv, quickfoot()) * 8 + (if c == 1 { -10 } else if c == 2 { 15 } else if c == 3 { -5 } else { 0 }));
+    array_set(s, st_haste(), (100 - array_get(m, 4) * 3 - array_get(lv, fervor()) * 6).max(40));
+    array_set(s, st_magnet(), 100 + array_get(m, 5) * 15 + array_get(lv, lodestone()) * 30);
+    array_set(s, st_maxhp(), 100 + array_get(m, 1) * 10 + array_get(lv, ashheart()) * 20 + (if c == 1 { 40 } else if c == 2 { -20 } else { 0 }));
+    array_set(s, st_regen(), array_get(lv, ashheart()) * 2);
+    array_set(s, st_armor(), array_get(m, 6) + (if c == 1 { 1 } else { 0 }));
+    array_set(s, st_amount(), if array_get(lv, fervor()) >= 5 { 1 } else { 0 });
+    array_set(s, st_greed(), 100 + array_get(m, 7) * 10);
+    array_set(s, st_light(), 100 + array_get(lv, radiance()) * 12);
+    array_set(s, st_choices(), 3 + array_get(m, 8));
+}
+
+fn might(r: Run, x: Int) -> Int { x * stat(r, st_might()) / 100 }
+fn area(r: Run, x: Int) -> Int { x * stat(r, st_area()) / 100 }
+fn haste(r: Run, x: Int) -> Int { x * stat(r, st_haste()) / 100 }
+
+// ---- sparks, numbers, flashes
+
+pub fn spark(r: Run, x: Int, y: Int, vx: Int, vy: Int, life: Int, color: Int, kind: Int) {
+    let p = r.sparks;
+    let i = spawn(p);
+    if i >= 0 {
+        array_set(col(p, sp_x()), i, x);
+        array_set(col(p, sp_y()), i, y);
+        array_set(col(p, sp_vx()), i, vx);
+        array_set(col(p, sp_vy()), i, vy);
+        array_set(col(p, sp_life()), i, life);
+        array_set(col(p, sp_max()), i, life);
+        array_set(col(p, sp_color()), i, color);
+        array_set(col(p, sp_kind()), i, kind);
+    }
+}
+
+// n sparks bursting from (x, y), as fast as `speed` (16ths a frame)
+pub fn burst(r: Run, x: Int, y: Int, n: Int, color: Int, speed: Int, life: Int) {
+    let mut k = 0;
+    while k < n {
+        let a = roll(r, 1024);
+        let s = speed / 3 + roll(r, speed);
+        spark(r, x, y, (cos(r.table, a) * s) >> 16, (sin(r.table, a) * s) >> 16, life / 2 + roll(r, life), color, 0);
+        k = k + 1;
+    }
+}
+
+// embers rising, drifting, flickering out
+pub fn embers(r: Run, x: Int, y: Int, n: Int, color: Int) {
+    let mut k = 0;
+    while k < n {
+        spark(r, x + roll(r, 96) - 48, y + roll(r, 64) - 32, roll(r, 13) - 6, -6 - roll(r, 14), 30 + roll(r, 40), color, 1);
+        k = k + 1;
+    }
+}
+
+pub fn number(r: Run, x: Int, y: Int, value: Int, color: Int) {
+    let p = r.nums;
+    let i = spawn(p);
+    if i >= 0 {
+        array_set(col(p, nu_x()), i, x + roll(r, 96) - 48);
+        array_set(col(p, nu_y()), i, y - 96);
+        array_set(col(p, nu_value()), i, value);
+        array_set(col(p, nu_life()), i, 36);
+        array_set(col(p, nu_color()), i, color);
+    }
+}
+
+// a burst of light at (x, y) (16ths), r pixels, fading over `life` frames
+pub fn flash(r: Run, x: Int, y: Int, radius: Int, life: Int, warm: Int, cool: Int) {
+    let p = r.flashes;
+    let i = spawn(p);
+    if i >= 0 {
+        array_set(col(p, fl_x()), i, x >> 4);
+        array_set(col(p, fl_y()), i, y >> 4);
+        array_set(col(p, fl_r()), i, radius);
+        array_set(col(p, fl_life()), i, life);
+        array_set(col(p, fl_max()), i, life);
+        array_set(col(p, fl_warm()), i, warm);
+        array_set(col(p, fl_cool()), i, cool);
+    }
+}
+
+pub fn shake(r: Run, amount: Int) { keep(r, k_shake(), get(r, k_shake()).max(amount)) }
+
+// ---- hits and deaths
+
+// the sounds' numbers (see sound.fern)
+pub fn s_hit() -> Int { 0 }
+pub fn s_pop() -> Int { 1 }
+pub fn s_ember() -> Int { 2 }
+pub fn s_hurt() -> Int { 3 }
+pub fn s_flare() -> Int { 4 }
+pub fn s_nova() -> Int { 5 }
+pub fn s_boom() -> Int { 6 }
+pub fn s_zap() -> Int { 7 }
+pub fn s_ignite() -> Int { 8 }
+pub fn s_chest() -> Int { 9 }
+pub fn s_level() -> Int { 10 }
+pub fn s_roar() -> Int { 11 }
+pub fn s_spit() -> Int { 12 }
+pub fn s_snuff() -> Int { 13 }
+pub fn s_wisp() -> Int { 14 }
+pub fn s_heal() -> Int { 15 }
+pub fn s_big() -> Int { 16 }
+pub fn s_alarm() -> Int { 17 }
+pub fn s_coin() -> Int { 18 }
+
+// a creature hurt by a weapon, pushed (kx, ky) (16ths a frame)
+pub fn hurt(r: Run, i: Int, dmg: Int, kx: Int, ky: Int, weapon: Int) {
+    let f = r.foes;
+    let hp = array_get(f.hp, i);
+    if hp > 0 {
+        let d = dmg.max(1);
+        array_set(f.hp, i, hp - d);
+        array_set(f.flash, i, 6);
+        // (the heavy hardly move)
+        let kind = array_get(f.kind, i);
+        let heavy = if kind == boss() { 0 } else if array_get(f.elite, i) > 0 { 3 } else if kind == husk() || kind == wraith() { 2 } else { 1 };
+        if heavy > 0 {
+            array_set(f.vx, i, array_get(f.vx, i) + kx / heavy);
+            array_set(f.vy, i, array_get(f.vy, i) + ky / heavy);
+        }
+        if weapon >= 0 && weapon < 8 { array_set(r.dealt, weapon, array_get(r.dealt, weapon) + d.min(hp)) }
+        number(r, array_get(f.x, i), array_get(f.y, i), d, if d >= 40 { rgb(255, 220, 90) } else { rgb(255, 245, 230) });
+        sound(r, s_hit(), kind, array_get(f.x, i));
+        if hp - d <= 0 { die(r, i) }
+    }
+}
+
+fn die(r: Run, i: Int) {
+    let f = r.foes;
+    let (x, y) = (array_get(f.x, i), array_get(f.y, i));
+    let kind = array_get(f.kind, i);
+    let elite = array_get(f.elite, i) > 0;
+    inc(r, k_kills(), 1);
+    let color = if kind == gloom() { rgb(170, 110, 230) } else if kind == shade() { rgb(140, 220, 255) } else if kind == husk() { rgb(255, 140, 60) }
+        else if kind == bat() { rgb(255, 80, 70) } else if kind == spitter() { rgb(150, 255, 110) } else if kind == snuffer() { rgb(220, 230, 240) }
+        else if kind == wraith() { rgb(255, 70, 110) } else { rgb(255, 230, 160) };
+    burst(r, x, y, if elite { 40 } else { 9 }, color, if elite { 70 } else { 40 }, 22);
+    embers(r, x, y, 3, rgb(255, 150, 50));
+    sound(r, s_pop(), kind, x);
+    if kind == boss() {
+        keep(r, k_won(), 1);
+    } else {
+        drop_thing(r, x, y, 0, array_get(f.xp, i));
+        if elite {
+            drop_thing(r, x + 160, y, 3, 1);
+            flash(r, x, y, 90, 30, 255, 60);
+            shake(r, 6);
+            keep(r, k_freeze(), 4);
+            sound(r, s_big(), 0, x);
+        } else {
+            let luck = roll(r, 1000);
+            if luck < 7 { drop_thing(r, x, y, 1, 30) }
+            else if luck < 9 { drop_thing(r, x, y, 2, 0) }
+            else if luck < 24 { drop_thing(r, x, y, 4, 1) }
+        }
+    }
+}
+
+// a thing dropped at (x, y): 0 an ember (worth value), 1 a coal (heals),
+// 2 a lodestar (pulls in every ember), 3 a chest, 4 a cinder
+pub fn drop_thing(r: Run, x: Int, y: Int, kind: Int, value: Int) {
+    let p = r.drops;
+    // (when there are too many, an ember's worth goes to an old one instead)
+    if kind == 0 && count(p) >= p.cap - 40 {
+        let j = roll(r, count(p));
+        if array_get(col(p, dr_kind()), j) == 0 {
+            array_set(col(p, dr_value()), j, array_get(col(p, dr_value()), j) + value);
+        }
+    } else {
+        let i = spawn(p);
+        if i >= 0 {
+            array_set(col(p, dr_x()), i, x);
+            array_set(col(p, dr_y()), i, y);
+            array_set(col(p, dr_kind()), i, kind);
+            array_set(col(p, dr_value()), i, value.max(1));
+            array_set(col(p, dr_t()), i, roll(r, 60));
+        }
+    }
+}
+
+// ---- the weapons, each frame
+
+pub fn fire_weapons(r: Run) {
+    let mut u = 0;
+    while u < 8 {
+        let lv = array_get(r.lv, u);
+        if lv > 0 {
+            let evo = array_get(r.evo, u) > 0;
+            if u == halo() { spin_halo(r, lv, evo) }
+            else if u == sunbeam() { sweep_beams(r, lv, evo) }
+            else {
+                let left = array_get(r.cd, u) - 1;
+                if left <= 0 {
+                    let fired = shoot(r, u, lv, evo);
+                    array_set(r.cd, u, if fired { cooldown(r, u, lv, evo) } else { 10 });
+                } else {
+                    array_set(r.cd, u, left);
+                }
+            }
+        }
+        u = u + 1;
+    }
+}
+
+fn cooldown(r: Run, u: Int, lv: Int, evo: Bool) -> Int {
+    let base = if u == flare() { if evo { 24 } else { at(lv, 44, 40, 36, 32, 28) } }
+        else if u == nova() { if evo { 100 } else { at(lv, 170, 160, 148, 136, 120) } }
+        else if u == wisps() { if evo { 60 } else { at(lv, 110, 100, 92, 84, 76) } }
+        else if u == kindle() { if evo { 14 } else { at(lv, 30, 27, 24, 21, 18) } }
+        else if u == arc() { if evo { 44 } else { at(lv, 80, 74, 68, 62, 54) } }
+        else { if evo { 80 } else { at(lv, 140, 130, 120, 110, 96) } };
+    haste(r, base).max(6)
+}
+
+// a weapon fired: whether it did (some need something to aim at)
+fn shoot(r: Run, u: Int, lv: Int, evo: Bool) -> Bool {
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let amount = stat(r, st_amount());
+    if u == flare() {
+        let target = nearest(r, px, py, 300);
+        let (ax, ay) = if target >= 0 { unit(array_get(r.foes.x, target) - px, array_get(r.foes.y, target) - py) }
+            else { ((cos(r.table, get(r, k_face())) >> 8), (sin(r.table, get(r, k_face())) >> 8)) };
+        let n = (if evo { 4 } else { at(lv, 1, 2, 2, 3, 3) }) + amount;
+        let dmg = might(r, if evo { 32 } else { at(lv, 12, 13, 16, 18, 22) });
+        let pierce = if evo { 8 } else { at(lv, 1, 1, 2, 2, 3) };
+        let speed = if evo { 100 } else { 82 };
+        let mut k = 0;
+        while k < n {
+            // (fanned out, a twentieth of a turn apart)
+            let a = (k * 2 - (n - 1)) * 26;
+            let (c, s) = (cos(r.table, a), sin(r.table, a));
+            let (dx, dy) = ((ax * c - ay * s) >> 16, (ax * s + ay * c) >> 16);
+            new_shot(r, 0, px, py, dx * speed / 256, dy * speed / 256, 70, dmg, pierce, if evo { 6 } else { 4 });
+            k = k + 1;
+        }
+        sound(r, s_flare(), if evo { 1 } else { 0 }, px);
+        true
+    } else if u == nova() {
+        let rings = r.rings;
+        let n = if evo { 2 } else { 1 };
+        let mut k = 0;
+        while k < n {
+            let i = spawn(rings);
+            if i >= 0 {
+                inc(r, k_nova(), 1);
+                array_set(col(rings, ri_x()), i, px);
+                array_set(col(rings, ri_y()), i, py);
+                array_set(col(rings, ri_r()), i, -k * 90);
+                array_set(col(rings, ri_max()), i, area(r, if evo { 150 } else { at(lv, 80, 88, 96, 104, 116) }));
+                array_set(col(rings, ri_dmg()), i, might(r, if evo { 70 } else { at(lv, 20, 25, 30, 36, 45) }));
+                array_set(col(rings, ri_id()), i, get(r, k_nova()));
+                array_set(col(rings, ri_life()), i, 1);
+            }
+            k = k + 1;
+        }
+        sound(r, s_nova(), 0, px);
+        flash(r, px, py, 80, 16, 200, 40);
+        true
+    } else if u == wisps() {
+        let n = (if evo { 6 } else { at(lv, 1, 2, 2, 3, 3) }) + amount;
+        let dmg = might(r, if evo { 30 } else { at(lv, 12, 14, 17, 20, 24) });
+        let mut k = 0;
+        while k < n {
+            let a = roll(r, 1024);
+            new_shot(r, 1, px, py, (cos(r.table, a) * 30) >> 16, (sin(r.table, a) * 30) >> 16, if evo { 300 } else { 220 }, dmg, if evo { 3 } else { 1 }, 5);
+            k = k + 1;
+        }
+        sound(r, s_wisp(), 0, px);
+        true
+    } else if u == kindle() {
+        // (only while moving: fire where the ember has just been)
+        if get(r, k_moving()) > 0 {
+            let fires = r.fires;
+            let i = spawn(fires);
+            if i >= 0 {
+                let life = if evo { 300 } else { at(lv, 120, 150, 170, 190, 220) };
+                array_set(col(fires, fi_x()), i, px);
+                array_set(col(fires, fi_y()), i, py + 64);
+                array_set(col(fires, fi_life()), i, life);
+                array_set(col(fires, fi_max()), i, life);
+                array_set(col(fires, fi_r()), i, area(r, if evo { 22 } else { at(lv, 12, 13, 14, 15, 17) }));
+                array_set(col(fires, fi_dmg()), i, might(r, if evo { 14 } else { at(lv, 4, 5, 6, 7, 9) }));
+            }
+            true
+        } else { false }
+    } else if u == arc() {
+        let casts = if evo { 2 } else { 1 };
+        let mut any = false;
+        let mut k = 0;
+        while k < casts {
+            if lightning(r, if evo { 10 } else { at(lv, 3, 4, 5, 6, 7) } + amount, might(r, if evo { 40 } else { at(lv, 16, 19, 22, 26, 30) }), area(r, 70)) { any = true }
+            k = k + 1;
+        }
+        if any { sound(r, s_zap(), 0, px) }
+        any
+    } else {
+        // comets: at creatures near enough to see, or anywhere about
+        let n = (if evo { 6 } else { at(lv, 1, 1, 2, 2, 3) }) + amount;
+        let found = nearby(r, px, py, 220);
+        let mut k = 0;
+        while k < n {
+            let (tx, ty) = if found > 0 {
+                let j = array_get(r.near, roll(r, found));
+                (array_get(r.foes.x, j), array_get(r.foes.y, j))
+            } else { (px + (roll(r, 320) - 160) * 16, py + (roll(r, 200) - 100) * 16) };
+            let i = new_shot(r, 2, tx, ty, 0, 0, 40 + k * 8, might(r, if evo { 120 } else { at(lv, 40, 50, 60, 70, 90) }), 0, area(r, if evo { 44 } else { at(lv, 26, 28, 30, 32, 36) }));
+            if i >= 0 { array_set(col(r.shots, sh_t()), i, 40 + k * 8) }
+            k = k + 1;
+        }
+        true
+    }
+}
+
+// (dx, dy) as a direction 256 long
+pub fn unit(dx: Int, dy: Int) -> (Int, Int) {
+    let d = isqrt(dx * dx + dy * dy).max(1);
+    (dx * 256 / d, dy * 256 / d)
+}
+
+fn new_shot(r: Run, kind: Int, x: Int, y: Int, vx: Int, vy: Int, life: Int, dmg: Int, pierce: Int, radius: Int) -> Int {
+    let p = r.shots;
+    let i = spawn(p);
+    if i >= 0 {
+        array_set(col(p, sh_x()), i, x);
+        array_set(col(p, sh_y()), i, y);
+        array_set(col(p, sh_vx()), i, vx);
+        array_set(col(p, sh_vy()), i, vy);
+        array_set(col(p, sh_life()), i, life);
+        array_set(col(p, sh_kind()), i, kind);
+        array_set(col(p, sh_dmg()), i, dmg);
+        array_set(col(p, sh_pierce()), i, pierce);
+        array_set(col(p, sh_r()), i, radius);
+        array_set(col(p, sh_hit()), i, -1);
+    }
+    i
+}
+
+// lightning: at a creature near the ember, then leaping to the nearest
+// it hasn't struck yet, again and again
+fn lightning(r: Run, leaps: Int, dmg: Int, range: Int) -> Bool {
+    let f = r.foes;
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let found = nearby(r, px, py, 200);
+    if found == 0 { false } else {
+        let struck = array(16, -1);
+        let mut at_i = array_get(r.near, roll(r, found));
+        let mut fx = px;
+        let mut fy = py - 96;
+        let mut k = 0;
+        while k < leaps && at_i >= 0 {
+            let (tx, ty) = (array_get(f.x, at_i), array_get(f.y, at_i));
+            zap(r, fx, fy, tx, ty);
+            flash(r, tx, ty, 40, 10, 40, 255);
+            array_set(struck, k.min(15), array_get(f.id, at_i));
+            hurt(r, at_i, dmg, 0, 0, arc());
+            fx = tx;
+            fy = ty;
+            // (the next: the nearest not struck yet)
+            let n = nearby(r, tx, ty, range);
+            let mut best = -1;
+            let mut best_d = 1 << 60;
+            let mut j = 0;
+            while j < n {
+                let c = array_get(r.near, j);
+                let id = array_get(f.id, c);
+                let mut seen = false;
+                let mut s = 0;
+                while s < 16 {
+                    if array_get(struck, s) == id { seen = true }
+                    s = s + 1;
+                }
+                let dx = array_get(f.x, c) - tx;
+                let dy = array_get(f.y, c) - ty;
+                if !seen && dx * dx + dy * dy < best_d {
+                    best_d = dx * dx + dy * dy;
+                    best = c;
+                }
+                j = j + 1;
+            }
+            at_i = best;
+            k = k + 1;
+        }
+        true
+    }
+}
+
+fn zap(r: Run, x0: Int, y0: Int, x1: Int, y1: Int) {
+    let p = r.zaps;
+    let i = spawn(p);
+    if i >= 0 {
+        array_set(col(p, za_x0()), i, x0 >> 4);
+        array_set(col(p, za_y0()), i, y0 >> 4);
+        array_set(col(p, za_x1()), i, x1 >> 4);
+        array_set(col(p, za_y1()), i, y1 >> 4);
+        array_set(col(p, za_life()), i, 12);
+        array_set(col(p, za_seed()), i, roll(r, 100000));
+    }
+}
+
+// the halo: embers circling, each hurting what it touches (each creature
+// at most every third of a second)
+pub fn halo_radius(r: Run) -> Int {
+    let lv = array_get(r.lv, halo());
+    area(r, if array_get(r.evo, halo()) > 0 { 56 } else { at(lv, 34, 36, 40, 42, 46) })
+}
+
+pub fn halo_count(r: Run) -> Int {
+    let lv = array_get(r.lv, halo());
+    if array_get(r.evo, halo()) > 0 { 8 } else { at(lv, 2, 3, 3, 4, 5) + stat(r, st_amount()) }
+}
+
+fn spin_halo(r: Run, lv: Int, evo: Bool) {
+    let f = r.foes;
+    inc(r, k_halo(), if evo { 12 } else { 9 });
+    let n = halo_count(r);
+    let radius = halo_radius(r);
+    let orb = area(r, if evo { 8 } else { 6 });
+    let dmg = might(r, if evo { 26 } else { at(lv, 8, 10, 12, 15, 18) });
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let mut k = 0;
+    while k < n {
+        let a = get(r, k_halo()) + k * 1024 / n;
+        let (ox, oy) = (px + ((cos(r.table, a) * radius) >> 12), py + ((sin(r.table, a) * radius) >> 12));
+        let found = nearby(r, ox, oy, orb + 10);
+        let mut j = 0;
+        while j < found {
+            let i = array_get(r.near, j);
+            let reach_px = orb + array_get(f.r, i);
+            let dx = array_get(f.x, i) - ox;
+            let dy = array_get(f.y, i) - oy;
+            if array_get(f.halo, i) == 0 && dx * dx + dy * dy < reach_px * reach_px * 256 {
+                array_set(f.halo, i, 20);
+                let (ux, uy) = unit(array_get(f.x, i) - px, array_get(f.y, i) - py);
+                hurt(r, i, dmg, ux / 8, uy / 8, halo());
+            }
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+}
+
+// the sunbeams: turning round the ember, stopped by what blocks light;
+// what's in one is burned a little every few frames
+pub fn beam_count(r: Run) -> Int {
+    if array_get(r.evo, sunbeam()) > 0 { 3 } else { at(array_get(r.lv, sunbeam()), 1, 1, 1, 2, 2) }
+}
+
+pub fn beam_length(r: Run) -> Int {
+    area(r, if array_get(r.evo, sunbeam()) > 0 { 200 } else { at(array_get(r.lv, sunbeam()), 110, 124, 138, 150, 166) })
+}
+
+pub fn beam_width(r: Run) -> Int { if array_get(r.evo, sunbeam()) > 0 { 30 } else { 22 } }
+
+fn sweep_beams(r: Run, lv: Int, evo: Bool) {
+    let f = r.foes;
+    inc(r, k_beam(), if evo { 8 } else { 6 });
+    let n = beam_count(r);
+    let len = beam_length(r);
+    let half = beam_width(r) / 2;
+    let dmg = might(r, if evo { 16 } else { at(lv, 5, 6, 8, 9, 11) });
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let found = nearby(r, px, py, len + 10);
+    let mut b = 0;
+    while b < n {
+        let a = get(r, k_beam()) + b * 1024 / n;
+        let (bx, by) = (cos(r.table, a), sin(r.table, a));
+        let far = reach(r.w, px >> 4, py >> 4, a, len, r.table) * 16;
+        // (the beam's half width, as a slope: tan of half the angle, in 256ths)
+        let slope = sin(r.table, half) * 256 / cos(r.table, half);
+        let mut j = 0;
+        while j < found {
+            let i = array_get(r.near, j);
+            let dx = array_get(f.x, i) - px;
+            let dy = array_get(f.y, i) - py;
+            let along = (dx * bx + dy * by) >> 16;
+            let across = ((dx * by - dy * bx) >> 16).abs();
+            if along > 0 && along < far && across * 256 < along * slope + array_get(f.r, i) * 256 * 16 && array_get(f.beam, i) == 0 {
+                array_set(f.beam, i, 8);
+                hurt(r, i, dmg, bx >> 13, by >> 13, sunbeam());
+            }
+            j = j + 1;
+        }
+        b = b + 1;
+    }
+}
+
+// ---- what the weapons made, each frame
+
+pub fn move_shots(r: Run) {
+    let p = r.shots;
+    let f = r.foes;
+    let (xs, ys, vxs, vys, life, kind) = (col(p, sh_x()), col(p, sh_y()), col(p, sh_vx()), col(p, sh_vy()), col(p, sh_life()), col(p, sh_kind()));
+    let n = count(p);
+    let mut i = 0;
+    while i < n {
+        let k = array_get(kind, i);
+        if k == 2 {
+            // a comet, falling: when it lands, it bursts
+            let t = array_get(col(p, sh_t()), i) - 1;
+            array_set(col(p, sh_t()), i, t);
+            if t <= 0 {
+                let (x, y) = (array_get(xs, i), array_get(ys, i));
+                let radius = array_get(col(p, sh_r()), i);
+                let found = nearby(r, x, y, radius + 8);
+                let mut j = 0;
+                while j < found {
+                    let c = array_get(r.near, j);
+                    let (ux, uy) = unit(array_get(f.x, c) - x, array_get(f.y, c) - y);
+                    hurt(r, c, array_get(col(p, sh_dmg()), i), ux / 6, uy / 6, comet());
+                    j = j + 1;
+                }
+                burst(r, x, y, 26, rgb(255, 190, 90), 70, 26);
+                embers(r, x, y, 10, rgb(255, 120, 40));
+                flash(r, x, y, radius * 3, 24, 255, 80);
+                shake(r, 5);
+                sound(r, s_boom(), 0, x);
+                array_set(life, i, 0);
+            }
+        } else {
+            if k == 1 && (array_get(life, i) + i) % 8 == 0 {
+                // a wisp, turning toward the nearest creature
+                let target = nearest(r, array_get(xs, i), array_get(ys, i), 160);
+                if target >= 0 {
+                    let (ux, uy) = unit(array_get(f.x, target) - array_get(xs, i), array_get(f.y, target) - array_get(ys, i));
+                    let vx = array_get(vxs, i) + ux * 14 / 256;
+                    let vy = array_get(vys, i) + uy * 14 / 256;
+                    let (sx, sy) = unit(vx, vy);
+                    array_set(vxs, i, sx * 44 / 256);
+                    array_set(vys, i, sy * 44 / 256);
+                }
+            }
+            let x = array_get(xs, i) + array_get(vxs, i);
+            let y = array_get(ys, i) + array_get(vys, i);
+            array_set(xs, i, x);
+            array_set(ys, i, y);
+            array_set(life, i, array_get(life, i) - 1);
+            // (flame and spirits both: stopped by trees and walls)
+            if !walkable16(r, x, y) && super::world::occ_at(r.w, x >> 4, y >> 4) == super::world::walls() {
+                array_set(life, i, 0);
+                burst(r, x, y, 4, if k == 1 { rgb(120, 220, 255) } else { rgb(255, 160, 60) }, 30, 12);
+            }
+            let radius = array_get(col(p, sh_r()), i);
+            let found = nearby(r, x, y, radius + 10);
+            let mut j = 0;
+            while j < found && array_get(life, i) > 0 {
+                let c = array_get(r.near, j);
+                let reach_px = radius + array_get(f.r, c);
+                let dx = array_get(f.x, c) - x;
+                let dy = array_get(f.y, c) - y;
+                if dx * dx + dy * dy < reach_px * reach_px * 256 && array_get(f.id, c) != array_get(col(p, sh_hit()), i) {
+                    array_set(col(p, sh_hit()), i, array_get(f.id, c));
+                    hurt(r, c, array_get(col(p, sh_dmg()), i), array_get(vxs, i) / 3, array_get(vys, i) / 3, if k == 1 { wisps() } else { flare() });
+                    burst(r, x, y, 3, if k == 1 { rgb(140, 230, 255) } else { rgb(255, 200, 100) }, 30, 10);
+                    let left = array_get(col(p, sh_pierce()), i) - 1;
+                    array_set(col(p, sh_pierce()), i, left);
+                    if left <= 0 { array_set(life, i, 0) }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    sweep(p, sh_life());
+}
+
+// novas spreading: each creature they reach hurt once and thrown back
+pub fn spread_rings(r: Run) {
+    let p = r.rings;
+    let f = r.foes;
+    let n = count(p);
+    let mut i = 0;
+    while i < n {
+        let radius = array_get(col(p, ri_r()), i) + 5;
+        array_set(col(p, ri_r()), i, radius);
+        if radius > 0 {
+            let (x, y) = (array_get(col(p, ri_x()), i), array_get(col(p, ri_y()), i));
+            let id = array_get(col(p, ri_id()), i);
+            let found = nearby(r, x, y, radius + 6);
+            let mut j = 0;
+            while j < found {
+                let c = array_get(r.near, j);
+                if array_get(f.ring, c) != id {
+                    let dx = array_get(f.x, c) - x;
+                    let dy = array_get(f.y, c) - y;
+                    let inner = (radius - 14).max(0);
+                    if dx * dx + dy * dy >= inner * inner * 256 {
+                        array_set(f.ring, c, id);
+                        let (ux, uy) = unit(dx, dy);
+                        hurt(r, c, array_get(col(p, ri_dmg()), i), ux * 48 / 256, uy * 48 / 256, nova());
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        if radius >= array_get(col(p, ri_max()), i) { array_set(col(p, ri_life()), i, 0) }
+        i = i + 1;
+    }
+    sweep(p, ri_life());
+}
+
+// fires on the ground, burning what stands in them
+pub fn burn_fires(r: Run) {
+    let p = r.fires;
+    let f = r.foes;
+    let n = count(p);
+    let mut i = 0;
+    while i < n {
+        let life = array_get(col(p, fi_life()), i) - 1;
+        array_set(col(p, fi_life()), i, life);
+        let (x, y, radius) = (array_get(col(p, fi_x()), i), array_get(col(p, fi_y()), i), array_get(col(p, fi_r()), i));
+        if (life + i) % 3 == 0 {
+            spark(r, x + (roll(r, radius * 2) - radius) * 14, y + (roll(r, radius) - radius / 2) * 14, roll(r, 7) - 3, -10 - roll(r, 12), 16 + roll(r, 18), rgb(255, 130 + roll(r, 80), 40), 1);
+        }
+        let found = nearby(r, x, y, radius + 8);
+        let mut j = 0;
+        while j < found {
+            let c = array_get(r.near, j);
+            let reach_px = radius + array_get(f.r, c) / 2;
+            let dx = array_get(f.x, c) - x;
+            let dy = array_get(f.y, c) - y;
+            if array_get(f.burn, c) == 0 && dx * dx + dy * dy < reach_px * reach_px * 256 {
+                array_set(f.burn, c, 15);
+                hurt(r, c, array_get(col(p, fi_dmg()), i), 0, 0, kindle());
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    sweep(p, fi_life());
+}
+
+// ---- levels
+
+// how many embers the next level takes
+pub fn needed(level: Int) -> Int { 5 + level * 6 + level * level / 5 }
+
+// the upgrades offered at a level: n different ones the ember can take
+// (one it has, not at its last level, or a new one while it has room)
+pub fn offers(r: Run, n: Int) -> Array<Int> {
+    let can = array(14, 0);
+    let mut weapons_had = 0;
+    let mut gifts_had = 0;
+    let mut u = 0;
+    while u < 14 {
+        if array_get(r.lv, u) > 0 { if is_weapon(u) { weapons_had = weapons_had + 1 } else { gifts_had = gifts_had + 1 } }
+        u = u + 1;
+    }
+    let mut total = 0;
+    u = 0;
+    while u < 14 {
+        let lv = array_get(r.lv, u);
+        let room = if is_weapon(u) { weapons_had < slots() } else { gifts_had < slots() };
+        let ok = (lv > 0 && lv < max_level()) || (lv == 0 && room);
+        // (weapons the ember has are offered twice as often as the rest)
+        let weight = if !ok { 0 } else if lv > 0 && is_weapon(u) { 3 } else if lv > 0 { 2 } else { 2 };
+        array_set(can, u, weight);
+        total = total + weight;
+        u = u + 1;
+    }
+    let out = array(n, -1);
+    let mut k = 0;
+    while k < n && total > 0 {
+        let mut pick = roll(r, total);
+        let mut c = 0;
+        let mut chosen = -1;
+        while c < 14 && chosen < 0 {
+            let w = array_get(can, c);
+            if pick < w { chosen = c } else { pick = pick - w }
+            c = c + 1;
+        }
+        if chosen >= 0 {
+            array_set(out, k, chosen);
+            total = total - array_get(can, chosen);
+            array_set(can, chosen, 0);
+        }
+        k = k + 1;
+    }
+    out
+}
+
+pub fn take(r: Run, u: Int) {
+    if u >= 0 {
+        array_set(r.lv, u, (array_get(r.lv, u) + 1).min(max_level()));
+        let old_max = stat(r, st_maxhp());
+        restat(r);
+        // (more flame to have comes as flame)
+        inc(r, k_hp(), (stat(r, st_maxhp()) - old_max).max(0) * 16);
+    }
+}
+
+// a weapon that could evolve now: at its last level, with its gift
+pub fn evolvable(r: Run) -> Int {
+    let mut found = -1;
+    let mut u = 0;
+    while u < 8 && found < 0 {
+        if array_get(r.lv, u) >= max_level() && array_get(r.evo, u) == 0 && array_get(r.lv, partner(u)) > 0 { found = u }
+        u = u + 1;
+    }
+    found
+}

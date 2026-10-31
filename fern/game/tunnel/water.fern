@@ -1,0 +1,97 @@
+// Rain. While it rains, water runs in wherever a tunnel opens onto the
+// surface; in the tunnels it falls, then spreads sideways, and pools in
+// the low places (a cell holds up to 255; at 128 it's too deep for an
+// ant). It soaks away slowly into the soil, and a sump drinks it at once.
+// Dig the entrances away from the colony's low tunnels, or give the water
+// somewhere harmless to go.
+
+use super::world::*;
+use super::colony::*;
+
+// a frame of the water
+pub fn water_step(c: Colony) {
+    let w = c.w;
+    if c.rain > 0 {
+        c.rain = c.rain - 1;
+        if c.frame % 4 == 0 {
+            // (into every tunnel that opens onto the surface)
+            let y = surface() + 1;
+            let mut x = 0;
+            while x < gw() {
+                let i = idx(x, y);
+                if w.dug.get(i) { pour(w, i, 60) }
+                x = x + 1;
+            }
+        }
+    }
+    if c.frame % 2 == 0 && c.wet > 0 { flow(c, w) }
+}
+
+fn pour(w: World, i: Int, n: Int) {
+    let before = w.water.get(i);
+    let after = (before + n).min(255);
+    w.water.set(i, after);
+    if (before < 128) != (after < 128) { w.fields_dirty = true }
+}
+
+fn set_water(w: World, i: Int, v: Int) {
+    let before = w.water.get(i);
+    w.water.set(i, v);
+    if (before < 128) != (v < 128) { w.fields_dirty = true }
+}
+
+// water falls, then spreads, and soaks away; c.wet is how much there is
+fn flow(c: Colony, w: World) {
+    let width = gw();
+    let left_first = (c.frame / 2) % 2 == 0;
+    let mut total = 0;
+    let mut y = gh() - 2;
+    while y > surface() {
+        let mut k = 0;
+        while k < width {
+            let x = if left_first { k } else { width - 1 - k };
+            let i = y * width + x;
+            let v = w.water.get(i);
+            if v > 0 {
+                if !w.dug.get(i) || w.room.get(i) >= 0 && w.ch_kind.get(w.room.get(i)) == k_sump() {
+                    // (soaked up: by the soil if a tunnel was filled over it, or the sump)
+                    set_water(w, i, 0);
+                } else {
+                    let mut left = v;
+                    // down, then down the slopes, then across
+                    let below = i + width;
+                    if w.dug.get(below) && w.water.get(below) < 255 {
+                        let m = left.min(255 - w.water.get(below));
+                        set_water(w, below, w.water.get(below) + m);
+                        left = left - m;
+                    }
+                    let mut side = 0;
+                    while side < 2 && left > 0 {
+                        let dx = if (side == 0) == left_first { -1 } else { 1 };
+                        if x + dx >= 0 && x + dx < width {
+                            let j = i + dx;
+                            let jb = j + width;
+                            if w.dug.get(jb) && w.water.get(jb) < 255 {
+                                let m = left.min(255 - w.water.get(jb)).min(left / 2 + 1);
+                                set_water(w, jb, w.water.get(jb) + m);
+                                left = left - m;
+                            } else if w.dug.get(j) && w.water.get(j) < left {
+                                let m = (left - w.water.get(j)) / 2;
+                                set_water(w, j, w.water.get(j) + m);
+                                left = left - m;
+                            }
+                        }
+                        side = side + 1;
+                    }
+                    // (and soaks away, a little)
+                    if c.frame % 12 == 0 { left = (left - 4).max(0) }
+                    set_water(w, i, left);
+                    total = total + left;
+                }
+            }
+            k = k + 1;
+        }
+        y = y - 1;
+    }
+    c.wet = total + (if c.rain > 0 { 1 } else { 0 });
+}

@@ -1,0 +1,42 @@
+// Arrays: mutable, fixed in length, any element type.
+
+fn squares(n: Int) -> Array<Int> {
+    let a = array(n, 0);
+    let mut i = 0;
+    while i < n {
+        array_set(a, i, i * i);
+        i = i + 1;
+    }
+    a
+}
+
+fn total(a: Array<Int>) -> Int {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < array_length(a) {
+        sum = sum + array_get(a, i);
+        i = i + 1;
+    }
+    sum
+}
+
+fn main() {
+    let a = squares(10);
+    println(total(a).show() ++ " " ++ array_get(a, 9).show());
+    let names = array(3, "?");
+    array_set(names, 1, "fern");
+    println(array_get(names, 0) ++ array_get(names, 1) ++ array_get(names, 2));
+    // an if on a line of its own ends there, as in Rust
+    let mut x = 0;
+    if array_length(names) == 3 {
+        x = 1;
+    }
+    (x, array_length(a)).show();
+    println(x.show());
+    array_get(a, 10);
+    println("not reached");
+}
+// expect: 285 81
+// expect: ?fern?
+// expect: 1
+// expect: array index out of bounds at arrays.fern:36:14 (in main)

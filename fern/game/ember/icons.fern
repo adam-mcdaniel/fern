@@ -1,0 +1,146 @@
+// The upgrades' icons: each drawn in a 16 x 16 square (times `s`), from
+// lines, discs and rings, glowing.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+
+// a pixel of the icon's grid: (gx, gy) in 0 to 15
+fn dot(g: Gfx, x: Int, y: Int, s: Int, gx: Int, gy: Int, c: Int) {
+    if gx >= 0 && gy >= 0 && gx < 16 && gy < 16 { rect(g, x + gx * s, y + gy * s, s, s, c) }
+}
+
+fn dline(g: Gfx, x: Int, y: Int, s: Int, x0: Int, y0: Int, x1: Int, y1: Int, c: Int) {
+    let n = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    let mut i = 0;
+    while i <= n {
+        dot(g, x, y, s, x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, c);
+        i = i + 1;
+    }
+}
+
+fn ddisc(g: Gfx, x: Int, y: Int, s: Int, cx: Int, cy: Int, r: Int, c: Int) {
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            if dx * dx + dy * dy <= r * r + r { dot(g, x, y, s, cx + dx, cy + dy, c) }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+fn dring(g: Gfx, x: Int, y: Int, s: Int, cx: Int, cy: Int, r: Int, c: Int) {
+    let mut dy = -r - 1;
+    while dy <= r + 1 {
+        let mut dx = -r - 1;
+        while dx <= r + 1 {
+            let d = dx * dx + dy * dy;
+            if d <= r * r + r && d > (r - 1) * (r - 1) + (r - 1) { dot(g, x, y, s, cx + dx, cy + dy, c) }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// rows of an icon written as text, '#' for c and '+' for c2
+fn art(g: Gfx, x: Int, y: Int, s: Int, rows: List<String>, c: Int, c2: Int) {
+    let mut gy = 0;
+    rows.each(|row| {
+        let mut gx = 0;
+        while gx < string_length(row) {
+            let ch = char_at(row, gx);
+            if ch == 35 { dot(g, x, y, s, gx, gy, c) } else if ch == 43 { dot(g, x, y, s, gx, gy, c2) }
+            gx = gx + 1;
+        }
+        gy = gy + 1;
+    });
+}
+
+pub fn icon(g: Gfx, u: Int, x: Int, y: Int, s: Int, frame: Int, t: Array<Int>) {
+    if u == 0 {
+        // flare: a bolt of flame, flying up and right
+        dline(g, x, y, s, 2, 13, 11, 4, 0xa03010);
+        dline(g, x, y, s, 3, 13, 12, 4, 0xe06020);
+        dline(g, x, y, s, 5, 10, 12, 3, 0xffa040);
+        ddisc(g, x, y, s, 12, 3, 2, 0xffd070);
+        dot(g, x, y, s, 12, 3, 0xffffff);
+    } else if u == 1 {
+        // halo: embers round a center
+        dring(g, x, y, s, 8, 8, 6, 0x402010);
+        let mut k = 0;
+        while k < 4 {
+            let a = frame * 4 + k * 256;
+            let (ox, oy) = (8 + ((cos(t, a) * 6) >> 16), 8 + ((sin(t, a) * 6) >> 16));
+            ddisc(g, x, y, s, ox, oy, 1, 0xffb040);
+            dot(g, x, y, s, ox, oy, 0xffffe0);
+            k = k + 1;
+        }
+        ddisc(g, x, y, s, 8, 8, 1, 0xff7020);
+    } else if u == 2 {
+        // sunbeam: a sun throwing a beam
+        dline(g, x, y, s, 8, 8, 15, 1, 0xffe090);
+        dline(g, x, y, s, 8, 9, 15, 2, 0xc09040);
+        dline(g, x, y, s, 7, 8, 14, 1, 0xc09040);
+        ddisc(g, x, y, s, 6, 10, 3, 0xffc040);
+        ddisc(g, x, y, s, 6, 10, 1, 0xfffff0);
+    } else if u == 3 {
+        // nova: rings bursting out
+        dring(g, x, y, s, 8, 8, 6, 0xff8020);
+        dring(g, x, y, s, 8, 8, 3, 0xffd060);
+        dot(g, x, y, s, 8, 8, 0xffffff);
+    } else if u == 4 {
+        // wisps: two spirits with tails
+        ddisc(g, x, y, s, 5, 5, 2, 0x60c0ff);
+        dot(g, x, y, s, 5, 5, 0xffffff);
+        dline(g, x, y, s, 6, 7, 9, 12, 0x2060a0);
+        ddisc(g, x, y, s, 11, 9, 2, 0x80e0ff);
+        dot(g, x, y, s, 11, 9, 0xffffff);
+        dline(g, x, y, s, 10, 11, 6, 14, 0x2060a0);
+    } else if u == 5 {
+        // kindle: flames along the ground
+        dline(g, x, y, s, 1, 14, 14, 14, 0x603018);
+        art(g, x, y, s, ["", "", "", "", "", "", "      +", "     +#+", "  +  +#+   +", " +#+ ##### +#+", " ### #####+###", "+#####+#######+", "##############", ""], 0xff8020, 0xffd060);
+    } else if u == 6 {
+        // arc: lightning
+        dline(g, x, y, s, 10, 1, 5, 7, 0xc0f0ff);
+        dline(g, x, y, s, 5, 7, 10, 8, 0xc0f0ff);
+        dline(g, x, y, s, 10, 8, 4, 15, 0xc0f0ff);
+        dline(g, x, y, s, 11, 1, 6, 7, 0x4080c0);
+        dline(g, x, y, s, 11, 8, 5, 15, 0x4080c0);
+    } else if u == 7 {
+        // comet: a star falling, its tail behind
+        dline(g, x, y, s, 14, 1, 7, 8, 0x804020);
+        dline(g, x, y, s, 13, 1, 7, 7, 0xc06020);
+        dline(g, x, y, s, 15, 2, 8, 8, 0xc06020);
+        ddisc(g, x, y, s, 6, 10, 3, 0xffa040);
+        ddisc(g, x, y, s, 6, 10, 1, 0xfffff0);
+    } else if u == 8 {
+        // radiance: a sun, its rays
+        let mut k = 0;
+        while k < 8 {
+            let a = k * 128 + frame * 2;
+            dline(g, x, y, s, 8 + ((cos(t, a) * 5) >> 16), 8 + ((sin(t, a) * 5) >> 16), 8 + ((cos(t, a) * 7) >> 16), 8 + ((sin(t, a) * 7) >> 16), 0xffd060);
+            k = k + 1;
+        }
+        ddisc(g, x, y, s, 8, 8, 3, 0xffe080);
+        ddisc(g, x, y, s, 8, 8, 1, 0xffffff);
+    } else if u == 9 {
+        // kindling: logs crossed, a flame on them
+        dline(g, x, y, s, 2, 14, 13, 10, 0x8a5a30);
+        dline(g, x, y, s, 2, 10, 13, 14, 0x6a4020);
+        art(g, x, y, s, ["", "", "       +", "      +#+", "     +###+", "    +#####+", "    ##+++##", "    #+++++#", "     #+++#", "      ###"], 0xff7020, 0xffe080);
+    } else if u == 10 {
+        // quickfoot: chevrons, onward
+        art(g, x, y, s, ["", "", "  ##    ##", "   ##    ##", "    ##    ##", "     ##    ##", "      ##    ##", "     ##    ##", "    ##    ##", "   ##    ##", "  ##    ##"], 0x80e0a0, 0xffffff);
+    } else if u == 11 {
+        // ashheart: a heart, with a flame's glow in it
+        art(g, x, y, s, ["", "", "  ###   ###", " #####+#####", " ##++#####++#", "##+++######+##", "##############", " ############", "  ##########", "   ########", "    ######", "     ####", "      ##"], 0xd02838, 0xff8070);
+    } else if u == 12 {
+        // lodestone: a magnet
+        art(g, x, y, s, ["", "", "  ####  ####", "  ####  ####", "  ++++  ++++", "  ####  ####", "  ####  ####", "  ####  ####", "  ##########", "   ########", "    ######"], 0xd03030, 0xd0d0e0);
+    } else {
+        // fervor: an hourglass, its sand running
+        art(g, x, y, s, ["", " ############", "  #++++++++#", "   #++++++#", "    #++++#", "     #++#", "      ##", "      ##", "     #  #", "    #    #", "   #  ++  #", "  # ++++++ #", " ############"], 0xc0a070, 0xffd060);
+    }
+}

@@ -1,0 +1,13 @@
+// Calling C has the Io effect unless the extern fn says `with {}`, so a
+// function that may have no effects can't call one that doesn't.
+
+extern fn shout(n: Int);
+
+fn quiet(n: Int) with {} {
+    shout(n)
+}
+
+fn main() {
+    quiet(1);
+}
+// error: this has the effect Io, which isn't allowed here

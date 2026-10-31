@@ -1,0 +1,279 @@
+// A falling-sand toy: every grain follows a rule or two each frame, and
+// the rest happens by itself. Sand piles up and sinks in water, water
+// runs and levels out, plants grow into water, fire burns plants and goes
+// out, stone stays put.
+//
+// Hold the mouse to pour; 1 to 6 pick sand, water, stone, plant, fire and
+// the eraser; C clears.
+
+mod screen;
+mod draw;
+
+use screen::*;
+use draw::{Canvas, canvas, fill_rect, show, text, text_width};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+
+// the materials
+fn empty() -> Int { 0 }
+fn sand() -> Int { 1 }
+fn water() -> Int { 2 }
+fn stone() -> Int { 3 }
+fn plant() -> Int { 4 }
+fn fire() -> Int { 5 }
+
+// A cell is its material (3 bits), then 7 bits of its own (a shade, or how
+// long a fire has left), then which frame it last moved in (so a grain
+// that moves down isn't moved again when its new row's turn comes).
+fn material(cell: Int) -> Int { cell & 7 }
+fn extra(cell: Int) -> Int { cell >> 3 & 127 }
+fn moved(cell: Int) -> Int { cell >> 10 & 1 }
+fn make(m: Int, x: Int, tick: Int) -> Int { m | x << 3 | tick << 10 }
+
+struct World { cells: Array<Int>, rng: Array<Int> }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern sand") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let w = World { cells: array(width() * height(), 0), rng: array(1, screen_ticks()) };
+    scenery(w);
+    let mut brush = sand();
+    let mut tick = 0;
+    loop {
+        let mut k = 1;
+        while k <= 6 {
+            if key_pressed(48 + k) { brush = if k == 6 { empty() } else { k } }
+            k = k + 1;
+        }
+        if key_pressed(key("c")) { clear(w) }
+        if mouse_down() { pour(w, mouse_x(), mouse_y(), brush, tick) }
+        tick = 1 - tick;
+        update(w, tick);
+        paint(c, w);
+        let name = "1-6: " ++ name_of(brush);
+        fill_rect(c, 0, 0, text_width(name, 1) + 4, 8, rgb(0, 0, 0));
+        text(c, name, 2, 2, 1, color_of(make(brush, 8, 0), 0));
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+}
+
+fn name_of(m: Int) -> String {
+    match m { 1 => "SAND", 2 => "WATER", 3 => "STONE", 4 => "PLANT", 5 => "FIRE", _ => "ERASER" }
+}
+
+// ---- the rules
+
+fn update(w: World, tick: Int) {
+    // from the bottom up, each row the other way from the last
+    let mut y = height() - 1;
+    while y >= 0 {
+        let left_first = (y + tick) % 2 == 0;
+        let mut i = 0;
+        while i < width() {
+            let x = if left_first { i } else { width() - 1 - i };
+            let cell = get(w, x, y);
+            if material(cell) != empty() && moved(cell) != tick {
+                step(w, x, y, cell, tick);
+            }
+            i = i + 1;
+        }
+        y = y - 1;
+    }
+}
+
+fn step(w: World, x: Int, y: Int, cell: Int, tick: Int) {
+    let m = material(cell);
+    let me = make(m, extra(cell), tick);
+    let side = if random(w, 2) == 0 { -1 } else { 1 };
+    if m == sand() {
+        // down, else down and to a side, through air or water
+        if sinks(get(w, x, y + 1)) { swap(w, x, y, x, y + 1, me) }
+        else if sinks(get(w, x + side, y + 1)) { swap(w, x, y, x + side, y + 1, me) }
+        else if sinks(get(w, x - side, y + 1)) { swap(w, x, y, x - side, y + 1, me) }
+        else { put(w, x, y, me) }
+    } else if m == water() {
+        // down, down to a side, else along: as far as 4 cells, so it levels out
+        if is(get(w, x, y + 1), empty()) { swap(w, x, y, x, y + 1, me) }
+        else if is(get(w, x + side, y + 1), empty()) { swap(w, x, y, x + side, y + 1, me) }
+        else {
+            let a = run(w, x, y, side);
+            let b = run(w, x, y, -side);
+            if a > 0 { swap(w, x, y, x + side * a, y, me) }
+            else if b > 0 { swap(w, x, y, x - side * b, y, me) }
+            else { put(w, x, y, me) }
+        }
+    } else if m == plant() {
+        // grows, now and then, into water next to it
+        let (dx, dy) = direction(random(w, 4));
+        if is(get(w, x + dx, y + dy), water()) && random(w, 12) == 0 {
+            put(w, x + dx, y + dy, make(plant(), random(w, 16), tick));
+        }
+    } else if m == fire() {
+        let life = extra(cell);
+        // the plants next to it catch, now and then
+        catch(w, x + 1, y, tick);
+        catch(w, x - 1, y, tick);
+        catch(w, x, y + 1, tick);
+        catch(w, x, y - 1, tick);
+        if touching(w, x, y, water()) || life == 0 {
+            put(w, x, y, 0);
+        } else if !touching(w, x, y, plant()) && is(get(w, x + side, y - 1), empty()) && random(w, 3) == 0 {
+            // flickers upward, once there's nothing left to burn here
+            put(w, x, y, 0);
+            put(w, x + side, y - 1, make(fire(), life - 1, tick));
+        } else {
+            put(w, x, y, make(fire(), life - 1, tick));
+        }
+    }
+}
+
+// how many empty cells there are from (x, y) towards dx, up to 4
+fn run(w: World, x: Int, y: Int, dx: Int) -> Int {
+    let mut n = 0;
+    while n < 4 && is(get(w, x + dx * (n + 1), y), empty()) {
+        n = n + 1;
+    }
+    n
+}
+
+// whether sand falls through what's in this cell
+fn sinks(cell: Int) -> Bool {
+    let m = material(cell);
+    m == empty() || m == water()
+}
+
+fn is(cell: Int, m: Int) -> Bool { material(cell) == m }
+
+fn touching(w: World, x: Int, y: Int, m: Int) -> Bool {
+    is(get(w, x - 1, y), m) || is(get(w, x + 1, y), m) || is(get(w, x, y - 1), m) || is(get(w, x, y + 1), m)
+}
+
+fn catch(w: World, x: Int, y: Int, tick: Int) {
+    if is(get(w, x, y), plant()) && random(w, 4) == 0 {
+        put(w, x, y, make(fire(), 20 + random(w, 30), tick));
+    }
+}
+
+fn direction(d: Int) -> (Int, Int) {
+    match d { 0 => (1, 0), 1 => (-1, 0), 2 => (0, 1), _ => (0, -1) }
+}
+
+// ---- the world
+
+// (outside the world is stone)
+fn get(w: World, x: Int, y: Int) -> Int {
+    if x < 0 || y < 0 || x >= width() || y >= height() { stone() } else { array_get(w.cells, y * width() + x) }
+}
+
+fn put(w: World, x: Int, y: Int, cell: Int) {
+    if x >= 0 && y >= 0 && x < width() && y < height() { array_set(w.cells, y * width() + x, cell) }
+}
+
+// moves cell `me` from (x, y) to (x2, y2), and what was there to (x, y)
+fn swap(w: World, x: Int, y: Int, x2: Int, y2: Int, me: Int) {
+    put(w, x, y, get(w, x2, y2));
+    put(w, x2, y2, me);
+}
+
+fn random(w: World, n: Int) -> Int {
+    let s = array_get(w.rng, 0) * 1103515245 + 12345 & 0x7fffffff;
+    array_set(w.rng, 0, s);
+    (s >> 16) % n
+}
+
+// a round blob of material m around (cx, cy), dotted for sand and water
+fn pour(w: World, cx: Int, cy: Int, m: Int, tick: Int) {
+    let mut dy = -3;
+    while dy <= 3 {
+        let mut dx = -3;
+        while dx <= 3 {
+            let solid = m == stone() || m == plant() || m == empty();
+            if dx * dx + dy * dy <= 9 && (solid || random(w, 4) == 0) {
+                let x = cx + dx;
+                let y = cy + dy;
+                if m == empty() || is(get(w, x, y), empty()) {
+                    put(w, x, y, make(m, if m == fire() { 40 + random(w, 40) } else { random(w, 16) }, 1 - tick));
+                }
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+fn clear(w: World) {
+    let mut i = 0;
+    while i < width() * height() {
+        array_set(w.cells, i, 0);
+        i = i + 1;
+    }
+}
+
+// some ledges and a pond, to start
+fn scenery(w: World) {
+    ledge(w, 20, 70, 50);
+    ledge(w, 90, 45, 50);
+    ledge(w, 0, 112, 160);
+    ledge(w, 60, 96, 2);
+    ledge(w, 100, 96, 2);
+    let mut x = 62;
+    while x < 100 {
+        let mut y = 100;
+        while y < 112 {
+            put(w, x, y, make(water(), random(w, 16), 0));
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+    let mut y = 90;
+    while y < 112 {
+        put(w, 60, y, make(stone(), random(w, 16), 0));
+        put(w, 101, y, make(stone(), random(w, 16), 0));
+        y = y + 1;
+    }
+    let mut x = 25;
+    while x < 65 {
+        put(w, x, 69, make(plant(), random(w, 16), 0));
+        x = x + 1;
+    }
+}
+
+fn ledge(w: World, x0: Int, y: Int, len: Int) {
+    let mut x = x0;
+    while x < x0 + len {
+        put(w, x, y, make(stone(), random(w, 16), 0));
+        put(w, x, y + 1, make(stone(), random(w, 16), 0));
+        x = x + 1;
+    }
+}
+
+// ---- colors
+
+fn paint(c: Canvas, w: World) {
+    let mut i = 0;
+    while i < width() * height() {
+        array_set(c.pixels, i, color_of(array_get(w.cells, i), i));
+        i = i + 1;
+    }
+}
+
+fn color_of(cell: Int, i: Int) -> Int {
+    let s = extra(cell) % 16;
+    match material(cell) {
+        0 => rgb(12, 12, 22),
+        1 => rgb(220 + s, 190 + s, 110 + s),
+        2 => rgb(40, 90 + s * 2, 220),
+        3 => rgb(100 + s * 2, 100 + s * 2, 110 + s * 2),
+        4 => rgb(40, 150 + s * 4, 60),
+        // fire: yellow while young, red as it dies
+        _ => {
+            let life = extra(cell).min(60);
+            rgb(255, 60 + life * 3, 20 + life)
+        }
+    }
+}

@@ -1,0 +1,417 @@
+// UPDRAFT: a glider over a land of mountains, lakes and snow, and no
+// engine. To stay up, find the rising air: thermals, columns of it over
+// the sunlit ground, which come and go. Birds circle in them, and the
+// variometer beeps faster the faster you climb, so circle where it beeps.
+// Fly through the beacons of light (each one is more daylight) before the
+// sun sets; when it does, the thermals die, and you have to land, gently.
+//
+// Speed is height: dive and you go faster, climb and you slow down, too
+// slow and you stall. A steep bank turns tightly, but sinks faster.
+//
+// Left and right bank, up dives, down climbs, escape quits.
+//
+// The land is drawn by voxel.fern.
+
+mod screen;
+mod draw;
+mod math;
+mod terrain;
+mod voxel;
+
+use screen::*;
+use draw::{Canvas, canvas, show, text, text_width, fill_rect};
+use math::{sines, sin, cos, rng, random};
+use terrain::{Terrain, make, ground, is_water, land_spot};
+use voxel::{Eye, Light, Frame, spread, wrap, draw_land, draw_sky, to_screen, dot, glow, light};
+
+fn width() -> Int { 320 }
+fn height() -> Int { 200 }
+// ---- the air
+
+// a thermal: where (256ths of a cell), how wide (cells), its strongest lift
+// (256ths of a unit a second), and how far through its life it is (frames:
+// it rises for half its life, and is still for the other half, then moves)
+struct Thermal { x: Int, y: Int, radius: Int, peak: Int, age: Int }
+
+fn life() -> Int { 3072 }
+
+fn strength(th: Thermal, table: Array<Int>, sun: Int) -> Int {
+    let s = (th.peak * sin(table, th.age * 1024 / life()) >> 16).max(0);
+    // (dying at sunset)
+    s * sun.clamp(0, 20) / 20
+}
+
+fn new_thermal(t: Terrain, r: Array<Int>, age: Int) -> Thermal {
+    let (x, y) = land_spot(t, r, 15);
+    Thermal { x: x, y: y, radius: 9 + random(r, 6), peak: (4 + random(r, 3)) * 256, age: age }
+}
+
+fn age_thermals(ts: List<Thermal>, t: Terrain, r: Array<Int>) -> List<Thermal> {
+    ts.map(|th| if th.age + 1 >= life() { new_thermal(t, r, 0) } else { Thermal { x: th.x, y: th.y, radius: th.radius, peak: th.peak, age: th.age + 1 } })
+}
+
+// how fast the air rises at (x, y, alt): fading out high up, where it's cold
+fn lift(ts: List<Thermal>, table: Array<Int>, sun: Int, x: Int, y: Int, alt: Int) -> Int {
+    let up = ts.fold(0, |sum, th| {
+        let s = strength(th, table, sun);
+        let (dx, dy) = (wrap(x - th.x) >> 4, wrap(y - th.y) >> 4);
+        let (d2, r2) = (dx * dx + dy * dy, th.radius * th.radius * 256);
+        if s <= 0 || d2 >= r2 { sum } else { sum + s * (r2 - d2) / r2 }
+    });
+    up * (380 - (alt >> 8)).clamp(0, 60) / 60
+}
+
+// ---- the glider
+
+// where it is (as the eye), how fast it flies (256ths of a cell a second),
+// and how fast it's climbing
+struct Glider { at: Eye, speed: Int, climb: Int }
+
+// a frame's flight (a 60th of a second): `roll` and `stick` are the keys
+// (-1, 0 or 1)
+fn fly(g: Glider, roll: Int, stick: Int, ts: List<Thermal>, sun: Int, table: Array<Int>) -> Glider {
+    let e = g.at;
+    let bank = if roll != 0 { (e.bank + roll * 4).clamp(-140, 140) } else { e.bank - e.bank.clamp(-3, 3) };
+    let stalled = g.speed < 7 * 256;
+    let trim = -10;
+    let wanted = if stalled { e.pitch - 3 } else if stick != 0 { e.pitch - stick * 2 } else { e.pitch - (e.pitch - trim).clamp(-1, 1) };
+    let pitch = wanted.clamp(-130, 90);
+    // gravity along the way it's going, against the drag
+    let sp = sin(table, pitch);
+    let accel = -(20 * sp >> 8) - ((g.speed * g.speed >> 8) - 144 * 256) / 60;
+    let speed = (g.speed + accel / 60).max(0);
+    let sink = 230 + bank.abs() * 200 / 128 + if stalled { 768 } else { 0 };
+    let climb = (speed * sp >> 16) - sink + lift(ts, table, sun, e.x, e.y, e.alt);
+    let yaw = (e.yaw + bank / 20) & 1023;
+    let x = (e.x + (cos(table, yaw) * speed >> 16) / 60) & 65535;
+    let y = (e.y + (sin(table, yaw) * speed >> 16) / 60) & 65535;
+    Glider { at: Eye { x: x, y: y, alt: e.alt + climb / 60, yaw: yaw, pitch: pitch, bank: bank }, speed: speed, climb: climb }
+}
+
+// ---- beacons
+
+struct Beacon { x: Int, y: Int, base: Int }
+
+fn beacon_height() -> Int { 46 * 256 }
+
+// a beacon on high ground, far enough from (x, y)
+fn new_beacon(t: Terrain, r: Array<Int>, x: Int, y: Int) -> Beacon {
+    let mut spot = land_spot(t, r, 40);
+    let mut tries = 0;
+    loop {
+        let (bx, by) = spot;
+        let (dx, dy) = (wrap(bx - x) >> 8, wrap(by - y) >> 8);
+        if dx * dx + dy * dy > 40 * 40 || tries > 20 { break; }
+        spot = land_spot(t, r, 40);
+        tries = tries + 1;
+    }
+    let (bx, by) = spot;
+    Beacon { x: bx, y: by, base: ground(t, bx, by) }
+}
+
+fn reached(b: Beacon, e: Eye) -> Bool {
+    let (dx, dy) = (wrap(e.x - b.x) >> 4, wrap(e.y - b.y) >> 4);
+    dx * dx + dy * dy < 5 * 5 * 256 && e.alt < b.base + beacon_height()
+}
+
+// ---- drawing what's in the world
+
+// a column of light from the ground up, flickering
+fn draw_beacon(f: Frame, e: Eye, table: Array<Int>, b: Beacon, frame: Int) {
+    match (to_screen(f, e, table, b.x, b.y, b.base), to_screen(f, e, table, b.x, b.y, b.base + beacon_height())) {
+        (Some((x, y0, z)), Some((_, y1, _))) => {
+            let half = (2048 / z).clamp(0, 3);
+            let pulse = 170 + sin(table, frame * 20) / 1024;
+            let mut y = y1.max(0);
+            while y <= y0.min(height() - 1) {
+                let mut dx = -half - 1;
+                while dx <= half + 1 {
+                    let amount = if dx.abs() <= half { pulse } else { pulse / 3 };
+                    glow(f, x + dx, y, z, 255, 215, 110, amount);
+                    dx = dx + 1;
+                }
+                y = y + 1;
+            }
+        }
+        _ => {}
+    }
+}
+
+// three birds circling in a strong thermal, at different heights
+fn draw_birds(f: Frame, e: Eye, t: Terrain, table: Array<Int>, th: Thermal, sun: Int, frame: Int) {
+    if strength(th, table, sun) * 3 > th.peak {
+        let base = ground(t, th.x, th.y);
+        let mut k = 0;
+        while k < 3 {
+            let a = frame * 3 + k * 341;
+            let r = th.radius * 150;
+            let x = th.x + (cos(table, a) * r >> 16);
+            let y = th.y + (sin(table, a) * r >> 16);
+            match to_screen(f, e, table, x, y, base + (35 + k * 22) * 256) {
+                Some((sx, sy, z)) => {
+                    let ink = rgb(25, 25, 30);
+                    let flap = if (frame / 8 + k) % 2 == 0 { 1 } else { 0 };
+                    dot(f, sx, sy, z, ink);
+                    dot(f, sx - 1, sy - flap, z, ink);
+                    dot(f, sx + 1, sy - flap, z, ink);
+                    if z < 30 * 256 {
+                        dot(f, sx - 2, sy - 1, z, ink);
+                        dot(f, sx + 2, sy - 1, z, ink);
+                    }
+                }
+                None => {}
+            }
+            k = k + 1;
+        }
+    }
+}
+
+// ---- the instruments
+
+fn hud(c: Canvas, g: Glider, t: Terrain, beacons: List<Beacon>, got: Int, score: Int, sun: Int, table: Array<Int>, frame: Int) {
+    let (w, h) = (width(), height());
+    let ink = rgb(235, 235, 240);
+    let shadow = rgb(20, 20, 30);
+    let label = |s: String, x: Int, y: Int, color: Int| {
+        text(c, s, x + 1, y + 1, 1, shadow);
+        text(c, s, x, y, 1, color);
+    };
+    let e = g.at;
+    let above = (e.alt - ground(t, e.x, e.y)) >> 8;
+    label("SPEED " ++ (g.speed >> 8).show(), 4, h - 9, ink);
+    label("HEIGHT " ++ above.show(), 52, h - 9, if above < 20 { rgb(255, 120, 90) } else { ink });
+    let tenths = g.climb * 10 / 256;
+    let climb = (if tenths < 0 { "-" } else { "+" }) ++ (tenths.abs() / 10).show() ++ "." ++ (tenths.abs() % 10).show();
+    label("CLIMB " ++ climb, 108, h - 9, if tenths > 0 { rgb(120, 255, 150) } else { ink });
+    label("BEACONS " ++ got.show() ++ "   SCORE " ++ score.show(), 4, 4, ink);
+    let clock = if sun > 0 { "SUNSET IN " ++ (sun / 60).show() ++ ":" ++ (sun % 60).show().pad_left(2, "0") } else { "NIGHT: LAND" };
+    label(clock, w - 58 - text_width(clock, 1), 4, if sun > 20 { ink } else { rgb(255, 170, 90) });
+    // the variometer: a bar up (green) or down (red) from the middle
+    let bar = (g.climb * 30 / (5 * 256)).clamp(-30, 30);
+    fill_rect(c, 5, h / 2 - 31, 4, 63, rgb(30, 30, 40));
+    if bar > 0 { fill_rect(c, 5, h / 2 - bar, 4, bar, rgb(110, 240, 140)) } else { fill_rect(c, 5, h / 2, 4, -bar, rgb(240, 100, 80)) }
+    fill_rect(c, 3, h / 2, 8, 1, ink);
+    if g.speed < 8 * 256 && frame / 10 % 2 == 0 {
+        let s = "STALL";
+        label(s, (w - text_width(s, 1)) / 2, h / 2 + 20, rgb(255, 90, 70));
+    }
+    // the sight: where the nose points
+    fill_rect(c, w / 2 - 6, h / 2, 4, 1, ink);
+    fill_rect(c, w / 2 + 3, h / 2, 4, 1, ink);
+    fill_rect(c, w / 2, h / 2 + 2, 1, 1, ink);
+    // the nearest beacon, along the top: its direction, and how far
+    let nearest = beacons.fold((1 << 40, Beacon { x: 0, y: 0, base: 0 }), |best, b| {
+        let (dx, dy) = (wrap(b.x - e.x) >> 8, wrap(b.y - e.y) >> 8);
+        let (d, _) = best;
+        if dx * dx + dy * dy < d { (dx * dx + dy * dy, b) } else { best }
+    });
+    let (d2, b) = nearest;
+    if d2 < (1 << 40) {
+        let (dx, dy) = (wrap(b.x - e.x), wrap(b.y - e.y));
+        let (co, si) = (cos(table, e.yaw), sin(table, e.yaw));
+        let forward = (dx * co + dy * si) >> 16;
+        let side = (dy * co - dx * si) >> 16;
+        let x = if forward > 0 { (w / 2 + side * (w / 2) / (spread() * forward.max(1) >> 8).max(1)).clamp(10, w - 10) } else if side < 0 { 10 } else { w - 10 };
+        let gold = rgb(255, 215, 110);
+        fill_rect(c, x - 1, 14, 3, 3, gold);
+        fill_rect(c, x, 13, 1, 5, gold);
+        let far = isqrt(d2).show();
+        label(far, x - text_width(far, 1) / 2, 20, gold);
+    }
+    minimap(c, t, e, beacons);
+}
+
+fn isqrt(n: Int) -> Int {
+    let mut x = 0;
+    while (x + 1) * (x + 1) <= n { x = x + 1 }
+    x
+}
+
+// the map, round where the glider is (the top right), with the beacons
+fn minimap(c: Canvas, t: Terrain, e: Eye, beacons: List<Beacon>) {
+    let (size, left, top) = (48, width() - 52, 4);
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            let mx = ((e.x >> 8) + (x - size / 2) * 4) & 255;
+            let my = ((e.y >> 8) + (y - size / 2) * 4) & 255;
+            let color = array_get(t.color, my * 256 + mx);
+            array_set(c.pixels, (top + y) * width() + left + x, color >> 1 & 0x7f7f7f);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    beacons.each(|b| {
+        let (dx, dy) = (wrap(b.x - e.x) >> 10, wrap(b.y - e.y) >> 10);
+        if dx.abs() < size / 2 && dy.abs() < size / 2 {
+            fill_rect(c, left + size / 2 + dx - 1, top + size / 2 + dy - 1, 2, 2, rgb(255, 215, 110));
+        }
+    });
+    fill_rect(c, left + size / 2 - 1, top + size / 2 - 1, 3, 3, rgb(255, 255, 255));
+}
+
+// ---- the game
+
+enum Phase { Title, Flying, Down(String, Int) }
+
+struct World { land: Terrain, thermals: List<Thermal>, beacons: List<Beacon> }
+
+fn new_world(seed: Int) -> World {
+    let land = make(seed);
+    let r = rng(seed + 1);
+    let thermals = (0..14).to_list().map(|k| new_thermal(land, r, k * life() / 14));
+    let beacons = (0..6).to_list().map(|_| new_beacon(land, r, 0, 0));
+    World { land: land, thermals: thermals, beacons: beacons }
+}
+
+// the glider's start: near the strongest rising thermal, heading for it
+fn launch(w: World, table: Array<Int>) -> Glider {
+    let best = w.thermals.fold(w.thermals.head().unwrap(), |a, th| if strength(th, table, 200) > strength(a, table, 200) { th } else { a });
+    let a = 300;
+    let x = (best.x - (cos(table, a) * 18 * 256 >> 16)) & 65535;
+    let y = (best.y - (sin(table, a) * 18 * 256 >> 16)) & 65535;
+    let alt = ground(w.land, x, y).max(ground(w.land, best.x, best.y)) + 70 * 256;
+    Glider { at: Eye { x: x, y: y, alt: alt, yaw: a, pitch: -10, bank: 0 }, speed: 13 * 256, climb: 0 }
+}
+
+fn centered(c: Canvas, s: String, y: Int, size: Int, color: Int) {
+    let x = (width() - text_width(s, size)) / 2;
+    text(c, s, x + 1, y + 1, size, rgb(15, 15, 25));
+    text(c, s, x, y, size, color);
+}
+
+fn main() {
+    if !screen_open(width(), height(), 3, "updraft") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let frame_of = Frame { c: c, depth: array(width() * height(), 0), top: array(width(), 0) };
+    let table = sines();
+    let dice = rng(screen_ticks() + 5);
+    let mut seed = 1 + random(dice, 10000);
+    let mut world = new_world(seed);
+    let mut glider = launch(world, table);
+    let mut phase = Title;
+    // the sun's height: 1024ths of a turn, and frames until it next drops one
+    let mut sun = 150;
+    let mut tick = 60;
+    let mut got = 0;
+    let mut score = 0;
+    let mut frames_up = 0;
+    let mut chime = 0;
+    let mut frame = 0;
+    let mut note = 0;
+    let mut message = 0;
+    loop {
+        let roll = (if key_down(key_right()) { 1 } else { 0 }) - (if key_down(key_left()) { 1 } else { 0 });
+        let stick = (if key_down(key_up()) { 1 } else { 0 }) - (if key_down(key_down_arrow()) { 1 } else { 0 });
+        world = World { land: world.land, thermals: age_thermals(world.thermals, world.land, dice), beacons: world.beacons };
+        match phase {
+            Title => {
+                // circling over the land, high up, until space
+                let e = glider.at;
+                let yaw = (e.yaw + 1) & 1023;
+                let x = (e.x + (cos(table, yaw) * 10 >> 16) * 256 / 60) & 65535;
+                let y = (e.y + (sin(table, yaw) * 10 >> 16) * 256 / 60) & 65535;
+                let floor = ground(world.land, x, y).max(ground(world.land, x + (cos(table, yaw) * 30 >> 8), y + (sin(table, yaw) * 30 >> 8)));
+                let alt = e.alt + (floor + 60 * 256 - e.alt) / 40;
+                glider = Glider { at: Eye { x: x, y: y, alt: alt, yaw: yaw, pitch: -40, bank: 60 }, speed: 10 * 256, climb: 0 };
+                if key_pressed(key_space()) {
+                    glider = launch(world, table);
+                    sun = 150;
+                    tick = 60;
+                    got = 0;
+                    score = 0;
+                    frames_up = 0;
+                    phase = Flying;
+                }
+            }
+            Flying => {
+                glider = fly(glider, roll, stick, world.thermals, sun, table);
+                frames_up = frames_up + 1;
+                tick = tick - 1;
+                if tick == 0 {
+                    tick = 60;
+                    sun = (sun - 1).max(-40);
+                }
+                let e = glider.at;
+                let (hit, missed) = world.beacons.partition(|b| reached(b, e));
+                if !hit.is_empty() {
+                    got = got + hit.len();
+                    score = score + 100 * hit.len();
+                    sun = (sun + 12 * hit.len()).min(150);
+                    world = World { land: world.land, thermals: world.thermals, beacons: missed.append(hit.map(|_| new_beacon(world.land, dice, e.x, e.y))) };
+                    chime = 12;
+                    message = 90;
+                }
+                // touching down: gently, on land, wings level, is landing
+                let floor = ground(world.land, e.x, e.y);
+                if e.alt <= floor + 64 {
+                    let wet = is_water(world.land, e.x, e.y);
+                    let gentle = glider.climb > -640 && glider.speed < 17 * 256 && e.bank.abs() < 50;
+                    let seconds = frames_up / 60;
+                    if wet {
+                        phase = Down("SPLASHDOWN", score + seconds);
+                    } else if gentle {
+                        phase = Down("LANDED SAFELY", score + seconds + 250);
+                    } else {
+                        phase = Down("CRASHED", score + seconds);
+                    }
+                    chime = if gentle && !wet { 20 } else { 40 };
+                    glider = Glider { at: Eye { x: e.x, y: e.y, alt: floor + 64, yaw: e.yaw, pitch: e.pitch, bank: e.bank }, speed: 0, climb: 0 };
+                }
+            }
+            Down(_, _) => {
+                if key_pressed(key_space()) {
+                    seed = 1 + random(dice, 10000);
+                    world = new_world(seed);
+                    glider = launch(world, table);
+                    phase = Title;
+                }
+            }
+        }
+        // the variometer's beeps: quicker the faster the climb
+        let flying = match phase { Flying => true, _ => false };
+        note = note + 1;
+        let every = (36 - glider.climb * 6 / 256).clamp(5, 36);
+        let beeping = flying && glider.climb > 64 && note % every < 3;
+        chime = (chime - 1).max(0);
+        message = (message - 1).max(0);
+        screen_beep(beeping || chime > 0);
+
+        // the picture
+        let l = light(match phase { Title => 120, _ => sun });
+        let e = glider.at;
+        draw_land(frame_of, world.land, e, l, table);
+        draw_sky(frame_of, e, l, table);
+        world.thermals.each(|th| draw_birds(frame_of, e, world.land, table, th, sun, frame));
+        world.beacons.each(|b| draw_beacon(frame_of, e, table, b, frame));
+        match phase {
+            Title => {
+                centered(c, "UPDRAFT", 30, 5, rgb(255, 250, 235));
+                centered(c, "NO ENGINE. RIDE THE RISING AIR: IT'S WHERE THE BIRDS CIRCLE,", 80, 1, rgb(240, 240, 250));
+                centered(c, "AND THE BEEPS QUICKEN AS YOU CLIMB. FLY THROUGH THE BEACONS", 89, 1, rgb(240, 240, 250));
+                centered(c, "BEFORE THE SUN SETS, THEN LAND GENTLY.", 98, 1, rgb(240, 240, 250));
+                centered(c, "LEFT RIGHT BANK   UP DIVE   DOWN CLIMB", 120, 1, rgb(255, 225, 160));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 160, 2, rgb(255, 255, 255)) }
+            }
+            Flying => {
+                hud(c, glider, world.land, world.beacons, got, score, sun, table, frame);
+                if message > 0 { centered(c, "BEACON! MORE DAYLIGHT", 60, 1, rgb(255, 215, 110)) }
+                if frames_up < 240 { centered(c, "FIND THE RISING AIR", 60, 2, rgb(255, 250, 235)) }
+            }
+            Down(what, total) => {
+                centered(c, what, 50, 3, if what == "LANDED SAFELY" { rgb(140, 255, 170) } else { rgb(255, 120, 90) });
+                centered(c, got.show() ++ " BEACONS   " ++ (frames_up / 60).show() ++ " SECONDS ALOFT", 90, 1, rgb(240, 240, 250));
+                centered(c, "SCORE " ++ total.show(), 104, 2, rgb(255, 255, 255));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 160, 2, rgb(255, 255, 255)) }
+            }
+        }
+        frame = frame + 1;
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}

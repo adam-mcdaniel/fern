@@ -1,0 +1,406 @@
+// Asteroids, in vector graphics: everything is lines. Left and right turn,
+// up thrusts, space fires. Big rocks break into two smaller ones, and
+// small ones into dust. Clear the screen for the next, bigger wave.
+
+mod screen;
+mod draw;
+mod math;
+
+use screen::*;
+use draw::{Canvas, canvas, clear, line, pixel, show, text, text_width};
+use math::{sines, sin, cos, rng, random};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+// positions and speeds are in 256ths of a pixel
+fn unit() -> Int { 256 }
+
+// A pool is a fixed number of things, each a few cells of a big array; a
+// thing whose first cell (its size, or its life) is 0 is a free slot.
+struct Pool { cells: Array<Int>, stride: Int, count: Int }
+
+fn pool(count: Int, stride: Int) -> Pool { Pool { cells: array(count * stride, 0), stride: stride, count: count } }
+fn get(p: Pool, i: Int, field: Int) -> Int { array_get(p.cells, i * p.stride + field) }
+fn put(p: Pool, i: Int, field: Int, x: Int) { array_set(p.cells, i * p.stride + field, x) }
+
+// a free slot, or -1
+fn free(p: Pool) -> Int {
+    let mut i = 0;
+    let mut found = -1;
+    while i < p.count && found < 0 {
+        if get(p, i, 0) == 0 { found = i }
+        i = i + 1;
+    }
+    found
+}
+
+// the fields of rocks, bullets and sparks: what keeps them (size or
+// life), where they are and how fast they go; and for rocks, how they're
+// turned, how fast they spin, and their shape
+fn alive() -> Int { 0 }
+fn px() -> Int { 1 }
+fn py() -> Int { 2 }
+fn vx() -> Int { 3 }
+fn vy() -> Int { 4 }
+fn turn() -> Int { 5 }
+fn spin() -> Int { 6 }
+fn shape() -> Int { 7 }
+
+// the ship, and the game's numbers: score, lives, wave, frames until the
+// ship's back (after it's hit), frames it can't be hit, the beep
+struct Ship { x: Int, y: Int, dx: Int, dy: Int, angle: Int }
+
+struct Game { rocks: Pool, bullets: Pool, sparks: Pool, stats: Array<Int>, table: Array<Int>, r: Array<Int> }
+
+fn score() -> Int { 0 }
+fn lives() -> Int { 1 }
+fn wave() -> Int { 2 }
+fn away() -> Int { 3 }
+fn safe() -> Int { 4 }
+fn beep() -> Int { 5 }
+fn cooldown() -> Int { 6 }
+
+fn stat(g: Game, i: Int) -> Int { array_get(g.stats, i) }
+fn set_stat(g: Game, i: Int, x: Int) { array_set(g.stats, i, x) }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern asteroids") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let g = Game { rocks: pool(40, 8), bullets: pool(8, 5), sparks: pool(80, 5), stats: array(7, 0), table: sines(), r: rng(screen_ticks() + 7) };
+    let stars = array(40, 0);
+    let mut i = 0;
+    while i < 40 {
+        array_set(stars, i, random(g.r, width() * height()));
+        i = i + 1;
+    }
+    new_game(g);
+    let mut ship = home();
+    loop {
+        if stat(g, lives()) > 0 {
+            ship = fly(g, ship);
+        } else if key_pressed(key_space()) {
+            new_game(g);
+            ship = home();
+        }
+        move_all(g);
+        hits(g, ship);
+        if stat(g, away()) == 1 { ship = home() }
+        if count(g.rocks) == 0 {
+            set_stat(g, wave(), stat(g, wave()) + 1);
+            spawn_wave(g, ship);
+        }
+        set_stat(g, beep(), (stat(g, beep()) - 1).max(0));
+        screen_beep(stat(g, beep()) > 0);
+        render(c, g, ship, stars);
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}
+
+fn home() -> Ship {
+    Ship { x: width() / 2 * unit(), y: height() / 2 * unit(), dx: 0, dy: 0, angle: 768 }
+}
+
+fn new_game(g: Game) {
+    clear_pool(g.rocks);
+    clear_pool(g.bullets);
+    set_stat(g, score(), 0);
+    set_stat(g, lives(), 3);
+    set_stat(g, wave(), 1);
+    set_stat(g, away(), 0);
+    set_stat(g, safe(), 120);
+    spawn_wave(g, home());
+}
+
+fn clear_pool(p: Pool) {
+    let mut i = 0;
+    while i < p.count {
+        put(p, i, alive(), 0);
+        i = i + 1;
+    }
+}
+
+fn count(p: Pool) -> Int {
+    let mut i = 0;
+    let mut n = 0;
+    while i < p.count {
+        if get(p, i, alive()) > 0 { n = n + 1 }
+        i = i + 1;
+    }
+    n
+}
+
+// big rocks around the edges, away from the ship: more each wave
+fn spawn_wave(g: Game, ship: Ship) {
+    let mut k = 0;
+    while k < 3 + stat(g, wave()) {
+        let side = random(g.r, 2) == 0;
+        let x = if side { random(g.r, 30) } else { random(g.r, width()) };
+        let y = if side { random(g.r, height()) } else { random(g.r, 30) };
+        rock(g, x * unit(), y * unit(), 3);
+        k = k + 1;
+    }
+}
+
+// a rock of size 3 (big), 2 or 1, going any which way (smaller is faster)
+fn rock(g: Game, x: Int, y: Int, size: Int) {
+    let i = free(g.rocks);
+    if i >= 0 {
+        let a = random(g.r, 1024);
+        let speed = 60 + random(g.r, 60) + (3 - size) * 50;
+        put(g.rocks, i, alive(), size);
+        put(g.rocks, i, px(), x);
+        put(g.rocks, i, py(), y);
+        put(g.rocks, i, vx(), cos(g.table, a) * speed >> 16);
+        put(g.rocks, i, vy(), sin(g.table, a) * speed >> 16);
+        put(g.rocks, i, turn(), random(g.r, 1024));
+        put(g.rocks, i, spin(), random(g.r, 9) - 4);
+        put(g.rocks, i, shape(), random(g.r, 1000));
+    }
+}
+
+fn radius(size: Int) -> Int { match size { 3 => 12, 2 => 7, _ => 4 } }
+
+// ---- moving
+
+// the ship a frame later, after the keys
+fn fly(g: Game, s: Ship) -> Ship with Io {
+    if stat(g, away()) > 0 {
+        set_stat(g, away(), stat(g, away()) - 1);
+        s
+    } else {
+        set_stat(g, safe(), (stat(g, safe()) - 1).max(0));
+        let mut angle = s.angle;
+        if key_down(key_left()) { angle = angle - 14 }
+        if key_down(key_right()) { angle = angle + 14 }
+        angle = angle & 1023;
+        let mut dx = s.dx;
+        let mut dy = s.dy;
+        if key_down(key_up()) {
+            dx = dx + (cos(g.table, angle) * 14 >> 16);
+            dy = dy + (sin(g.table, angle) * 14 >> 16);
+            // (sparks out the back)
+            if random(g.r, 2) == 0 {
+                spark(g, s.x - (cos(g.table, angle) * 5 >> 8), s.y - (sin(g.table, angle) * 5 >> 8), -dx * 2 + random(g.r, 100) - 50, -dy * 2 + random(g.r, 100) - 50, 8);
+            }
+        }
+        // (space has a little friction here, or it's no fun)
+        dx = dx * 63 / 64;
+        dy = dy * 63 / 64;
+        set_stat(g, cooldown(), (stat(g, cooldown()) - 1).max(0));
+        if key_down(key_space()) && stat(g, cooldown()) == 0 {
+            let i = free(g.bullets);
+            if i >= 0 {
+                put(g.bullets, i, alive(), 45);
+                put(g.bullets, i, px(), s.x + (cos(g.table, angle) * 7 >> 8));
+                put(g.bullets, i, py(), s.y + (sin(g.table, angle) * 7 >> 8));
+                put(g.bullets, i, vx(), dx + (cos(g.table, angle) * 600 >> 16));
+                put(g.bullets, i, vy(), dy + (sin(g.table, angle) * 600 >> 16));
+                set_stat(g, cooldown(), 7);
+                set_stat(g, beep(), 1);
+            }
+        }
+        Ship { x: wrap(s.x + dx, width()), y: wrap(s.y + dy, height()), dx: dx, dy: dy, angle: angle }
+    }
+}
+
+// round the screen's edges
+fn wrap(p: Int, size: Int) -> Int {
+    let s = size * unit();
+    (p % s + s) % s
+}
+
+// everything in the pools a frame on: bullets and sparks burn down
+fn move_all(g: Game) {
+    move_pool(g.rocks, false);
+    move_pool(g.bullets, true);
+    move_pool(g.sparks, true);
+    let mut i = 0;
+    while i < g.rocks.count {
+        put(g.rocks, i, turn(), get(g.rocks, i, turn()) + get(g.rocks, i, spin()) & 1023);
+        i = i + 1;
+    }
+}
+
+fn move_pool(p: Pool, burns: Bool) {
+    let mut i = 0;
+    while i < p.count {
+        if get(p, i, alive()) > 0 {
+            put(p, i, px(), wrap(get(p, i, px()) + get(p, i, vx()), width()));
+            put(p, i, py(), wrap(get(p, i, py()) + get(p, i, vy()), height()));
+            if burns { put(p, i, alive(), get(p, i, alive()) - 1) }
+        }
+        i = i + 1;
+    }
+}
+
+fn spark(g: Game, x: Int, y: Int, dx: Int, dy: Int, life: Int) {
+    let i = free(g.sparks);
+    if i >= 0 {
+        put(g.sparks, i, alive(), life);
+        put(g.sparks, i, px(), x);
+        put(g.sparks, i, py(), y);
+        put(g.sparks, i, vx(), dx);
+        put(g.sparks, i, vy(), dy);
+    }
+}
+
+fn burst(g: Game, x: Int, y: Int, n: Int) {
+    let mut k = 0;
+    while k < n {
+        let a = random(g.r, 1024);
+        let speed = 40 + random(g.r, 200);
+        spark(g, x, y, cos(g.table, a) * speed >> 16, sin(g.table, a) * speed >> 16, 15 + random(g.r, 25));
+        k = k + 1;
+    }
+}
+
+// bullets breaking rocks, and rocks hitting the ship
+fn hits(g: Game, ship: Ship) {
+    let mut i = 0;
+    while i < g.rocks.count {
+        let size = get(g.rocks, i, alive());
+        if size > 0 {
+            let x = get(g.rocks, i, px());
+            let y = get(g.rocks, i, py());
+            let r = radius(size) * unit();
+            let mut b = 0;
+            while b < g.bullets.count {
+                if get(g.bullets, b, alive()) > 0 && get(g.rocks, i, alive()) > 0 && near(get(g.bullets, b, px()), get(g.bullets, b, py()), x, y, r) {
+                    put(g.bullets, b, alive(), 0);
+                    put(g.rocks, i, alive(), 0);
+                    set_stat(g, score(), stat(g, score()) + match size { 3 => 20, 2 => 50, _ => 100 });
+                    set_stat(g, beep(), 4);
+                    burst(g, x, y, 4 + size * 3);
+                    if size > 1 {
+                        rock(g, x, y, size - 1);
+                        rock(g, x, y, size - 1);
+                    }
+                }
+                b = b + 1;
+            }
+            let ship_there = stat(g, away()) == 0 && stat(g, safe()) == 0 && stat(g, lives()) > 0;
+            if ship_there && get(g.rocks, i, alive()) > 0 && near(ship.x, ship.y, x, y, r + 3 * unit()) {
+                set_stat(g, lives(), stat(g, lives()) - 1);
+                set_stat(g, away(), 90);
+                set_stat(g, safe(), 120);
+                set_stat(g, beep(), 12);
+                burst(g, ship.x, ship.y, 30);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// whether (ax, ay) is within r of (bx, by), the shorter way round the edges
+fn near(ax: Int, ay: Int, bx: Int, by: Int, r: Int) -> Bool {
+    let dx = short(ax - bx, width() * unit()) / 16;
+    let dy = short(ay - by, height() * unit()) / 16;
+    dx * dx + dy * dy < r / 16 * (r / 16)
+}
+
+fn short(d: Int, size: Int) -> Int {
+    if d > size / 2 { d - size } else if d < -size / 2 { d + size } else { d }
+}
+
+// ---- drawing
+
+fn render(c: Canvas, g: Game, ship: Ship, stars: Array<Int>) {
+    clear(c, rgb(4, 4, 12));
+    let mut i = 0;
+    while i < 40 {
+        array_set(c.pixels, array_get(stars, i), rgb(70, 70, 100));
+        i = i + 1;
+    }
+    let mut k = 0;
+    while k < g.rocks.count {
+        if get(g.rocks, k, alive()) > 0 { draw_rock(c, g, k) }
+        k = k + 1;
+    }
+    let mut b = 0;
+    while b < g.bullets.count {
+        if get(g.bullets, b, alive()) > 0 {
+            let x = get(g.bullets, b, px()) / unit();
+            let y = get(g.bullets, b, py()) / unit();
+            pixel(c, x, y, rgb(255, 255, 200));
+            pixel(c, x + 1, y, rgb(255, 200, 120));
+        }
+        b = b + 1;
+    }
+    let mut s = 0;
+    while s < g.sparks.count {
+        let life = get(g.sparks, s, alive());
+        if life > 0 {
+            let heat = (life * 8).min(255);
+            pixel(c, get(g.sparks, s, px()) / unit(), get(g.sparks, s, py()) / unit(), rgb(heat, heat * 3 / 4, heat / 3));
+        }
+        s = s + 1;
+    }
+    // (blinking while it can't be hit)
+    let blink = stat(g, safe()) > 0 && stat(g, safe()) / 6 % 2 == 0;
+    if stat(g, lives()) > 0 && stat(g, away()) == 0 && !blink {
+        draw_ship(c, g, ship.x, ship.y, ship.angle, rgb(230, 240, 255), key_down(key_up()));
+    }
+    let white = rgb(220, 220, 230);
+    text(c, stat(g, score()).show(), 3, 3, 1, white);
+    let mut l = 0;
+    while l < stat(g, lives()) {
+        draw_ship(c, g, (width() - 8 - l * 9) * unit(), 6 * unit(), 768, rgb(150, 160, 190), false);
+        l = l + 1;
+    }
+    if stat(g, lives()) == 0 {
+        let msg = "GAME OVER";
+        text(c, msg, (width() - text_width(msg, 2)) / 2, 48, 2, rgb(255, 90, 90));
+        text(c, "SPACE TO PLAY", (width() - text_width("SPACE TO PLAY", 1)) / 2, 66, 1, white);
+    }
+}
+
+// a point of a shape, (lx, ly) pixels from its middle, turned by angle
+// and put at (x, y): in 256ths of a pixel
+fn point_x(g: Game, x: Int, lx: Int, ly: Int, angle: Int) -> Int {
+    x + (lx * cos(g.table, angle) - ly * sin(g.table, angle) >> 8)
+}
+
+fn point_y(g: Game, y: Int, lx: Int, ly: Int, angle: Int) -> Int {
+    y + (lx * sin(g.table, angle) + ly * cos(g.table, angle) >> 8)
+}
+
+// a line between two points of a shape
+fn edge(c: Canvas, g: Game, x: Int, y: Int, angle: Int, ax: Int, ay: Int, bx: Int, by: Int, color: Int) {
+    line(c, point_x(g, x, ax, ay, angle) / unit(), point_y(g, y, ax, ay, angle) / unit(), point_x(g, x, bx, by, angle) / unit(), point_y(g, y, bx, by, angle) / unit(), color);
+}
+
+fn draw_ship(c: Canvas, g: Game, x: Int, y: Int, angle: Int, color: Int, flame: Bool) {
+    edge(c, g, x, y, angle, 7, 0, -5, -5, color);
+    edge(c, g, x, y, angle, -5, -5, -3, 0, color);
+    edge(c, g, x, y, angle, -3, 0, -5, 5, color);
+    edge(c, g, x, y, angle, -5, 5, 7, 0, color);
+    if flame && random(g.r, 3) > 0 {
+        edge(c, g, x, y, angle, -4, -2, -8 - random(g.r, 3), 0, rgb(255, 160, 60));
+        edge(c, g, x, y, angle, -8, 0, -4, 2, rgb(255, 160, 60));
+    }
+}
+
+// a rock: nine points around it, each a little nearer or further, by its shape
+fn draw_rock(c: Canvas, g: Game, i: Int) {
+    let size = get(g.rocks, i, alive());
+    let r = radius(size);
+    let x = get(g.rocks, i, px());
+    let y = get(g.rocks, i, py());
+    let angle = get(g.rocks, i, turn());
+    let s = get(g.rocks, i, shape());
+    let color = match size { 3 => rgb(200, 190, 170), 2 => rgb(180, 175, 160), _ => rgb(160, 155, 150) };
+    let mut k = 0;
+    while k < 9 {
+        let a1 = k * 1024 / 9;
+        let a2 = (k + 1) * 1024 / 9;
+        let r1 = r * (70 + (s * 7 + k * 13) * 37 % 45) / 100;
+        let r2 = r * (70 + (s * 7 + (k + 1) % 9 * 13) * 37 % 45) / 100;
+        edge(c, g, x, y, angle, cos(g.table, a1) * r1 >> 16, sin(g.table, a1) * r1 >> 16, cos(g.table, a2) * r2 >> 16, sin(g.table, a2) * r2 >> 16, color);
+        k = k + 1;
+    }
+}

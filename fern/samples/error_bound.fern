@@ -1,0 +1,4 @@
+// A type parameter needs a bound to use a trait's methods.
+fn show_it<T>(x: T) -> String { x.show() }
+fn main() { println(show_it(1)); }
+// error: T needs the bound T: Show

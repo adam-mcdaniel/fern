@@ -1,0 +1,519 @@
+// The dark's creatures: what comes when (the night's director), how each
+// kind moves and fights, and the thing that comes at the end of the night.
+//
+// Walkers follow the way the search from the player found (run::find_ways)
+// round trees and walls, and push each other apart so a crowd spreads;
+// bats and wraiths fly straight over everything.
+
+use crate::math::{sin, cos, isqrt};
+use super::run::*;
+use super::arms::*;
+use super::world::{brazier_count, size};
+use super::gfx::{rgb};
+
+// ---- the kinds' numbers
+
+// hit points, speed (16ths of a pixel a frame), damage, embers, radius
+fn base_hp(k: Int) -> Int { if k == 0 { 9 } else if k == 1 { 6 } else if k == 2 { 40 } else if k == 3 { 5 } else if k == 4 { 22 } else if k == 5 { 30 } else { 75 } }
+fn base_speed(k: Int) -> Int { if k == 0 { 9 } else if k == 1 { 17 } else if k == 2 { 6 } else if k == 3 { 26 } else if k == 4 { 8 } else if k == 5 { 11 } else { 12 } }
+fn base_dmg(k: Int) -> Int { if k == 0 { 5 } else if k == 1 { 4 } else if k == 2 { 10 } else if k == 3 { 4 } else if k == 4 { 6 } else if k == 5 { 6 } else { 14 } }
+fn base_xp(k: Int) -> Int { if k == 0 || k == 1 || k == 3 { 1 } else if k == 2 || k == 4 { 3 } else if k == 5 { 4 } else { 6 } }
+fn base_r(k: Int) -> Int { if k == 2 { 8 } else if k == 6 { 7 } else if k == 4 || k == 5 { 6 } else { 5 } }
+
+pub fn boss_name(region: Int) -> String {
+    if region == 0 { "THE ROOTMOTHER" } else if region == 1 { "THE DROWNED BELL" } else { "THE ECLIPSE" }
+}
+
+pub fn boss_minute() -> Int { 9 }
+
+// a creature of a kind at (x, y) (16ths): its index, or -1
+pub fn add_foe(r: Run, kind: Int, x: Int, y: Int, elite: Bool) -> Int {
+    let f = r.foes;
+    let i = spawn(f.p);
+    if i >= 0 {
+        let m = minute(r);
+        let region = get(r, k_region());
+        let toughness = 100 + m * 22 + region * 35 + (if m >= 8 { (m - 7) * 30 } else { 0 });
+        let hp = if kind == boss() { (if region == 0 { 2600 } else if region == 1 { 4400 } else { 7200 }) }
+            else { base_hp(kind) * toughness / 100 * (if elite { 14 } else { 1 }) };
+        array_set(f.x, i, x);
+        array_set(f.y, i, y);
+        array_set(f.hp, i, hp);
+        array_set(f.max, i, hp);
+        array_set(f.kind, i, kind);
+        array_set(f.elite, i, if elite { 1 } else { 0 });
+        array_set(f.speed, i, if kind == boss() { 7 } else { base_speed(kind) * (95 + roll(r, 12)) / 100 + region });
+        array_set(f.dmg, i, if kind == boss() { 22 + region * 6 } else { base_dmg(kind) * (100 + m * 9 + region * 20) / 100 * (if elite { 2 } else { 1 }) });
+        array_set(f.r, i, if kind == boss() { 22 } else if elite { base_r(kind) * 3 / 2 + 3 } else { base_r(kind) });
+        array_set(f.xp, i, if kind == boss() { 0 } else { base_xp(kind) * (if elite { 12 } else { 1 }) });
+        array_set(f.t, i, roll(r, 200));
+        array_set(f.aim, i, -1);
+        array_set(f.ring, i, -1);
+        inc(r, k_ids(), 1);
+        array_set(f.id, i, get(r, k_ids()));
+    }
+    i
+}
+
+// somewhere for a creature to come from: just out of sight round the
+// player, where a walker can stand (or nowhere, (-1, -1))
+fn edge_spot(r: Run, flies: Bool) -> (Int, Int) {
+    let mut tries = 0;
+    let mut found = (-1, -1);
+    while tries < 8 {
+        let a = roll(r, 1024);
+        let d = 290 + roll(r, 50);
+        let x = get(r, k_x()) + cos(r.table, a) * d / 4096;
+        let y = get(r, k_y()) + sin(r.table, a) * d / 4096;
+        if inside(x, y) && (flies || walkable16(r, x, y)) {
+            found = (x, y);
+            tries = 8;
+        }
+        tries = tries + 1;
+    }
+    found
+}
+
+// ---- the director
+
+// what comes, minute by minute: a kind picked by the minute's weights
+fn pick_kind(r: Run) -> Int {
+    let m = minute(r).min(8);
+    let w = if m == 0 { [100, 0, 0, 0, 0, 0, 0] } else if m == 1 { [80, 20, 0, 0, 0, 0, 0] } else if m == 2 { [60, 25, 15, 0, 0, 0, 0] }
+        else if m == 3 { [45, 25, 20, 0, 10, 0, 0] } else if m == 4 { [35, 25, 20, 0, 10, 10, 0] } else if m == 5 { [30, 20, 24, 0, 12, 8, 6] }
+        else if m == 6 { [26, 20, 22, 0, 12, 8, 12] } else { [22, 20, 22, 0, 12, 8, 16] };
+    let mut pick = roll(r, 100);
+    let mut k = 0;
+    let mut chosen = 0;
+    let mut rest = w;
+    let mut done = false;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(x, tail) => {
+                if !done && pick < x { chosen = k; done = true } else if !done { pick = pick - x }
+                k = k + 1;
+                rest = tail;
+            }
+        }
+    }
+    chosen
+}
+
+pub fn direct(r: Run) {
+    let t = get(r, k_time());
+    let m = minute(r);
+    let region = get(r, k_region());
+    let alive = count(r.foes.p);
+    let boss_up = get(r, k_boss()) >= 0;
+    // the steady stream: more, and more often, as the night goes on
+    let every = (84 - m * 9 - region * 6).max(6);
+    let most = (110 + m * 55 + region * 40).min(r.foes.p.cap - 60);
+    let crowd = if boss_up { most / 3 } else { most };
+    if t % every == 0 && alive < crowd {
+        let n = 1 + (m + region) / 2 + (if m > 0 { roll(r, 2) } else { 0 });
+        let mut k = 0;
+        while k < n {
+            let kind = pick_kind(r);
+            let (x, y) = edge_spot(r, kind == wraith());
+            if x >= 0 { add_foe(r, kind, x, y, false); }
+            k = k + 1;
+        }
+    }
+    // the night's events, at their times (seconds)
+    let s = t / 60;
+    if t % 60 == 0 && !boss_up {
+        if s == 30 { announce(r, "THEY'RE COMING. FIND THE BRAZIERS.") }
+        if s == 80 || s == 250 || s == 440 { swarm(r, if s > 200 { 2 } else { 1 }) }
+        if s == 150 || s == 300 || s == 390 || s == 470 { elite(r) }
+        if s == 180 { encircle(r, gloom(), 44) }
+        if s == 360 { encircle(r, husk(), 28) }
+        if s == 270 { pack(r, snuffer(), 6); announce(r, "SNUFFERS! THEY'LL PUT OUT YOUR BRAZIERS.") }
+        if s == 500 { announce(r, "THE NIGHT DEEPENS...") }
+        if s == boss_minute() * 60 { summon_boss(r) }
+    }
+}
+
+// a flight of nightwings, straight across the screen, from one side (or two)
+fn swarm(r: Run, sides: Int) {
+    let mut side = 0;
+    while side < sides {
+        let a = roll(r, 1024);
+        let (dx, dy) = (cos(r.table, a), sin(r.table, a));
+        let (cx, cy) = (get(r, k_x()) - dx * 300 / 4096, get(r, k_y()) - dy * 300 / 4096);
+        let mut k = 0;
+        while k < 26 {
+            // (a block of them, side by side and a few deep)
+            let across = (k % 9 - 4) * 18;
+            let back = (k / 9) * 20;
+            let x = cx - dy * across / 4096 - dx * back / 4096;
+            let y = cy + dx * across / 4096 - dy * back / 4096;
+            let i = add_foe(r, bat(), x, y, false);
+            if i >= 0 { array_set(r.foes.aim, i, a) }
+            k = k + 1;
+        }
+        side = side + 1;
+    }
+    announce(r, "NIGHTWINGS!");
+    sound(r, s_alarm(), 0, get(r, k_x()));
+}
+
+fn encircle(r: Run, kind: Int, n: Int) {
+    let mut k = 0;
+    while k < n {
+        let a = k * 1024 / n;
+        let x = get(r, k_x()) + cos(r.table, a) * 230 / 4096;
+        let y = get(r, k_y()) + sin(r.table, a) * 160 / 4096;
+        if inside(x, y) && walkable16(r, x, y) { add_foe(r, kind, x, y, false); }
+        k = k + 1;
+    }
+    announce(r, "SURROUNDED!");
+    sound(r, s_alarm(), 0, get(r, k_x()));
+}
+
+fn pack(r: Run, kind: Int, n: Int) {
+    let (x, y) = edge_spot(r, false);
+    if x >= 0 {
+        let mut k = 0;
+        while k < n {
+            add_foe(r, kind, x + (roll(r, 40) - 20) * 16, y + (roll(r, 40) - 20) * 16, false);
+            k = k + 1;
+        }
+    }
+}
+
+fn elite(r: Run) {
+    let m = minute(r);
+    let kind = if m < 4 { husk() } else if m < 6 { spitter() } else { wraith() };
+    let (x, y) = edge_spot(r, kind == wraith());
+    if x >= 0 {
+        add_foe(r, kind, x, y, true);
+        announce(r, "SOMETHING BIG IS COMING...");
+        sound(r, s_alarm(), 1, x);
+    }
+}
+
+fn summon_boss(r: Run) {
+    let (x, y) = edge_spot(r, true);
+    let (bx, by) = if x >= 0 { (x, y) } else { (get(r, k_x()), get(r, k_y()) - 250 * 16) };
+    let i = add_foe(r, boss(), bx, by, false);
+    if i >= 0 {
+        keep(r, k_boss(), array_get(r.foes.id, i));
+        keep(r, k_boss_max(), array_get(r.foes.max, i));
+        announce(r, boss_name(get(r, k_region())));
+        sound(r, s_roar(), 0, bx);
+        shake(r, 10);
+    }
+}
+
+// ---- each creature, each frame
+
+pub fn move_foes(r: Run) {
+    let f = r.foes;
+    let n = count(f.p);
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let g = grid();
+    let mut i = 0;
+    while i < n {
+        let kind = array_get(f.kind, i);
+        let (x, y) = (array_get(f.x, i), array_get(f.y, i));
+        let t = array_get(f.t, i) + 1;
+        array_set(f.t, i, t);
+        array_set(f.flash, i, (array_get(f.flash, i) - 1).max(0));
+        array_set(f.halo, i, (array_get(f.halo, i) - 1).max(0));
+        array_set(f.burn, i, (array_get(f.burn, i) - 1).max(0));
+        array_set(f.beam, i, (array_get(f.beam, i) - 1).max(0));
+        let speed = array_get(f.speed, i);
+        let radius = array_get(f.r, i);
+        // where it wants to go, as a direction 256 long
+        let (wx, wy) = if kind == boss() { boss_think(r, i) }
+            else if kind == bat() {
+                let a = array_get(f.aim, i);
+                if t > 900 { array_set(f.hp, i, 0) }
+                ((cos(r.table, a) >> 8), (sin(r.table, a) >> 8))
+            }
+            else if kind == spitter() { spitter_think(r, i) }
+            else if kind == snuffer() { snuffer_think(r, i) }
+            else { toward_player(r, x, y, kind == wraith()) };
+        // pushed apart from those it's crowding (its cell and the ones round it)
+        let mut sx = 0;
+        let mut sy = 0;
+        if kind != bat() {
+            let (cx, cy) = ((x >> 8).clamp(0, g - 1), (y >> 8).clamp(0, g - 1));
+            let mut oy = (cy - 1).max(0);
+            while oy <= (cy + 1).min(g - 1) {
+                let mut ox = (cx - 1).max(0);
+                while ox <= (cx + 1).min(g - 1) {
+                    let mut j = array_get(r.head, oy * g + ox);
+                    while j >= 0 {
+                        if j != i {
+                            let dx = x - array_get(f.x, j);
+                            let dy = y - array_get(f.y, j);
+                            let want = (radius + array_get(f.r, j)) * 16;
+                            if dx.abs() < want && dy.abs() < want {
+                                let d = length(dx, dy);
+                                if d < want {
+                                    let push = (want - d) / 3;
+                                    let dd = d.max(1);
+                                    sx = sx + dx * push / dd;
+                                    sy = sy + dy * push / dd;
+                                }
+                            }
+                        }
+                        j = array_get(r.next, j);
+                    }
+                    ox = ox + 1;
+                }
+                oy = oy + 1;
+            }
+        }
+        let vx = array_get(f.vx, i);
+        let vy = array_get(f.vy, i);
+        array_set(f.vx, i, vx * 13 / 16);
+        array_set(f.vy, i, vy * 13 / 16);
+        // (slowed in shallow water)
+        let wading = kind != bat() && kind != wraith() && kind != boss() && super::world::occ_at(r.w, x >> 4, y >> 4) == super::world::slow();
+        let sp = if wading { speed / 2 } else { speed };
+        let mx = (wx * sp >> 8) + sx.clamp(-24, 24) + vx;
+        let my = (wy * sp >> 8) + sy.clamp(-24, 24) + vy;
+        let flies = kind == bat() || kind == wraith() || kind == boss();
+        let nx = x + mx;
+        let ny = y + my;
+        if flies {
+            if inside(nx, ny) || kind == bat() {
+                array_set(f.x, i, nx);
+                array_set(f.y, i, ny);
+            }
+        } else {
+            if walkable16(r, nx, y) { array_set(f.x, i, nx) }
+            if walkable16(r, array_get(f.x, i), ny) { array_set(f.y, i, ny) }
+        }
+        // too far behind: brought round to the front again
+        let (fx, fy) = (array_get(f.x, i) - px, array_get(f.y, i) - py);
+        if kind != boss() && kind != bat() && (fx.abs() > 520 * 16 || fy.abs() > 400 * 16) {
+            let (ex, ey) = edge_spot(r, flies);
+            if ex >= 0 {
+                array_set(f.x, i, ex);
+                array_set(f.y, i, ey);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// toward the player: by the way found round things, or straight if
+// there's none (too far, or flying)
+fn toward_player(r: Run, x: Int, y: Int, straight: Bool) -> (Int, Int) {
+    let d = if straight { -1 } else { way_at(r, x, y) };
+    let (dx, dy) = (get(r, k_x()) - x, get(r, k_y()) - y);
+    // (close enough: straight at it)
+    if d < 0 || (dx.abs() < 160 && dy.abs() < 160) { unit(dx, dy) } else { (dir_x(d), dir_y(d)) }
+}
+
+// a spitter keeps its distance, and spits
+fn spitter_think(r: Run, i: Int) -> (Int, Int) {
+    let f = r.foes;
+    let (x, y) = (array_get(f.x, i), array_get(f.y, i));
+    let (dx, dy) = (get(r, k_x()) - x, get(r, k_y()) - y);
+    let d = dist(dx, dy) / 16;
+    let t = array_get(f.t, i);
+    if t % 150 == 0 && d < 220 {
+        let (ux, uy) = unit(dx, dy);
+        let n = if array_get(f.elite, i) > 0 { 5 } else { 1 };
+        let mut k = 0;
+        while k < n {
+            let a = (k * 2 - (n - 1)) * 30;
+            let (c, s) = (cos(r.table, a), sin(r.table, a));
+            bolt(r, x, y, ((ux * c - uy * s) >> 16) * 22 / 256, ((ux * s + uy * c) >> 16) * 22 / 256, array_get(f.dmg, i));
+            k = k + 1;
+        }
+        sound(r, s_spit(), 0, x);
+    }
+    if d < 100 { let (ux, uy) = unit(-dx, -dy); (ux, uy) } else if d > 150 { toward_player(r, x, y, false) } else { (0, 0) }
+}
+
+// a snuffer goes for the nearest lit brazier, and puts it out
+fn snuffer_think(r: Run, i: Int) -> (Int, Int) {
+    let f = r.foes;
+    let (x, y) = (array_get(f.x, i), array_get(f.y, i));
+    let mut best = -1;
+    let mut best_d = 600 * 600;
+    let mut b = 0;
+    while b < brazier_count(r.w) {
+        if array_get(r.lit, b) > 0 {
+            let dx = array_get(r.w.braziers, b * 2) - x / 16;
+            let dy = array_get(r.w.braziers, b * 2 + 1) - y / 16;
+            if dx * dx + dy * dy < best_d {
+                best_d = dx * dx + dy * dy;
+                best = b;
+            }
+        }
+        b = b + 1;
+    }
+    if best < 0 { toward_player(r, x, y, false) } else {
+        let (bx, by) = (array_get(r.w.braziers, best * 2) * 16, array_get(r.w.braziers, best * 2 + 1) * 16);
+        if best_d < 18 * 18 {
+            // (beside it: snuffing, which takes two seconds)
+            let s = array_get(f.state, i) + 1;
+            array_set(f.state, i, s);
+            if s > 120 {
+                array_set(r.lit, best, 0);
+                array_set(r.heat, best, 0);
+                array_set(f.state, i, 0);
+                sound(r, s_snuff(), 0, x);
+                announce(r, "A BRAZIER HAS GONE OUT.");
+            }
+            (0, 0)
+        } else {
+            array_set(f.state, i, 0);
+            unit(bx - x, by - y)
+        }
+    }
+}
+
+// ---- the creatures' shots
+
+pub fn bolt(r: Run, x: Int, y: Int, vx: Int, vy: Int, dmg: Int) {
+    let p = r.bolts;
+    let i = spawn(p);
+    if i >= 0 {
+        array_set(col(p, bo_x()), i, x);
+        array_set(col(p, bo_y()), i, y);
+        array_set(col(p, bo_vx()), i, vx);
+        array_set(col(p, bo_vy()), i, vy);
+        array_set(col(p, bo_life()), i, 300);
+        array_set(col(p, bo_dmg()), i, dmg);
+    }
+}
+
+// bolts flying: they stop at walls, and hurt the player
+pub fn move_bolts(r: Run) -> Int {
+    let p = r.bolts;
+    let n = count(p);
+    let (px, py) = (get(r, k_x()), get(r, k_y()));
+    let mut hit = 0;
+    let mut i = 0;
+    while i < n {
+        let x = array_get(col(p, bo_x()), i) + array_get(col(p, bo_vx()), i);
+        let y = array_get(col(p, bo_y()), i) + array_get(col(p, bo_vy()), i);
+        array_set(col(p, bo_x()), i, x);
+        array_set(col(p, bo_y()), i, y);
+        let life = array_get(col(p, bo_life()), i) - 1;
+        array_set(col(p, bo_life()), i, life);
+        if super::world::occ_at(r.w, x >> 4, y >> 4) == super::world::walls() { array_set(col(p, bo_life()), i, 0) }
+        let (dx, dy) = (x - px, y - py);
+        if dx * dx + dy * dy < 7 * 7 * 256 {
+            hit = hit.max(array_get(col(p, bo_dmg()), i));
+            array_set(col(p, bo_life()), i, 0);
+            burst(r, x, y, 8, rgb(200, 100, 255), 40, 14);
+        }
+        i = i + 1;
+    }
+    sweep(p, bo_life());
+    hit
+}
+
+// ---- the boss
+
+// what the boss does next, by turns: walking at the player a while, then
+// one of its region's attacks
+fn boss_think(r: Run, i: Int) -> (Int, Int) {
+    let f = r.foes;
+    let (x, y) = (array_get(f.x, i), array_get(f.y, i));
+    let region = get(r, k_region());
+    let t = array_get(f.t, i);
+    let state = array_get(f.state, i);
+    let enraged = array_get(f.hp, i) * 3 < array_get(f.max, i);
+    let walk_for = if enraged { 110 } else { 170 };
+    if state == 0 {
+        if t > walk_for {
+            // (the next attack, round its region's list)
+            let turn = array_get(f.aim, i) + 1;
+            array_set(f.aim, i, turn);
+            let attacks = if region == 0 { [4, 1, 3, 1] } else if region == 1 { [2, 4, 1, 2] } else { [5, 2, 3, 4, 1] };
+            let next = attacks.get(turn % attacks.len()).unwrap_or(1);
+            array_set(f.state, i, next);
+            array_set(f.t, i, 0);
+            if next == 3 { sound(r, s_roar(), 1, x) }
+        }
+        toward_player(r, x, y, true)
+    } else if state == 1 {
+        // a burst: rings of bolts all round, three times
+        if t == 10 || t == 40 || t == 70 {
+            let n = 22 + region * 4;
+            let mut k = 0;
+            while k < n {
+                let a = k * 1024 / n + t * 7;
+                bolt(r, x, y, (cos(r.table, a) * 20) >> 16, (sin(r.table, a) * 20) >> 16, array_get(f.dmg, i) / 2);
+                k = k + 1;
+            }
+            sound(r, s_spit(), 1, x);
+            flash(r, x, y, 70, 14, 0, 200);
+        }
+        if t > 90 { end_attack(r, i) }
+        (0, 0)
+    } else if state == 2 {
+        // a spiral: bolts thrown round as it turns
+        if t % 4 == 0 {
+            let a = t * 23;
+            let mut k = 0;
+            while k < 3 {
+                let b = a + k * 341;
+                bolt(r, x, y, (cos(r.table, b) * 17) >> 16, (sin(r.table, b) * 17) >> 16, array_get(f.dmg, i) / 2);
+                k = k + 1;
+            }
+        }
+        if t % 20 == 0 { sound(r, s_spit(), 0, x) }
+        if t > 140 { end_attack(r, i) }
+        (0, 0)
+    } else if state == 3 {
+        // a charge: still a moment (it glows), then hurtling at where the player was
+        if t < 45 {
+            let (ux, uy) = unit(get(r, k_x()) - x, get(r, k_y()) - y);
+            array_set(f.vx, i, 0);
+            array_set(f.vy, i, 0);
+            // (which way, packed into its ring cell until it goes: novas'
+            // numbers are far smaller)
+            array_set(f.ring, i, (ux + 512) * 1024 + (uy + 512));
+            (0, 0)
+        } else if t < 95 {
+            let packed = array_get(f.ring, i);
+            let (ux, uy) = (packed / 1024 - 512, packed % 1024 - 512);
+            if t % 3 == 0 { burst(r, x, y, 3, rgb(255, 80, 60), 30, 14) }
+            (ux * 9, uy * 9)
+        } else {
+            end_attack(r, i);
+            (0, 0)
+        }
+    } else if state == 4 {
+        // calling the dark's creatures to it
+        if t == 20 {
+            let mut k = 0;
+            let n = 14;
+            while k < n {
+                let a = k * 1024 / n;
+                let kind = if region == 0 { gloom() } else if region == 1 { shade() } else { wraith() };
+                add_foe(r, kind, x + cos(r.table, a) * 60 / 4096, y + sin(r.table, a) * 60 / 4096, false);
+                k = k + 1;
+            }
+            sound(r, s_roar(), 0, x);
+        }
+        if t > 60 { end_attack(r, i) }
+        (0, 0)
+    } else {
+        // the eclipse: the light goes out of the world for a while
+        if t == 10 {
+            keep(r, k_dark(), 420);
+            announce(r, "THE LIGHT IS FADING!");
+            sound(r, s_roar(), 1, x);
+        }
+        if t > 50 { end_attack(r, i) }
+        (0, 0)
+    }
+}
+
+fn end_attack(r: Run, i: Int) {
+    array_set(r.foes.state, i, 0);
+    array_set(r.foes.t, i, 0);
+    array_set(r.foes.ring, i, -1);
+}

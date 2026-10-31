@@ -1,0 +1,611 @@
+// The market, between weeks: two tools, three seeds and one improvement
+// for the farm on the stalls, a reroll for new stock, and the shed, where
+// tools can be sold back for half what they cost. A seed bought is
+// planted at once: choose its plot on the table (the same seed on the
+// same plant grows it a level; a different one replaces it).
+//
+// The market's on the panels either side of the table, which shows the
+// farm as it'll start the week.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+use super::run::*;
+use super::seeds::*;
+use super::tools::*;
+use super::table::*;
+use super::hud::*;
+use super::icons::{tool_icon, good_icon, fair_icon};
+use super::sprites::{Sprites, plant_sprite};
+use super::fx::*;
+
+// the improvements
+pub fn good_count() -> Int { 4 }
+pub fn g_ball() -> Int { 0 }
+pub fn g_save() -> Int { 1 }
+pub fn g_plot() -> Int { 2 }
+pub fn g_fertilizer() -> Int { 3 }
+
+pub fn good_name(k: Int) -> String {
+    if k == 0 { "Extra Ball" } else if k == 1 { "Ball Saver" } else if k == 2 { "New Plot" } else { "Fertilizer" }
+}
+pub fn good_text(k: Int) -> String {
+    if k == 0 { "One more ball, every week from now on." }
+    else if k == 1 { "Four more seconds of ball save at the start of each ball." }
+    else if k == 2 { "Opens another plot on the table." }
+    else { "Grows a plant a level: it yields more, for good." }
+}
+pub fn good_price(k: Int) -> Int { if k == 0 { 10 } else if k == 1 { 4 } else if k == 2 { 6 } else { 3 } }
+
+// the market's modes
+pub fn mk_browse() -> Int { 0 }
+pub fn mk_plant() -> Int { 1 }
+pub fn mk_feed() -> Int { 2 }
+
+pub struct Market {
+    tools: Array<Int>,
+    seeds: Array<Int>,
+    good: Int,
+    // which item's chosen: in the stalls (0 and up), or in the shed (100 + slot)
+    sel: Int,
+    mode: Int,
+    pending: Int,
+    paid: Int,
+    plot: Int,
+    msg: String,
+    msg_t: Int,
+    frame: Int,
+    // when something was bought (for a flourish), and where
+    bought_t: Int,
+    done: Bool,
+}
+
+pub fn market(r: Run, n_plots: Int) -> Market {
+    let m = Market { tools: array(2, -1), seeds: array(4, -1), good: -1, sel: 0, mode: mk_browse(), pending: -1, paid: 0, plot: 0, msg: "", msg_t: 0, frame: 0, bought_t: -100, done: false };
+    stock(m, r, n_plots);
+    m.good = pick_good(r, n_plots);
+    m
+}
+
+fn seed_slots(r: Run) -> Int { if has_tool(r, catalog()) { 4 } else { 3 } }
+
+// fresh stock on the stalls: tools not in the shed, seeds, both by rarity
+fn stock(m: Market, r: Run, n_plots: Int) {
+    let mut i = 0;
+    while i < 2 {
+        m.tools.set(i, pick_tool(r, m));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 4 {
+        m.seeds.set(i, if i < seed_slots(r) { pick_seed(r) } else { -1 });
+        i = i + 1;
+    }
+}
+
+fn rarity_roll(r: Run) -> Int {
+    let k = roll(r, 100);
+    if k < 8 { 2 } else if k < 35 { 1 } else { 0 }
+}
+
+fn pick_tool(r: Run, m: Market) -> Int {
+    let want = rarity_roll(r);
+    let mut t = -1;
+    let mut tries = 0;
+    while t < 0 && tries < 200 {
+        let k = roll(r, tool_count());
+        let ok = !has_tool(r, k) && m.tools.get(0) != k && m.tools.get(1) != k && (tool_rarity(k) == want || tries > 100);
+        if ok { t = k }
+        tries = tries + 1;
+    }
+    t
+}
+
+fn pick_seed(r: Run) -> Int {
+    let want = rarity_roll(r);
+    let mut s = -1;
+    let mut tries = 0;
+    while s < 0 && tries < 200 {
+        let k = roll(r, seed_count());
+        if seed_rarity(k) == want || tries > 100 { s = k }
+        tries = tries + 1;
+    }
+    s
+}
+
+fn pick_good(r: Run, n_plots: Int) -> Int {
+    let mut g = -1;
+    let mut tries = 0;
+    while g < 0 && tries < 50 {
+        let k = roll(r, good_count());
+        let ok = if k == g_ball() { r.balls < 5 } else if k == g_save() { r.save_secs < 20 } else if k == g_plot() { r.plots_open < n_plots } else { true };
+        if ok { g = k }
+        tries = tries + 1;
+    }
+    g
+}
+
+pub fn seed_cost(r: Run, s: Int) -> Int { (seed_price(s) - (if has_tool(r, catalog()) { 1 } else { 0 })).max(1) }
+pub fn reroll_cost(r: Run) -> Int { 1 + r.rerolls }
+pub fn sell_price(t: Int) -> Int { (tool_price(t) / 2).max(1) }
+
+// the items in the stalls, in order: two tools, the seeds, the good,
+// reroll, and on to the week
+pub fn item_count(r: Run) -> Int { 2 + seed_slots(r) + 3 }
+fn item_kind(r: Run, i: Int) -> Int {
+    let s = seed_slots(r);
+    if i < 2 { 0 } else if i < 2 + s { 1 } else if i == 2 + s { 2 } else if i == 3 + s { 3 } else { 4 }
+}
+
+fn say_msg(m: Market, s: String) {
+    m.msg = s;
+    m.msg_t = 120;
+}
+
+// ---- what the player does
+
+pub struct Choice { up: Bool, down: Bool, left: Bool, right: Bool, ok: Bool, back: Bool, mx: Int, my: Int, click: Bool, moved: Bool }
+
+// a frame of the market; what it asks to be heard goes to f
+pub fn step_market(m: Market, r: Run, t: Table, c: Choice, f: Fx) {
+    m.frame = m.frame + 1;
+    if m.msg_t > 0 { m.msg_t = m.msg_t - 1 }
+    if m.mode == mk_browse() { browse(m, r, t, c, f) } else { choose_plot(m, r, t, c, f) }
+}
+
+fn browse(m: Market, r: Run, t: Table, c: Choice, f: Fx) {
+    let n = item_count(r);
+    // the mouse, over an item
+    let over = item_at(r, c.mx, c.my);
+    if c.moved && over >= 0 && over != m.sel {
+        m.sel = over;
+        sound(f, sn_tick(), 1, 0);
+    }
+    if c.up {
+        m.sel = if m.sel >= 100 { 100 + (m.sel - 100 + max_tools() - 1) % max_tools() } else { (m.sel + n - 1) % n };
+        sound(f, sn_tick(), 1, 0);
+    }
+    if c.down {
+        m.sel = if m.sel >= 100 { 100 + (m.sel - 100 + 1) % max_tools() } else { (m.sel + 1) % n };
+        sound(f, sn_tick(), 1, 0);
+    }
+    if c.right && m.sel < 100 { m.sel = 100; sound(f, sn_tick(), 1, 0); }
+    if c.left && m.sel >= 100 { m.sel = 0; sound(f, sn_tick(), 1, 0); }
+    if c.ok || (c.click && over >= 0) {
+        if m.sel >= 100 { sell(m, r, m.sel - 100, f) } else { buy(m, r, t, m.sel, f) }
+    }
+}
+
+fn buy(m: Market, r: Run, t: Table, i: Int, f: Fx) {
+    let k = item_kind(r, i);
+    if k == 0 {
+        let tool = m.tools.get(i);
+        if tool < 0 { say_msg(m, "Sold out") }
+        else if r.money < tool_price(tool) { no_money(m, f) }
+        else if tools_held(r) >= max_tools() { say_msg(m, "The shed's full: sell a tool first"); sound(f, sn_warn(), 0, 0); }
+        else {
+            r.money = r.money - tool_price(tool);
+            give_tool(r, tool);
+            m.tools.set(i, -1);
+            m.bought_t = m.frame;
+            sound(f, sn_coin(), 0, 0);
+            sound(f, sn_tool(), 0, 0);
+        }
+    } else if k == 1 {
+        let s = m.seeds.get(i - 2);
+        if s < 0 { say_msg(m, "Sold out") }
+        else if r.money < seed_cost(r, s) { no_money(m, f) }
+        else {
+            m.mode = mk_plant();
+            m.pending = i - 2;
+            m.plot = first_plot(r, s);
+            sound(f, sn_tick(), 2, 0);
+        }
+    } else if k == 2 {
+        let gd = m.good;
+        if gd < 0 { say_msg(m, "Sold out") }
+        else if r.money < good_price(gd) { no_money(m, f) }
+        else if gd == g_fertilizer() {
+            if count_all(r) == 0 { say_msg(m, "Nothing planted to feed") } else {
+                m.mode = mk_feed();
+                m.plot = first_plot(r, -2);
+                sound(f, sn_tick(), 2, 0);
+            }
+        } else {
+            r.money = r.money - good_price(gd);
+            if gd == g_ball() { r.balls = r.balls + 1 }
+            if gd == g_save() { r.save_secs = r.save_secs + 4 }
+            if gd == g_plot() { r.plots_open = (r.plots_open + 1).min(t.n_plots) }
+            m.good = -1;
+            m.bought_t = m.frame;
+            sound(f, sn_coin(), 0, 0);
+            sound(f, sn_rent(), 1, 0);
+        }
+    } else if k == 3 {
+        let cost = reroll_cost(r);
+        if r.money < cost { no_money(m, f) } else {
+            r.money = r.money - cost;
+            r.rerolls = r.rerolls + 1;
+            stock(m, r, t.n_plots);
+            m.bought_t = m.frame;
+            sound(f, sn_coin(), 0, 0);
+            sound(f, sn_spin(), 3, 0);
+        }
+    } else {
+        m.done = true;
+        sound(f, sn_launch(), 128, 0);
+    }
+}
+
+fn no_money(m: Market, f: Fx) {
+    say_msg(m, "Not enough coins");
+    sound(f, sn_warn(), 0, 0);
+}
+
+fn count_all(r: Run) -> Int {
+    let mut n = 0;
+    let mut i = 0;
+    while i < r.plots_open {
+        if r.plot_seed.get(i) >= 0 { n = n + 1 }
+        i = i + 1;
+    }
+    n
+}
+
+fn sell(m: Market, r: Run, slot: Int, f: Fx) {
+    let tool = r.tools.get(slot);
+    if tool >= 0 {
+        r.money = r.money + sell_price(tool);
+        r.tools.set(slot, -1);
+        r.tool_val.set(slot, 0);
+        say_msg(m, "Sold the " ++ tool_name(tool) ++ " for " ++ sell_price(tool).show());
+        sound(f, sn_coin(), 0, 0);
+    }
+}
+
+// a good plot to start choosing from: the same seed (to level it), else
+// an empty one, else the first (seed -2: any planted one)
+fn first_plot(r: Run, s: Int) -> Int {
+    let mut best = -1;
+    let mut i = 0;
+    while i < r.plots_open {
+        let p = r.plot_seed.get(i);
+        if best < 0 && ((s >= 0 && p == s && r.plot_level.get(i) < 5) || (s == -2 && p >= 0)) { best = i }
+        i = i + 1;
+    }
+    i = 0;
+    while i < r.plots_open {
+        if best < 0 && s >= 0 && r.plot_seed.get(i) < 0 { best = i }
+        i = i + 1;
+    }
+    best.max(0)
+}
+
+fn choose_plot(m: Market, r: Run, t: Table, c: Choice, f: Fx) {
+    let over = plot_at(r, t, c.mx, c.my);
+    if c.moved && over >= 0 && over != m.plot { m.plot = over; sound(f, sn_tick(), 1, 0); }
+    if c.left || c.right || c.up || c.down {
+        // (the nearest plot that way)
+        let dx = if c.left { -1 } else if c.right { 1 } else { 0 };
+        let dy = if c.up { -1 } else if c.down { 1 } else { 0 };
+        m.plot = nearest_plot(r, t, m.plot, dx, dy);
+        sound(f, sn_tick(), 1, 0);
+    }
+    if c.back {
+        m.mode = mk_browse();
+        sound(f, sn_tick(), 0, 0);
+    } else if c.ok || (c.click && over >= 0) {
+        let i = m.plot;
+        if m.mode == mk_plant() {
+            let s = m.seeds.get(m.pending);
+            let cost = seed_cost(r, s);
+            if r.plot_seed.get(i) == s && r.plot_level.get(i) >= 5 { say_msg(m, "That one's as grown as it gets") }
+            else {
+                r.money = r.money - cost;
+                if r.plot_seed.get(i) == s {
+                    r.plot_level.set(i, r.plot_level.get(i) + 1);
+                    say_msg(m, seed_name(s) ++ " grown to level " ++ r.plot_level.get(i).show());
+                } else {
+                    r.plot_seed.set(i, s);
+                    r.plot_level.set(i, 1);
+                }
+                m.seeds.set(m.pending, -1);
+                m.mode = mk_browse();
+                m.bought_t = m.frame;
+                planted(f, t, i);
+            }
+        } else {
+            if r.plot_seed.get(i) < 0 { say_msg(m, "Nothing grows there to feed") }
+            else if r.plot_level.get(i) >= 5 { say_msg(m, "That one's as grown as it gets") }
+            else {
+                r.money = r.money - good_price(g_fertilizer());
+                r.plot_level.set(i, r.plot_level.get(i) + 1);
+                m.good = -1;
+                m.mode = mk_browse();
+                m.bought_t = m.frame;
+                planted(f, t, i);
+            }
+        }
+    }
+}
+
+fn planted(f: Fx, t: Table, i: Int) {
+    let x = t.plot_x.get(i) + table_x();
+    let y = t.plot_y.get(i);
+    burst(f, p_dot(), x, y, 18, 380, 30, 0x7a5030);
+    burst(f, p_star(), x, y, 8, 300, 24, 0xfff0a0);
+    part(f, p_ring(), x, y, 0, 0, 16, 0xffffff);
+    sound(f, sn_grow(), 6, pan_at(t.plot_x.get(i)));
+    sound(f, sn_coin(), 0, 0);
+}
+
+fn nearest_plot(r: Run, t: Table, from: Int, dx: Int, dy: Int) -> Int {
+    let x0 = t.plot_x.get(from);
+    let y0 = t.plot_y.get(from);
+    let mut best = from;
+    let mut best_d = 1000000;
+    let mut i = 0;
+    while i < r.plots_open {
+        let ddx = t.plot_x.get(i) - x0;
+        let ddy = t.plot_y.get(i) - y0;
+        let along = ddx * dx + ddy * dy;
+        if i != from && along > 0 {
+            let across = (ddx * dy - ddy * dx).abs();
+            let d = along + across * 2;
+            if d < best_d { best_d = d; best = i; }
+        }
+        i = i + 1;
+    }
+    best
+}
+
+// which plot the screen point's over, or -1
+pub fn plot_at(r: Run, t: Table, x: Int, y: Int) -> Int {
+    let mut found = -1;
+    let mut i = 0;
+    while i < r.plots_open {
+        let dx = x - (t.plot_x.get(i) + table_x());
+        let dy = y - t.plot_y.get(i);
+        if dx * dx + dy * dy < 12 * 12 { found = i }
+        i = i + 1;
+    }
+    found
+}
+
+// ---- the stalls' layout: the left panel, an item a row
+
+fn item_y(r: Run, i: Int) -> Int {
+    let k = item_kind(r, i);
+    let s = seed_slots(r);
+    if k == 0 { 26 + i * 31 }
+    else if k == 1 { 92 + (i - 2) * (if s == 4 { 23 } else { 27 }) }
+    else if k == 2 { 179 }
+    else if k == 3 { 212 }
+    else { 238 }
+}
+fn item_h(r: Run, i: Int) -> Int {
+    let k = item_kind(r, i);
+    if k == 0 { 29 } else if k == 1 { if seed_slots(r) == 4 { 21 } else { 25 } } else if k == 2 { 29 } else if k == 3 { 22 } else { 26 }
+}
+
+pub fn item_at(r: Run, x: Int, y: Int) -> Int {
+    let mut found = -1;
+    if x >= 6 && x < 106 {
+        let mut i = 0;
+        while i < item_count(r) {
+            let iy = item_y(r, i);
+            if y >= iy && y < iy + item_h(r, i) { found = i }
+            i = i + 1;
+        }
+    } else if x >= 374 && x < 474 {
+        let mut i = 0;
+        while i < max_tools() {
+            let iy = 25 + i * 34;
+            if y >= iy && y < iy + 30 && r.tools.get(i) >= 0 { found = 100 + i }
+            i = i + 1;
+        }
+    }
+    found
+}
+
+// ---- drawing
+
+pub fn draw_market(g: Gfx, sp: Sprites, m: Market, r: Run, t: Table, sines: Array<Int>) {
+    // the stalls
+    card(g, 6, 5, 100, 18);
+    text(g, "MARKET", 12, 10, 1, faint());
+    text(g, "$", 74, 10, 1, gold());
+    num_right(g, r.money, 100, 10, 1, ink());
+    let mut i = 0;
+    while i < item_count(r) {
+        draw_item(g, sp, m, r, i, sines);
+        i = i + 1;
+    }
+    // the shed
+    card(g, 374, 5, 100, 16);
+    text_mid(g, "THE SHED", 424, 9, 1, faint());
+    i = 0;
+    while i < max_tools() {
+        let y = 25 + i * 34;
+        let tool = r.tools.get(i);
+        let chosen = m.sel == 100 + i && m.mode == mk_browse();
+        if tool >= 0 {
+            card(g, 374 - (if chosen { 4 } else { 0 }), y, 100, 30);
+            tool_icon(g, tool, 378 - (if chosen { 4 } else { 0 }), y + 4);
+            text(g, tool_name(tool), 404 - (if chosen { 4 } else { 0 }), y + 5, 1, ink());
+            if chosen { text(g, "sell: $" ++ sell_price(tool).show(), 404 - 4, y + 16, 1, tomato()) }
+            if chosen { outline_round(g, 370, y - 1, 102, 32, 0xe8a018, m.frame) }
+        } else {
+            round_blend(g, 374, y, 100, 30, 4, 0xffffff, 60);
+            text_mid(g, "empty", 424, y + 11, 1, 0xc8a898);
+        }
+        i = i + 1;
+    }
+    // the fair to come
+    card(g, 374, 197, 100, 68);
+    let fair_now = r.week == 2;
+    text(g, if fair_now { "FAIR: NOW!" } else { "IN " ++ (2 - r.week).show() ++ (if r.week == 1 { " WEEK" } else { " WEEKS" }) }, 380, 201, 1, if fair_now { tomato() } else { faint() });
+    fair_icon(g, r.fair, 446, 199);
+    print(g, fair_name(r.fair), 380, 223, 1, ink(), 0xe8dcc0);
+    wrap_text(g, fair_text(r.fair), 380, 234, 88, 1, faint());
+    // what's chosen, in full, over the bottom of the table
+    if m.mode == mk_browse() { detail(g, m, r, t) } else { plot_help(g, m, r, t) }
+    if m.msg_t > 0 {
+        let y = 112;
+        let w = text_w(g, m.msg, 1) + 16;
+        round_blend(g, 240 - w / 2, y - 5, w, 18, 4, 0x1a1408, 200);
+        text_mid(g, m.msg, 240, y, 1, 0xfff0d0);
+    }
+}
+
+fn outline_round(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int, frame: Int) {
+    let c = if (frame / 8) % 2 == 0 { color } else { mix(color, 0xffffff, 100) };
+    rect(g, x + 3, y, w - 6, 1, c);
+    rect(g, x + 3, y + h - 1, w - 6, 1, c);
+    rect(g, x, y + 3, 1, h - 6, c);
+    rect(g, x + w - 1, y + 3, 1, h - 6, c);
+    put(g, x + 1, y + 2, c);
+    put(g, x + 2, y + 1, c);
+    put(g, x + w - 2, y + 2, c);
+    put(g, x + w - 3, y + 1, c);
+    put(g, x + 1, y + h - 3, c);
+    put(g, x + 2, y + h - 2, c);
+    put(g, x + w - 2, y + h - 3, c);
+    put(g, x + w - 3, y + h - 2, c);
+}
+
+fn draw_item(g: Gfx, sp: Sprites, m: Market, r: Run, i: Int, sines: Array<Int>) {
+    let k = item_kind(r, i);
+    let y = item_y(r, i);
+    let h = item_h(r, i);
+    let chosen = m.sel == i && m.mode == mk_browse();
+    let x = 6 + (if chosen { 4 } else { 0 });
+    if k == 0 {
+        let tool = m.tools.get(i);
+        if tool >= 0 {
+            card(g, x, y, 100, h);
+            tool_icon(g, tool, x + 3, y + 4);
+            text(g, tool_name(tool), x + 28, y + 5, 1, ink());
+            price(g, tool_price(tool), x + 28, y + 16, r.money >= tool_price(tool));
+        } else { sold(g, x, y, h) }
+    } else if k == 1 {
+        let s = m.seeds.get(i - 2);
+        if s >= 0 {
+            card(g, x, y, 100, h);
+            packet(g, sp, s, x + 3, y + (h - 18) / 2);
+            text(g, seed_name(s), x + 24, y + (if h > 22 { 4 } else { 2 }), 1, ink());
+            price(g, seed_cost(r, s), x + 24, y + (if h > 22 { 14 } else { 11 }), r.money >= seed_cost(r, s));
+            text_right(g, tag_name(s), x + 96, y + (if h > 22 { 14 } else { 11 }), 1, faint());
+        } else { sold(g, x, y, h) }
+    } else if k == 2 {
+        let gd = m.good;
+        if gd >= 0 {
+            card(g, x, y, 100, h);
+            good_icon(g, gd, x + 3, y + 4);
+            text(g, good_name(gd), x + 28, y + 5, 1, ink());
+            price(g, good_price(gd), x + 28, y + 16, r.money >= good_price(gd));
+        } else { sold(g, x, y, h) }
+    } else if k == 3 {
+        tag_card(g, x, y, 100, h, 0x5a8ab8);
+        text(g, "Reroll stalls", x + 6, y + 7, 1, 0xffffff);
+        text_right(g, "$" ++ reroll_cost(r).show(), x + 94, y + 7, 1, 0xfff0a0);
+    } else {
+        let pulse = if chosen { (sin(sines, m.frame * 8) >> 14) } else { 0 };
+        tag_card(g, x - pulse, y - pulse, 100 + pulse * 2, h + pulse * 2, 0x4aa04a);
+        text_mid(g, "On to the week }", x + 50, y + 9, 1, 0xffffff);
+    }
+    if chosen { outline_round(g, x - 4 + (if k >= 3 { 0 } else { 0 }), y - 1, 104, h + 2, 0xe8a018, m.frame) }
+}
+
+// a seed packet: paper, with the plant on it
+pub fn packet(g: Gfx, sp: Sprites, s: Int, x: Int, y: Int) {
+    round_rect(g, x, y, 16, 18, 2, 0xb8a078);
+    round_rect(g, x + 1, y + 1, 14, 16, 1, 0xf4e4c0);
+    rect(g, x + 1, y + 1, 14, 3, super::play::seed_color(s));
+    let img = plant_sprite(sp, s, 4);
+    draw_scaled(g, img, x + 8, y + 11, 256 * 12 / img.w.max(1), 256 * 12 / img.h.max(1), false, 256);
+}
+
+fn price(g: Gfx, n: Int, x: Int, y: Int, can: Bool) {
+    text(g, "$", x, y, 1, gold());
+    num(g, n, x + 8, y, 1, if can { ink() } else { tomato() });
+}
+
+fn sold(g: Gfx, x: Int, y: Int, h: Int) {
+    round_blend(g, x, y, 100, h, 4, 0xffffff, 50);
+    text_mid(g, "sold", x + 50, y + h / 2 - 4, 1, 0xc8a898);
+}
+
+// the chosen item's card, over the bottom of the table
+fn detail(g: Gfx, m: Market, r: Run, t: Table) {
+    let x = 140;
+    let y = 196;
+    let w = 200;
+    let mut name = "";
+    let mut body = "";
+    let mut extra = "";
+    if m.sel >= 100 {
+        let tool = r.tools.get(m.sel - 100);
+        if tool >= 0 {
+            name = tool_name(tool);
+            body = tool_text(tool);
+            extra = "Press to sell for $" ++ sell_price(tool).show();
+        }
+    } else {
+        let k = item_kind(r, m.sel);
+        if k == 0 && m.tools.get(m.sel) >= 0 {
+            let tool = m.tools.get(m.sel);
+            name = tool_name(tool);
+            body = tool_text(tool);
+            extra = if tool_rarity(tool) == 2 { "Rare tool" } else if tool_rarity(tool) == 1 { "Uncommon tool" } else { "Tool" };
+        } else if k == 1 && m.seeds.get(m.sel - 2) >= 0 {
+            let s = m.seeds.get(m.sel - 2);
+            name = seed_name(s) ++ " seeds";
+            body = seed_text(s);
+            extra = tag_name(s) ++ ". " ++ (if seed_hits(s) > 0 { "Yields " ++ seed_yield(s).show() } else { "No harvest" });
+        } else if k == 2 && m.good >= 0 {
+            name = good_name(m.good);
+            body = good_text(m.good);
+            extra = "For the farm";
+        } else if k == 3 {
+            name = "Reroll";
+            body = "New tools and seeds on the stalls.";
+            extra = "Costs a coin more each time";
+        } else if k == 4 {
+            name = "On to the week";
+            body = "Rent due: " ++ rent(r).show() ++ (if is_fair(r) { ". It's the fair!" } else { "" });
+            extra = season_word(r);
+        }
+    }
+    if name != "" {
+        let lines = wrap_lines(g, body, w - 16, 1);
+        let h = 34 + lines * 10;
+        let yy = y + 66 - h;
+        round_blend(g, x + 2, yy + 3, w, h, 5, 0x1a1008, 90);
+        round_rect(g, x, yy, w, h, 5, 0x3a2a1a);
+        round_rect(g, x + 1, yy + 1, w - 2, h - 2, 4, 0xfbf3e0);
+        print(g, name, x + 8, yy + 6, 1, ink(), 0xe8dcc0);
+        wrap_text(g, body, x + 8, yy + 18, w - 16, 1, 0x5a4a3a);
+        text(g, extra, x + 8, yy + h - 12, 1, faint());
+    }
+}
+
+fn season_word(r: Run) -> String {
+    let s = if r.season == 0 { "Spring" } else if r.season == 1 { "Summer" } else if r.season == 2 { "Autumn" } else { "Winter" };
+    s ++ ", " ++ (if r.week == 2 { "the fair" } else { "week " ++ (r.week + 1).show() })
+}
+
+fn plot_help(g: Gfx, m: Market, r: Run, t: Table) {
+    let i = m.plot;
+    let p = r.plot_seed.get(i);
+    let s = if m.mode == mk_plant() { m.seeds.get(m.pending) } else { -1 };
+    let line = if m.mode == mk_feed() { if p >= 0 { "Feed the " ++ seed_name(p) ++ " (to level " ++ (r.plot_level.get(i) + 1).show() ++ ")" } else { "Nothing grows here" } }
+        else if p < 0 { "Plant the " ++ seed_name(s) ++ " here" }
+        else if p == s { "Grow the " ++ seed_name(s) ++ " to level " ++ (r.plot_level.get(i) + 1).show() }
+        else { "Replace the " ++ seed_name(p) ++ " with " ++ seed_name(s) };
+    let w = text_w(g, line, 1) + 20;
+    round_blend(g, 240 - w / 2 + 2, 238, w, 26, 5, 0x1a1008, 90);
+    round_rect(g, 240 - w / 2, 235, w, 26, 5, 0x3a2a1a);
+    round_rect(g, 240 - w / 2 + 1, 236, w - 2, 24, 4, 0xfbf3e0);
+    text_mid(g, line, 240, 240, 1, ink());
+    text_mid(g, "choose a plot     back: cancel", 240, 250, 1, faint());
+}

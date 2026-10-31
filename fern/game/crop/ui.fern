@@ -1,0 +1,570 @@
+// The screens round the play: the title (its letters bobbing like fruit
+// on a branch), the menus (cards on the cloth), choosing a farmer and a
+// ribbon, the week's end (the rent paid and the coins it earns, counted
+// in one by one, or the farm lost), the year won, the pause, the options,
+// and the card that teaches the game the first time.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+use super::hud::*;
+use super::run::*;
+use super::seeds::*;
+use super::tools::*;
+use super::save::*;
+use super::sprites::{Sprites, plant_sprite};
+use super::icons::{tool_icon};
+use super::market::{packet};
+use super::art::{season_name};
+
+// ---- the title
+
+pub fn logo(g: Gfx, cx: Int, y: Int, frame: Int, t: Array<Int>, rise: Int) {
+    let s = "BUMPER CROP";
+    let k = 4;
+    let colors = [0xe8402e, 0xff8a1a, 0xffc820, 0x7ac83a, 0x3aa04a, 0xe8402e, 0x000000, 0xff8a1a, 0xe8402e, 0xffc820, 0x7ac83a];
+    let w = text_w(g, s, k);
+    let mut x = cx - w / 2;
+    let mut i = 0;
+    let mut rest = colors;
+    while i < s.len() {
+        let ch = s.substring(i, i + 1);
+        let c = match rest { Cons(c, tail) => { rest = tail; c }, Nil => 0xffffff };
+        let bob = sin(t, frame * 5 + i * 70) * 3 >> 16;
+        let drop = if rise < 256 { ((256 - rise) * (256 - rise) >> 8) * (40 + i * 6) / 256 } else { 0 };
+        let yy = y + bob - drop;
+        if ch != " " {
+            // (a dark edge, a shadow, the letter, a shine across its top)
+            text(g, ch, x + 2, yy + 4, k, 0x3a1a08);
+            say(g, ch, x, yy, k, c, 0x2a1408);
+            rect_shine(g, x, yy, char_w(g, s.char_at(i)) * k, k, mix(c, 0xffffff, 140), ch, k);
+            // (a leaf on the O)
+            if i == 8 {
+                rect(g, x + 8, yy - 6, 4, 3, 0x3aa04a);
+                rect(g, x + 10, yy - 8, 5, 3, 0x5ac83a);
+                rect(g, x + 9, yy - 3, 2, 3, 0x5a3a1a);
+            }
+        }
+        x = x + (char_w(g, s.char_at(i)) + 1) * k;
+        i = i + 1;
+    }
+}
+
+// the top row of a letter's pixels lightened (the letter's shine)
+fn rect_shine(g: Gfx, x: Int, y: Int, w: Int, k: Int, color: Int, ch: String, kk: Int) {
+    text_clip_row(g, ch, x, y, kk, color);
+}
+
+fn text_clip_row(g: Gfx, ch: String, x: Int, y: Int, k: Int, color: Int) {
+    let code = ch.char_at(0);
+    let w = char_w(g, code);
+    let bits = g.font.rows.get(code * 9);
+    let bits2 = g.font.rows.get(code * 9 + 1);
+    let mut col = 0;
+    while col < w {
+        if (bits >> (w - 1 - col)) & 1 == 1 { rect(g, x + col * k, y, k, k / 2, color) }
+        else if (bits2 >> (w - 1 - col)) & 1 == 1 { rect(g, x + col * k, y + k, k, k / 2, color) }
+        col = col + 1;
+    }
+}
+
+// a menu: cards down the left panel; which the mouse is over, or -1
+pub fn menu(g: Gfx, items: List<String>, enabled: List<Bool>, sel: Int, y0: Int, frame: Int, mx: Int, my: Int, t: Array<Int>) -> Int {
+    let mut i = 0;
+    let mut over = -1;
+    let mut rest = items;
+    let mut en = enabled;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let on = match en { Cons(b, more) => { en = more; b }, Nil => true };
+                let y = y0 + i * 30;
+                if mx >= 6 && mx < 106 && my >= y && my < y + 24 { over = i }
+                let chosen = i == sel;
+                let dx = if chosen { 6 + (sin(t, frame * 8) >> 15) } else { 0 };
+                if chosen { tag_card(g, 6 + dx, y, 100, 24, if on { 0x4aa04a } else { 0x9a8a80 }) } else { card(g, 6, y, 100, 24) }
+                text(g, s, 16 + dx, y + 8, 1, if chosen { 0xffffff } else if on { ink() } else { 0xc0b0a0 });
+                if chosen { text(g, "}", 94 + dx, y + 8, 1, 0xffffff) }
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    over
+}
+
+pub fn draw_title(g: Gfx, d: Array<Int>, frame: Int, t: Array<Int>, rise: Int) {
+    // the logo over the top of the table, on a board
+    round_blend(g, 104, 8, 272, 62, 8, 0x1a1008, 120);
+    logo(g, 240, 16, frame, t, rise);
+    text_mid(g, "a pinball harvest", 240, 54, 1, 0xfff0d0);
+    // the records, on the right
+    card(g, 374, 6, 100, 96);
+    text(g, "RECORDS", 380, 11, 1, faint());
+    text(g, "Best bank", 380, 25, 1, faint());
+    num_right(g, get(d, sv_best_bank()), 468, 35, 1, ink());
+    text(g, "Best year", 380, 47, 1, faint());
+    num_right(g, get(d, sv_best_run()), 468, 57, 1, ink());
+    text(g, "Years kept", 380, 69, 1, faint());
+    num_right(g, get(d, sv_wins()), 468, 79, 1, ink());
+    text(g, "Crops: " ++ get(d, sv_harvests()).show(), 380, 90, 1, faint());
+}
+
+// ---- choosing a farmer and a ribbon
+
+pub fn draw_farmers(g: Gfx, sp: Sprites, d: Array<Int>, sel: Int, farm: Int, ribbon: Int, row: Int, frame: Int, t: Array<Int>) {
+    card(g, 6, 6, 100, 18);
+    text(g, "WHO'S FARMING?", 12, 11, 1, faint());
+    let mut f = 0;
+    while f < farmer_count() {
+        let y = 28 + f * 30;
+        let open = has_bit(d, sv_farmers(), f);
+        let chosen = f == sel;
+        let dx = if chosen && row == 0 { 6 } else if chosen { 3 } else { 0 };
+        if chosen { tag_card(g, 6 + dx, y, 100, 27, if open { 0x4aa04a } else { 0x8a7a70 }) } else { card(g, 6, y, 100, 27) }
+        portrait(g, f, 10 + dx, y + 2, open, frame, t);
+        text(g, if open { farmer_name(f) } else { "???" }, 36 + dx, y + 5, 1, if chosen { 0xffffff } else { ink() });
+        let rb = get(d, sv_ribbon(f));
+        if rb > 0 && open { ribbon_badge(g, 36 + dx, y + 15, rb - 1) }
+        f = f + 1;
+    }
+    // the farm, the ribbon (how hard), and begin
+    choice_row(g, 150, "FARM", super::table::farm_name(farm), row == 1, has_bit(d, sv_farms(), farm));
+    choice_row(g, 182, "RIBBON", ribbon_name(ribbon), row == 2, true);
+    ribbon_badge(g, (if row == 2 { 12 } else { 6 }) + 86, 196, ribbon);
+    let by = 216;
+    if row == 3 { tag_card(g, 12, by, 94, 26, 0xe8802a) } else { card(g, 6, by, 100, 26) }
+    text_mid(g, "Begin the year }", (if row == 3 { 59 } else { 56 }), by + 9, 1, if row == 3 { 0xffffff } else { ink() });
+    // the farmer's kit, on the right; under it the farm and the ribbon
+    let open = has_bit(d, sv_farmers(), sel);
+    card(g, 374, 6, 100, 150);
+    print(g, if open { farmer_name(sel) } else { "Locked" }, 380, 12, 1, ink(), 0xe8dcc0);
+    if open {
+        wrap_text(g, farmer_text(sel), 380, 26, 88, 1, faint());
+        text(g, "STARTS WITH", 380, 76, 1, faint());
+        let r = new_run(0, sel, 0, 1, 6);
+        let mut i = 0;
+        let mut n = 0;
+        while i < max_plots() {
+            let s = r.plot_seed.get(i);
+            if s >= 0 && n < 4 {
+                packet(g, sp, s, 380 + n * 20, 86);
+                n = n + 1;
+            }
+            i = i + 1;
+        }
+        let tl = r.tools.get(0);
+        if tl >= 0 {
+            tool_icon(g, tl, 380, 108);
+            text(g, tool_name(tl), 406, 115, 1, ink());
+        }
+        text(g, r.balls.show() ++ " balls a week", 380, 134, 1, faint());
+        text(g, "$" ++ r.money.show() ++ " to spend", 380, 144, 1, gold());
+    } else {
+        wrap_text(g, "To unlock: " ++ farmer_lock(sel), 380, 28, 88, 1, faint());
+    }
+    card(g, 374, 160, 100, 105);
+    let farm_open = has_bit(d, sv_farms(), farm);
+    print(g, super::table::farm_name(farm), 380, 165, 1, ink(), 0xe8dcc0);
+    let yy = wrap_text(g, if farm_open { super::table::farm_text(farm) } else { "To unlock: " ++ farm_lock(farm) }, 380, 177, 88, 1, faint());
+    text(g, ribbon_name(ribbon) ++ " ribbon:", 380, yy + 4, 1, ink());
+    wrap_text(g, ribbon_text(ribbon), 380, yy + 15, 88, 1, faint());
+}
+
+// a row with a choice to go left and right through
+fn choice_row(g: Gfx, y: Int, label: String, value: String, chosen: Bool, open: Bool) {
+    if chosen { tag_card(g, 12, y, 94, 28, 0x5a8ab8) } else { card(g, 6, y, 100, 28) }
+    let x = if chosen { 12 } else { 6 };
+    text(g, label, x + 6, y + 4, 1, if chosen { 0xffffff } else { faint() });
+    text(g, "{ " ++ (if open { value } else { "???" }) ++ " }", x + 6, y + 15, 1, if chosen { 0xffffff } else { ink() });
+}
+
+pub fn ribbon_badge(g: Gfx, x: Int, y: Int, k: Int) {
+    let c = ribbon_color(k);
+    disc(g, x + 4, y + 3, 4, scale(c, 160));
+    disc(g, x + 4, y + 3, 3, c);
+    rect(g, x + 1, y + 6, 2, 4, scale(c, 200));
+    rect(g, x + 6, y + 6, 2, 4, scale(c, 200));
+    put(g, x + 3, y + 2, 0xffffff);
+}
+
+// a farmer's face: a hat, a face, by who it is
+pub fn portrait(g: Gfx, f: Int, x: Int, y: Int, open: Bool, frame: Int, t: Array<Int>) {
+    round_rect(g, x, y, 22, 24, 3, if open { 0x9ad0f0 } else { 0x908880 });
+    if open {
+        let skin = if f == 1 { 0xf0c8a0 } else if f == 2 { 0xc89070 } else if f == 3 { 0x9a6a48 } else { 0xf4d0b0 };
+        let hat = if f == 0 { 0xe8e0d0 } else if f == 1 { 0xe8402e } else if f == 2 { 0xf4e8a0 } else { 0x8a5a2a };
+        let blink = (frame + f * 50) % 180 < 6;
+        // face
+        disc(g, x + 11, y + 14, 6, skin);
+        // eyes
+        if blink {
+            rect(g, x + 8, y + 14, 2, 1, 0x2a1a10);
+            rect(g, x + 13, y + 14, 2, 1, 0x2a1a10);
+        } else {
+            rect(g, x + 8, y + 13, 2, 2, 0x2a1a10);
+            rect(g, x + 13, y + 13, 2, 2, 0x2a1a10);
+        }
+        rect(g, x + 9, y + 17, 5, 1, 0x8a3a2a);
+        disc(g, x + 6, y + 16, 1, mix(skin, 0xff7a7a, 120));
+        disc(g, x + 16, y + 16, 1, mix(skin, 0xff7a7a, 120));
+        // hat or hair
+        if f == 0 {
+            // (gran: white hair in a bun, round spectacles)
+            disc(g, x + 11, y + 8, 5, hat);
+            disc(g, x + 11, y + 3, 3, hat);
+            ring(g, x + 9, y + 14, 2, 1, 0x6a6a7a, 256);
+            ring(g, x + 14, y + 14, 2, 1, 0x6a6a7a, 256);
+        } else if f == 1 {
+            // (the kid: a red cap)
+            rect(g, x + 5, y + 6, 12, 4, hat);
+            rect(g, x + 13, y + 9, 7, 2, scale(hat, 200));
+            rect(g, x + 5, y + 6, 12, 1, mix(hat, 0xffffff, 100));
+        } else if f == 2 {
+            // (the beekeeper: a veiled hat)
+            rect(g, x + 3, y + 7, 17, 2, hat);
+            rect(g, x + 6, y + 3, 11, 5, hat);
+            rect_blend(g, x + 5, y + 9, 13, 10, 0xffffff, 80);
+            let bee = sin(t, frame * 10) >> 14;
+            put(g, x + 19 + bee / 2, y + 5 + bee, 0xffd020);
+            put(g, x + 20 + bee / 2, y + 5 + bee, 0x2a2010);
+        } else {
+            // (the rancher: a wide brown hat)
+            rect(g, x + 1, y + 8, 21, 2, hat);
+            rect(g, x + 6, y + 3, 11, 6, hat);
+            rect(g, x + 6, y + 7, 11, 1, 0xd84a3a);
+        }
+    } else {
+        text_mid(g, "?", x + 12, y + 8, 1, 0xf4ead6);
+    }
+}
+
+// ---- the week's end
+
+// the card in the middle of the screen; t frames since it came up
+pub fn draw_week_end(g: Gfx, sp: Sprites, r: Run, banked: Int, rent: Int, names: Array<String>, coins: Array<Int>, n: Int, t: Int, best: Int, frame: Int, tt: Array<Int>) {
+    let x = 150;
+    let w = 180;
+    let h = 70 + n * 12 + 30;
+    let y = 135 - h / 2 - (if t < 12 { (12 - t) * (12 - t) / 2 } else { 0 });
+    round_blend(g, x + 3, y + 4, w, h, 6, 0x1a1008, 120);
+    round_rect(g, x, y, w, h, 6, 0x3a2a1a);
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 5, paper());
+    let title = if is_fair(r) { "FAIR WON!" } else { "RENT PAID!" };
+    say_mid(g, title, 240, y + 8, 2, 0xffffff, leaf());
+    // (lord goose, satisfied, at the card's corner)
+    let bob = sin(tt, frame * 4) >> 15;
+    draw(g, sp.goose, x + w - 18, y - 18 + bob);
+    text(g, "Banked", x + 12, y + 32, 1, faint());
+    num_right(g, banked, x + w - 12, y + 32, 1, ink());
+    text(g, "Rent", x + 12, y + 43, 1, faint());
+    num_right(g, rent, x + w - 12, y + 43, 1, ink());
+    text(g, "Best bank", x + 12, y + 54, 1, faint());
+    num_right(g, best, x + w - 12, y + 54, 1, ink());
+    rect(g, x + 10, y + 66, w - 20, 1, 0xe0d0b0);
+    let mut i = 0;
+    let mut total = 0;
+    while i < n {
+        if t > 30 + i * 18 {
+            text(g, names.get(i), x + 12, y + 72 + i * 12, 1, ink());
+            text_right(g, "+$" ++ coins.get(i).show(), x + w - 12, y + 72 + i * 12, 1, gold());
+            total = total + coins.get(i);
+        }
+        i = i + 1;
+    }
+    if t > 30 + n * 18 {
+        rect(g, x + 10, y + 72 + n * 12, w - 20, 1, 0xe0d0b0);
+        print(g, "To market", x + 12, y + 78 + n * 12, 1, ink(), 0xe8dcc0);
+        text_right(g, "+$" ++ total.show(), x + w - 12, y + 78 + n * 12, 1, gold());
+        if (frame / 20) % 2 == 0 { text_mid(g, "press to continue", 240, y + h - 11, 1, faint()) }
+    }
+}
+
+// the farm lost (or the year won): the record
+pub fn draw_end(g: Gfx, sp: Sprites, r: Run, won: Bool, banked: Int, rent: Int, news: List<String>, t: Int, frame: Int, tt: Array<Int>, sel: Int) {
+    let x = 140;
+    let w = 200;
+    let h = 168;
+    let y = 50 - (if t < 14 { (14 - t) * (14 - t) / 2 } else { 0 });
+    round_blend(g, x + 3, y + 4, w, h, 6, 0x1a1008, 120);
+    round_rect(g, x, y, w, h, 6, 0x3a2a1a);
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 5, paper());
+    if won {
+        say_mid(g, "THE FARM", 240, y + 8, 2, 0xffffff, leaf());
+        say_mid(g, "IS YOURS!", 240, y + 28, 2, 0xffe04a, 0x8a5a10);
+    } else {
+        draw_big(g, sp.goose, x + w - 34, y - 30, 2);
+        say_mid(g, "EVICTED", 240, y + 10, 3, 0xffffff, tomato());
+        text_mid(g, "Lord Goose takes the farm.", 240, y + 36, 1, faint());
+        text_mid(g, "Banked " ++ banked.show() ++ " of " ++ rent.show(), 240, y + 46, 1, ink());
+    }
+    let sy = y + 60;
+    text(g, "Reached", x + 14, sy, 1, faint());
+    text_right(g, season_name(r.season) ++ ", " ++ (if r.week == 2 { "the fair" } else { "week " ++ (r.week + 1).show() }) ++ (if r.year > 0 { ", year " ++ (r.year + 1).show() } else { "" }), x + w - 14, sy, 1, ink());
+    text(g, "Banked in all", x + 14, sy + 11, 1, faint());
+    num_right(g, r.total, x + w - 14, sy + 11, 1, ink());
+    text(g, "Best bank", x + 14, sy + 22, 1, faint());
+    num_right(g, r.best_bank, x + w - 14, sy + 22, 1, ink());
+    text(g, "Crops harvested", x + 14, sy + 33, 1, faint());
+    num_right(g, r.harvests, x + w - 14, sy + 33, 1, ink());
+    let mut yy = sy + 48;
+    let mut rest = news;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                say_mid(g, s, 240, yy, 1, 0xffe04a, 0x6a3a10);
+                yy = yy + 12;
+                rest = tail;
+            }
+        }
+    }
+    let opts = if won { ["Keep farming", "To the title"] } else { ["Try again", "To the title"] };
+    let mut i = 0;
+    let mut o = opts;
+    loop {
+        match o {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let bx = x + 14 + i * 90;
+                let by = y + h - 26;
+                if sel == i { tag_card(g, bx, by, 82, 18, 0x4aa04a) } else { card(g, bx, by, 82, 18) }
+                text_mid(g, s, bx + 41, by + 5, 1, if sel == i { 0xffffff } else { ink() });
+                i = i + 1;
+                o = tail;
+            }
+        }
+    }
+}
+
+// ---- the pause and the options
+
+pub fn draw_pause(g: Gfx, sel: Int, frame: Int, t: Array<Int>, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 120);
+    say_mid(g, "PAUSED", 240, 60, 3, 0xffffff, 0x3a2410);
+    let items = ["Carry on", "Options", "How to play", "Quit to title"];
+    let mut i = 0;
+    let mut over = -1;
+    let mut rest = items;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let y = 100 + i * 28;
+                if mx >= 180 && mx < 300 && my >= y && my < y + 22 { over = i }
+                if i == sel { tag_card(g, 180, y, 120, 22, 0x4aa04a) } else { card(g, 180, y, 120, 22) }
+                text_mid(g, s, 240, y + 7, 1, if i == sel { 0xffffff } else { ink() });
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    over
+}
+
+pub fn option_count() -> Int { 6 }
+
+pub fn draw_options(g: Gfx, d: Array<Int>, sel: Int, frame: Int, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 120);
+    let x = 150;
+    let w = 180;
+    round_rect(g, x, 40, w, 200, 6, 0x3a2a1a);
+    round_rect(g, x + 1, 41, w - 2, 198, 5, paper());
+    say_mid(g, "OPTIONS", 240, 50, 2, 0xffffff, 0x5a8ab8);
+    let names = ["Music", "Sounds", "Full screen", "Screen shake", "Longer ball save", "Done"];
+    let mut i = 0;
+    let mut over = -1;
+    let mut rest = names;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let y = 80 + i * 24;
+                if mx >= x + 8 && mx < x + w - 8 && my >= y - 4 && my < y + 16 { over = i }
+                if i == sel { round_rect(g, x + 8, y - 4, w - 16, 18, 3, 0xf0e0b8) }
+                text(g, s, x + 16, y, 1, ink());
+                let v = if i == 0 { bar(get(d, sv_music())) } else if i == 1 { bar(get(d, sv_sfx())) }
+                    else if i == 2 { on_off(get(d, sv_full())) } else if i == 3 { on_off(get(d, sv_shake())) } else if i == 4 { on_off(get(d, sv_assist())) } else { "" };
+                text_right(g, v, x + w - 16, y, 1, if i == sel { tomato() } else { faint() });
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    text_mid(g, "left and right to change", 240, 222, 1, faint());
+    over
+}
+
+fn bar(v: Int) -> String { "{ " ++ v.show() ++ "% }" }
+fn on_off(v: Int) -> String { if v > 0 { "{ on }" } else { "{ off }" } }
+
+// ---- how to play
+
+pub fn draw_howto(g: Gfx, page: Int, frame: Int, t: Array<Int>) {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 140);
+    let x = 120;
+    let w = 240;
+    let h = 196;
+    let y = 36;
+    round_blend(g, x + 3, y + 4, w, h, 6, 0x1a1008, 120);
+    round_rect(g, x, y, w, h, 6, 0x3a2a1a);
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 5, paper());
+    if page == 0 {
+        say_mid(g, "HOW TO FARM", 240, y + 8, 2, 0xffffff, leaf());
+        let lines = [
+            "Hit a plant with the ball and it grows.",
+            "Hit it when it's ripe (it shines) to",
+            "harvest it into your BASKET.",
+            "",
+            "Spell H-A-Y in the top lanes, go round",
+            "the orbit, harvest sunflowers: MULT.",
+            "",
+            "Shoot the ball into the BARN to bank",
+            "your basket times your mult.",
+            "Lose the ball first and half spills!",
+            "",
+            "Bank the RENT before your balls run out.",
+        ];
+        let mut i = 0;
+        let mut rest = lines;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(s, tail) => {
+                    text(g, s, x + 14, y + 32 + i * 11, 1, if s.starts_with("Bank") || s.starts_with("Lose") { tomato() } else { ink() });
+                    i = i + 1;
+                    rest = tail;
+                }
+            }
+        }
+    } else {
+        say_mid(g, "CONTROLS", 240, y + 8, 2, 0xffffff, 0x5a8ab8);
+        let lines = [
+            ("Flippers", "Shift, Z and /, or the arrows"),
+            ("", "a controller's shoulders"),
+            ("Plunger", "hold Space, Enter or Down"),
+            ("", "and let go (or the A button)"),
+            ("Nudge", "Up or N (or Y): not too often!"),
+            ("Pause", "Escape or P (or Start)"),
+            ("Full screen", "F11"),
+        ];
+        let mut i = 0;
+        let mut rest = lines;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(pair, tail) => {
+                    let (a, b) = pair;
+                    text(g, a, x + 14, y + 36 + i * 14, 1, tomato());
+                    text(g, b, x + 84, y + 36 + i * 14, 1, ink());
+                    i = i + 1;
+                    rest = tail;
+                }
+            }
+        }
+    }
+    if (frame / 20) % 2 == 0 { text_mid(g, if page == 0 { "press for the controls" } else { "press to play" }, 240, y + h - 14, 1, faint()) }
+}
+
+// the week's opening card, over the table
+pub fn draw_week_intro(g: Gfx, r: Run, t: Int, tt: Array<Int>) {
+    if t < 100 {
+        let y = if t < 10 { 70 - (10 - t) * (10 - t) } else if t > 85 { 70 - (t - 85) * 8 } else { 70 };
+        let title = if is_fair(r) { fair_name(r.fair) } else { season_name(r.season) ++ ", week " ++ (r.week + 1).show() };
+        let w = text_w(g, title, 2).max(text_w(g, "Rent: " ++ rent(r).show(), 1)) + 30;
+        round_blend(g, 240 - w / 2 + 3, y + 3, w, 42, 6, 0x1a1008, 110);
+        round_rect(g, 240 - w / 2, y, w, 42, 6, 0x3a2a1a);
+        round_rect(g, 240 - w / 2 + 1, y + 1, w - 2, 40, 5, paper());
+        say_mid(g, title, 240, y + 6, 2, 0xffffff, if is_fair(r) { tomato() } else { leaf() });
+        text_mid(g, if is_fair(r) { fair_text(r.fair) } else { "Rent: " ++ rent(r).show() }, 240, y + 28, 1, ink());
+    }
+}
+
+// a season's card, as it turns
+pub fn draw_season_card(g: Gfx, season: Int, t: Int) {
+    let k = if t < 20 { t * 13 } else if t > 100 { (120 - t) * 13 } else { 256 };
+    rect_blend(g, 96, 100, 288, 60, 0x1a1008, k.clamp(0, 256) * 140 / 256);
+    if t > 6 && t < 114 {
+        say_mid(g, season_name(season), 240, 112, 4, if season == 0 { 0xa8f07a } else if season == 1 { 0xffe04a } else if season == 2 { 0xff9a3a } else { 0xe8f4ff }, 0x2a1a08);
+    }
+}
+
+// ---- the almanac: every seed (18) and tool (30), those seen in full,
+// the rest as shadows; the chosen one described
+
+pub fn almanac_count() -> Int { seed_count() + tool_count() }
+
+fn almanac_xy(i: Int) -> (Int, Int) {
+    if i < seed_count() { (128 + (i % 9) * 25, 50 + (i / 9) * 24) }
+    else { let k = i - seed_count(); (128 + (k % 10) * 23, 108 + (k / 10) * 25) }
+}
+
+// which entry the point's over, or -1
+pub fn almanac_at(x: Int, y: Int) -> Int {
+    let mut found = -1;
+    let mut i = 0;
+    while i < almanac_count() {
+        let (ax, ay) = almanac_xy(i);
+        if x >= ax && x < ax + 22 && y >= ay && y < ay + 22 { found = i }
+        i = i + 1;
+    }
+    found
+}
+
+// the next entry from i in a direction (dx, dy), by the grid
+pub fn almanac_move(i: Int, dx: Int, dy: Int) -> Int {
+    if dx != 0 { (i + dx + almanac_count()) % almanac_count() }
+    else if i < seed_count() {
+        let j = i + dy * 9;
+        if j < 0 { seed_count() + 20 + (i % 9).min(9) } else if j >= seed_count() { seed_count() + (i % 9) } else { j }
+    } else {
+        let k = i - seed_count();
+        let j = k + dy * 10;
+        if j < 0 { (k % 10).min(8) + 9 } else if j >= tool_count() { k % 9 } else { seed_count() + j }
+    }
+}
+
+pub fn draw_almanac(g: Gfx, sp: Sprites, d: Array<Int>, sel: Int, frame: Int) {
+    rect_blend(g, 0, 0, sw(), sh(), 0x1a1008, 120);
+    let x = 116;
+    let w = 248;
+    round_blend(g, x + 3, 12, w, 250, 6, 0x1a1008, 120);
+    round_rect(g, x, 8, w, 254, 6, 0x3a2a1a);
+    round_rect(g, x + 1, 9, w - 2, 252, 5, paper());
+    say_mid(g, "THE ALMANAC", 240, 14, 2, 0xffffff, leaf());
+    let mut seen_n = 0;
+    let mut i = 0;
+    while i < almanac_count() {
+        let (ax, ay) = almanac_xy(i);
+        let seen = if i < seed_count() { seen_seed(d, i) } else { seen_tool(d, i - seed_count()) };
+        if seen { seen_n = seen_n + 1 }
+        if i == sel { round_rect(g, ax - 2, ay - 2, 26, 26, 4, if (frame / 8) % 2 == 0 { 0xe8a018 } else { 0xffd060 }) }
+        if i < seed_count() {
+            if seen { packet(g, sp, i, ax + 3, ay + 2) } else { round_rect(g, ax + 3, ay + 2, 16, 18, 2, 0xc8b8a0); text_mid(g, "?", ax + 12, ay + 7, 1, 0xf4ead6); }
+        } else {
+            if seen { tool_icon(g, i - seed_count(), ax, ay) } else { round_rect(g, ax, ay, 22, 22, 3, 0xc8b8a0); text_mid(g, "?", ax + 12, ay + 7, 1, 0xf4ead6); }
+        }
+        i = i + 1;
+    }
+    text(g, "SEEDS", x + 10, 40, 1, faint());
+    text(g, "TOOLS", x + 10, 98, 1, faint());
+    text_right(g, seen_n.show() ++ " of " ++ almanac_count().show() ++ " found", x + w - 10, 40, 1, faint());
+    // the chosen one
+    let seen = if sel < seed_count() { seen_seed(d, sel) } else { seen_tool(d, sel - seed_count()) };
+    rect(g, x + 10, 186, w - 20, 1, 0xe0d0b0);
+    if !seen {
+        print(g, "Not found yet", x + 12, 194, 1, ink(), 0xe8dcc0);
+        text(g, "Look for it at the market.", x + 12, 206, 1, faint());
+    } else if sel < seed_count() {
+        print(g, seed_name(sel), x + 12, 194, 1, ink(), 0xe8dcc0);
+        text_right(g, tag_name(sel) ++ ", $" ++ seed_price(sel).show(), x + w - 12, 194, 1, faint());
+        wrap_text(g, seed_text(sel), x + 12, 206, w - 24, 1, faint());
+        if seed_hits(sel) > 0 { text(g, "Ripe in " ++ seed_hits(sel).show() ++ " hits, yields " ++ seed_yield(sel).show(), x + 12, 236, 1, ink()) }
+    } else {
+        let t = sel - seed_count();
+        print(g, tool_name(t), x + 12, 194, 1, ink(), 0xe8dcc0);
+        text_right(g, (if tool_rarity(t) == 2 { "rare" } else if tool_rarity(t) == 1 { "uncommon" } else { "common" }) ++ ", $" ++ tool_price(t).show(), x + w - 12, 194, 1, faint());
+        wrap_text(g, tool_text(t), x + 12, 206, w - 24, 1, faint());
+    }
+    text_mid(g, "back to close", 240, 250, 1, faint());
+}

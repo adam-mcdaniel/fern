@@ -1,0 +1,2 @@
+// (the module `lib`, from modules.fern's `mod lib;`)
+pub mod geometry;

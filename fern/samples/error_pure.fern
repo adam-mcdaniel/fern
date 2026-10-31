@@ -1,0 +1,7 @@
+// `with` says what effects a function may have: here, none.
+fn quiet(x: Int) -> Int with {} {
+    println("loud");
+    x
+}
+fn main() { println(quiet(1).show()); }
+// error: this has the effect Io, which isn't allowed here

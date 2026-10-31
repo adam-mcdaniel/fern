@@ -1,0 +1,131 @@
+// Drawing into a framebuffer: rectangles, and text in a 3x5 pixel font.
+
+use crate::screen::screen_show;
+
+pub struct Canvas { pixels: Array<Int>, width: Int, height: Int, font: Array<Int> }
+
+pub fn canvas(width: Int, height: Int) -> Canvas {
+    Canvas { pixels: array(width * height, 0), width: width, height: height, font: font() }
+}
+
+// puts the canvas in the window (see screen_show)
+pub fn show(c: Canvas) -> Bool with Io {
+    screen_show(c.pixels)
+}
+
+// the rectangle with its top left at (x, y), as much of it as is on the canvas
+pub fn fill_rect(c: Canvas, x: Int, y: Int, w: Int, h: Int, color: Int) {
+    let left = x.max(0);
+    let right = (x + w).min(c.width);
+    let bottom = (y + h).min(c.height);
+    let mut row = y.max(0);
+    while row < bottom {
+        let mut i = row * c.width + left;
+        let end = row * c.width + right;
+        while i < end {
+            array_set(c.pixels, i, color);
+            i = i + 1;
+        }
+        row = row + 1;
+    }
+}
+
+// one pixel, if it's on the canvas
+pub fn pixel(c: Canvas, x: Int, y: Int, color: Int) {
+    if x >= 0 && y >= 0 && x < c.width && y < c.height { array_set(c.pixels, y * c.width + x, color) }
+}
+
+// a line from (x0, y0) to (x1, y1), by Bresenham's algorithm: a step at a
+// time along the longer way, and along the shorter whenever the error
+// from the true line has built up past half a pixel
+pub fn line(c: Canvas, x0: Int, y0: Int, x1: Int, y1: Int, color: Int) {
+    let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 };
+    let dy = if y1 > y0 { y0 - y1 } else { y1 - y0 };
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+    loop {
+        pixel(c, x, y, color);
+        if x == x1 && y == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err = err + dy;
+            x = x + sx;
+        }
+        if e2 <= dx {
+            err = err + dx;
+            y = y + sy;
+        }
+    }
+}
+
+pub fn clear(c: Canvas, color: Int) {
+    fill_rect(c, 0, 0, c.width, c.height, color)
+}
+
+// ---- text
+
+// s with its top left at (x, y), each of the font's pixels size x size
+pub fn text(c: Canvas, s: String, x: Int, y: Int, size: Int, color: Int) {
+    let mut i = 0;
+    while i < string_length(s) {
+        let ch = upper(char_at(s, i));
+        let g = if ch >= 0 && ch < 128 { array_get(c.font, ch) } else { 0 };
+        glyph(c, g, x + i * 4 * size, y, size, color);
+        i = i + 1;
+    }
+}
+
+// how wide text(c, s, ..) is
+pub fn text_width(s: String, size: Int) -> Int {
+    string_length(s) * 4 * size - size
+}
+
+fn upper(ch: Int) -> Int {
+    if ch >= char_at("a", 0) && ch <= char_at("z", 0) { ch - 32 } else { ch }
+}
+
+// a glyph is 5 decimal digits, one for each row, the top first: each is
+// its row's 3 pixels as bits, 4 the leftmost (so 7 is all three, 5 the
+// two sides)
+fn glyph(c: Canvas, g: Int, x: Int, y: Int, size: Int, color: Int) {
+    let mut rest = g;
+    let mut row = 4;
+    while row >= 0 {
+        let bits = rest % 10;
+        let top = y + row * size;
+        if bits / 4 % 2 == 1 { fill_rect(c, x, top, size, size, color) }
+        if bits / 2 % 2 == 1 { fill_rect(c, x + size, top, size, size, color) }
+        if bits % 2 == 1 { fill_rect(c, x + 2 * size, top, size, size, color) }
+        rest = rest / 10;
+        row = row - 1;
+    }
+}
+
+// the glyphs, by character code
+fn font() -> Array<Int> {
+    let glyphs = array(128, 0);
+    add(glyphs, "0123456789", [75557, 26227, 71747, 71317, 55711, 74717, 74757, 71111, 75757, 75717]);
+    add(glyphs, "ABCDEFGHIJKLM", [25755, 65656, 34443, 65556, 74647, 74644, 34553, 55755, 72227, 11152, 55655, 44447, 57755]);
+    add(glyphs, "NOPQRSTUVWXYZ", [65555, 25552, 65644, 25563, 65655, 34216, 72222, 55557, 55552, 55775, 55255, 55222, 71247]);
+    add(glyphs, "!:-.", [22202, 2020, 700, 2]);
+    add(glyphs, "<>',/?+()=%", [12421, 42124, 22000, 24, 11244, 71202, 2720, 24442, 42224, 7070, 51245]);
+    glyphs
+}
+
+fn add(glyphs: Array<Int>, chars: String, rows: List<Int>) {
+    let mut i = 0;
+    let mut rest = rows;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(g, tail) => {
+                array_set(glyphs, char_at(chars, i), g);
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+}

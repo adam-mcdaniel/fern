@@ -1,0 +1,4 @@
+// A trait method on a type with no impl of it.
+struct Point { x: Int, y: Int }
+fn main() { println(Point { x: 1, y: 2 }.show()); }
+// error: Point doesn't implement Show

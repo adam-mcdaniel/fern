@@ -1,0 +1,356 @@
+// Tetris. Left and right move, up (or X) turns, down drops faster, space
+// drops all the way; the faint piece shows where it would land. Lines
+// cleared make it faster. Escape quits.
+
+mod screen;
+mod draw;
+
+use screen::*;
+use draw::{Canvas, canvas, clear, fill_rect, show, text, text_width};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+
+// the well: 10 x 20 cells of 5 pixels, from (55, 10)
+fn cols() -> Int { 10 }
+fn rows() -> Int { 20 }
+fn cell() -> Int { 5 }
+fn left() -> Int { 55 }
+fn top() -> Int { 10 }
+
+// The pieces, I J L O S T Z: each turn of one is 16 bits, a 4 x 4 grid of
+// cells a row at a time, the top left the highest bit.
+fn shapes() -> Array<Int> {
+    let s = array(28, 0);
+    fill(s, 0, [0x0f00, 0x2222, 0x00f0, 0x4444]);
+    fill(s, 4, [0x44c0, 0x8e00, 0x6440, 0x0e20]);
+    fill(s, 8, [0x4460, 0x0e80, 0xc440, 0x2e00]);
+    fill(s, 12, [0xcc00, 0xcc00, 0xcc00, 0xcc00]);
+    fill(s, 16, [0x06c0, 0x8c40, 0x6c00, 0x4620]);
+    fill(s, 20, [0x0e40, 0x4c40, 0x4e00, 0x4640]);
+    fill(s, 24, [0x0c60, 0x4c80, 0xc600, 0x2640]);
+    s
+}
+
+fn fill(a: Array<Int>, at: Int, xs: List<Int>) {
+    match xs {
+        Nil => (),
+        Cons(x, rest) => {
+            array_set(a, at, x);
+            fill(a, at + 1, rest);
+        }
+    }
+}
+
+fn color(kind: Int) -> Int {
+    match kind {
+        0 => rgb(80, 220, 240),
+        1 => rgb(70, 110, 240),
+        2 => rgb(250, 160, 40),
+        3 => rgb(250, 220, 60),
+        4 => rgb(90, 220, 90),
+        5 => rgb(180, 90, 230),
+        _ => rgb(240, 70, 70),
+    }
+}
+
+// the falling piece: which, which turn, and where its grid's top left is
+struct Piece { kind: Int, turn: Int, x: Int, y: Int }
+
+struct Game {
+    // a cell for each of the well's: 0 if empty, else 1 + the kind of piece
+    well: Array<Int>,
+    shapes: Array<Int>,
+    // the next pieces, in a shuffled bag of all seven, and how many are used
+    bag: Array<Int>,
+    // score, lines, the frames until the piece falls a row, the frames a
+    // key's been held, the frames the beep has left, game over (1), random
+    stats: Array<Int>,
+}
+
+fn score() -> Int { 0 }
+fn lines() -> Int { 1 }
+fn timer() -> Int { 2 }
+fn held() -> Int { 3 }
+fn beep() -> Int { 4 }
+fn over() -> Int { 5 }
+fn seed() -> Int { 6 }
+fn used() -> Int { 7 }
+
+fn stat(g: Game, i: Int) -> Int { array_get(g.stats, i) }
+fn set_stat(g: Game, i: Int, x: Int) { array_set(g.stats, i, x) }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern tetris") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let g = Game { well: array(cols() * rows(), 0), shapes: shapes(), bag: array(7, 0), stats: array(8, 0) };
+    set_stat(g, seed(), screen_ticks());
+    set_stat(g, used(), 7);
+    let mut piece = spawn(g);
+    let mut next = draw_kind(g);
+    loop {
+        if stat(g, over()) == 0 {
+            let (p, landed) = play(g, piece);
+            piece = p;
+            if landed {
+                place(g, piece);
+                piece = Piece { kind: next, turn: 0, x: 3, y: 0 };
+                next = draw_kind(g);
+                if !fits(g, piece) { set_stat(g, over(), 1) }
+            }
+        } else if key_pressed(key_space()) {
+            restart(g);
+            piece = spawn(g);
+            next = draw_kind(g);
+        }
+        set_stat(g, beep(), (stat(g, beep()) - 1).max(0));
+        screen_beep(stat(g, beep()) > 0);
+        render(c, g, piece, next);
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}
+
+fn spawn(g: Game) -> Piece {
+    Piece { kind: draw_kind(g), turn: 0, x: 3, y: 0 }
+}
+
+fn restart(g: Game) {
+    let mut i = 0;
+    while i < cols() * rows() {
+        array_set(g.well, i, 0);
+        i = i + 1;
+    }
+    set_stat(g, score(), 0);
+    set_stat(g, lines(), 0);
+    set_stat(g, over(), 0);
+}
+
+// the next kind of piece: each of the seven once, shuffled, then again
+fn draw_kind(g: Game) -> Int {
+    if stat(g, used()) == 7 {
+        let mut i = 0;
+        while i < 7 {
+            array_set(g.bag, i, i);
+            i = i + 1;
+        }
+        // (Fisher-Yates)
+        let mut j = 6;
+        while j > 0 {
+            let k = random(g, j + 1);
+            let t = array_get(g.bag, j);
+            array_set(g.bag, j, array_get(g.bag, k));
+            array_set(g.bag, k, t);
+            j = j - 1;
+        }
+        set_stat(g, used(), 0);
+    }
+    let kind = array_get(g.bag, stat(g, used()));
+    set_stat(g, used(), stat(g, used()) + 1);
+    kind
+}
+
+fn random(g: Game, n: Int) -> Int {
+    let s = stat(g, seed()) * 1103515245 + 12345 & 0x7fffffff;
+    set_stat(g, seed(), s);
+    (s >> 16) % n
+}
+
+// ---- playing
+
+// the piece a frame later, and whether it's landed
+fn play(g: Game, p: Piece) -> (Piece, Bool) with Io {
+    let mut q = p;
+    // left and right: once when pressed, then over and over while held
+    let lr = key_down(key_left()) || key_down(key_right());
+    set_stat(g, held(), if lr { stat(g, held()) + 1 } else { 0 });
+    let h = stat(g, held());
+    if h == 1 || h > 10 && h % 3 == 0 {
+        let dx = if key_down(key_left()) { -1 } else { 1 };
+        q = try_move(g, q, dx, 0);
+    }
+    if key_pressed(key_up()) || key_pressed(key("x")) {
+        q = turn(g, q);
+    }
+    if key_pressed(key_space()) {
+        let landed = drop(g, q);
+        set_stat(g, score(), stat(g, score()) + 2 * (landed.y - q.y));
+        (landed, true)
+    } else {
+        // gravity: faster with each 10 lines, and down makes it fall every frame
+        let speed = (30 - stat(g, lines()) / 10 * 3).max(3);
+        let t = stat(g, timer()) + 1;
+        if t >= speed || key_down(key_down_arrow()) && t >= 2 {
+            set_stat(g, timer(), 0);
+            let fallen = try_move(g, q, 0, 1);
+            if fallen.y == q.y { (q, true) } else { (fallen, false) }
+        } else {
+            set_stat(g, timer(), t);
+            (q, false)
+        }
+    }
+}
+
+fn try_move(g: Game, p: Piece, dx: Int, dy: Int) -> Piece {
+    let q = Piece { kind: p.kind, turn: p.turn, x: p.x + dx, y: p.y + dy };
+    if fits(g, q) { q } else { p }
+}
+
+// turned a quarter clockwise, nudged sideways if that's what it takes to fit
+fn turn(g: Game, p: Piece) -> Piece {
+    let t = (p.turn + 1) % 4;
+    first_fit(g, p, [0, -1, 1, -2, 2], t)
+}
+
+fn first_fit(g: Game, p: Piece, nudges: List<Int>, t: Int) -> Piece {
+    match nudges {
+        Nil => p,
+        Cons(dx, rest) => {
+            let q = Piece { kind: p.kind, turn: t, x: p.x + dx, y: p.y };
+            if fits(g, q) { q } else { first_fit(g, p, rest, t) }
+        }
+    }
+}
+
+// as far down as it goes
+fn drop(g: Game, p: Piece) -> Piece {
+    let q = try_move(g, p, 0, 1);
+    if q.y == p.y { p } else { drop(g, q) }
+}
+
+// whether every cell of the piece is inside the well, and empty
+fn fits(g: Game, p: Piece) -> Bool {
+    let bits = array_get(g.shapes, p.kind * 4 + p.turn);
+    let mut ok = true;
+    let mut i = 0;
+    while i < 16 {
+        if bits >> (15 - i) & 1 == 1 {
+            let x = p.x + i % 4;
+            let y = p.y + i / 4;
+            if x < 0 || x >= cols() || y >= rows() || y >= 0 && array_get(g.well, y * cols() + x) != 0 {
+                ok = false;
+            }
+        }
+        i = i + 1;
+    }
+    ok
+}
+
+// the piece into the well, then full rows out of it
+fn place(g: Game, p: Piece) {
+    let bits = array_get(g.shapes, p.kind * 4 + p.turn);
+    let mut i = 0;
+    while i < 16 {
+        let y = p.y + i / 4;
+        if bits >> (15 - i) & 1 == 1 && y >= 0 {
+            array_set(g.well, y * cols() + p.x + i % 4, p.kind + 1);
+        }
+        i = i + 1;
+    }
+    let cleared = clear_rows(g);
+    if cleared > 0 {
+        set_stat(g, lines(), stat(g, lines()) + cleared);
+        let points = match cleared { 1 => 100, 2 => 300, 3 => 500, _ => 800 };
+        set_stat(g, score(), stat(g, score()) + points * (stat(g, lines()) / 10 + 1));
+        set_stat(g, beep(), 4 + cleared * 3);
+    }
+}
+
+// takes out the full rows, moving those above down: how many
+fn clear_rows(g: Game) -> Int {
+    let mut cleared = 0;
+    let mut y = rows() - 1;
+    while y >= 0 {
+        if full(g, y) {
+            let mut r = y;
+            while r > 0 {
+                let mut x = 0;
+                while x < cols() {
+                    array_set(g.well, r * cols() + x, array_get(g.well, (r - 1) * cols() + x));
+                    x = x + 1;
+                }
+                r = r - 1;
+            }
+            let mut x = 0;
+            while x < cols() {
+                array_set(g.well, x, 0);
+                x = x + 1;
+            }
+            cleared = cleared + 1;
+        } else {
+            y = y - 1;
+        }
+    }
+    cleared
+}
+
+fn full(g: Game, y: Int) -> Bool {
+    let mut x = 0;
+    let mut n = 0;
+    while x < cols() {
+        if array_get(g.well, y * cols() + x) != 0 { n = n + 1 }
+        x = x + 1;
+    }
+    n == cols()
+}
+
+// ---- drawing
+
+fn render(c: Canvas, g: Game, p: Piece, next: Int) {
+    clear(c, rgb(16, 16, 28));
+    fill_rect(c, left() - 2, top() - 2, cols() * cell() + 4, rows() * cell() + 4, rgb(70, 70, 100));
+    fill_rect(c, left(), top(), cols() * cell(), rows() * cell(), rgb(6, 6, 12));
+    let mut i = 0;
+    while i < cols() * rows() {
+        let k = array_get(g.well, i);
+        if k != 0 { block(c, left() + i % cols() * cell(), top() + i / cols() * cell(), color(k - 1)) }
+        i = i + 1;
+    }
+    if stat(g, over()) == 0 {
+        let ghost = drop(g, p);
+        piece(c, g, ghost, left(), top(), rgb(45, 45, 65));
+        piece(c, g, p, left(), top(), color(p.kind));
+    }
+    let white = rgb(230, 230, 240);
+    text(c, "NEXT", 116, 12, 1, white);
+    piece(c, g, Piece { kind: next, turn: 0, x: 0, y: 0 }, 116, 20, color(next));
+    text(c, "SCORE", 4, 12, 1, white);
+    text(c, stat(g, score()).show(), 4, 20, 1, rgb(255, 220, 90));
+    text(c, "LINES", 4, 34, 1, white);
+    text(c, stat(g, lines()).show(), 4, 42, 1, rgb(255, 220, 90));
+    text(c, "LEVEL", 4, 56, 1, white);
+    text(c, (stat(g, lines()) / 10 + 1).show(), 4, 64, 1, rgb(255, 220, 90));
+    if stat(g, over()) == 1 {
+        fill_rect(c, left() - 2, 50, cols() * cell() + 4, 22, rgb(0, 0, 0));
+        text(c, "GAME OVER", left() + (cols() * cell() - text_width("GAME OVER", 1)) / 2, 54, 1, rgb(255, 90, 90));
+        text(c, "SPACE", left() + (cols() * cell() - text_width("SPACE", 1)) / 2, 63, 1, white);
+    }
+}
+
+// a piece, with the well's top left at (x0, y0)
+fn piece(c: Canvas, g: Game, p: Piece, x0: Int, y0: Int, col: Int) {
+    let bits = array_get(g.shapes, p.kind * 4 + p.turn);
+    let mut i = 0;
+    while i < 16 {
+        let y = p.y + i / 4;
+        if bits >> (15 - i) & 1 == 1 && y >= 0 {
+            block(c, x0 + (p.x + i % 4) * cell(), y0 + y * cell(), col);
+        }
+        i = i + 1;
+    }
+}
+
+// a cell, lit at the top left
+fn block(c: Canvas, x: Int, y: Int, col: Int) {
+    fill_rect(c, x, y, cell(), cell(), col);
+    fill_rect(c, x, y, cell(), 1, lighter(col));
+    fill_rect(c, x, y + 1, 1, cell() - 1, lighter(col));
+}
+
+fn lighter(color: Int) -> Int {
+    rgb(((color >> 16) + 255) / 2, ((color >> 8 & 255) + 255) / 2, ((color & 255) + 255) / 2)
+}

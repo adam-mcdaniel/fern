@@ -1,0 +1,288 @@
+// The sound: effects for what happens, and music, made as it plays.
+//
+// The music is chords going round (a progression in a key), a bar each,
+// and what's played over them a sixteenth at a time: a pad holding the
+// chord, a plucked string picking out its notes, a bass, drums, and a lead
+// wandering the scale; more of them as the night grows dangerous. Each
+// note is scheduled a little ahead on the sound's own clock, so the beat
+// is exact however the frames fall.
+
+use crate::screen::{note, sound_clock, sound_volume, sound_stop};
+use super::world::{hash};
+
+pub struct Music { freqs: Array<Int>, v: Array<Int> }
+
+// the music's numbers: which song, the next step's time (ms on the sound's
+// clock), the step, and how intense it was last
+fn m_song() -> Int { 0 }
+fn m_next() -> Int { 1 }
+fn m_step() -> Int { 2 }
+
+pub fn music() -> Music {
+    // each MIDI note's frequency, in 16ths of a hertz: the twelve notes of
+    // the octave from middle C, doubled and halved
+    let ratios = [1000, 1059, 1122, 1189, 1260, 1335, 1414, 1498, 1587, 1682, 1782, 1888];
+    let r = Array::from_list(ratios, 0);
+    let freqs = array(128, 0);
+    let mut n = 0;
+    while n < 128 {
+        let base = 4186 * array_get(r, n % 12) / 1000;
+        let oct = n / 12 - 5;
+        array_set(freqs, n, if oct >= 0 { base << oct } else { base >> (-oct) });
+        n = n + 1;
+    }
+    Music { freqs: freqs, v: array(8, -1) }
+}
+
+// the songs
+pub fn title_song() -> Int { 0 }
+pub fn night_song() -> Int { 1 }
+pub fn boss_song() -> Int { 2 }
+pub fn dawn_song() -> Int { 3 }
+pub fn dirge() -> Int { 4 }
+pub fn silence() -> Int { 5 }
+
+fn hz(m: Music, note: Int) -> Int { array_get(m.freqs, note.clamp(0, 127)) }
+
+// a note: an instrument's
+fn play(wave: Int, f: Int, f_end: Int, at: Int, attack: Int, length: Int, vol: Int, pan: Int, cutoff: Int, reverb: Int, bus: Int) with Io {
+    note(wave, f, f_end, at, attack, length, vol, pan, cutoff, reverb, bus);
+}
+
+// a degree of a scale (0 is the root; 7 an octave up) as semitones
+fn degree(scale: Int, d: Int) -> Int {
+    let steps = if scale == 0 { [0, 2, 3, 5, 7, 8, 10] } else if scale == 1 { [0, 2, 4, 5, 7, 9, 11] } else { [0, 2, 3, 5, 7, 8, 11] };
+    let oct = d.div_floor(7);
+    let k = d.mod_floor(7);
+    steps.get(k).unwrap_or(0) + oct * 12
+}
+
+// keeps the music going: what's due in the next quarter second, played
+pub fn tick(m: Music, song: Int, intensity: Int, region: Int) with Io {
+    let now = sound_clock();
+    if array_get(m.v, m_song()) != song {
+        sound_stop(0);
+        array_set(m.v, m_song(), song);
+        array_set(m.v, m_next(), now + 120);
+        array_set(m.v, m_step(), 0);
+    }
+    if song != silence() {
+        let step_ms = if song == title_song() { 172 } else if song == night_song() { 150 - region * 6 } else if song == boss_song() { 124 } else if song == dawn_song() { 158 } else { 230 };
+        let mut next = array_get(m.v, m_next());
+        // (fallen far behind, after a pause: start again from now)
+        if next < now - 500 { next = now + 50 }
+        while next < now + 260 {
+            let step = array_get(m.v, m_step());
+            beat(m, song, step, next, step_ms, intensity, region);
+            array_set(m.v, m_step(), step + 1);
+            next = next + step_ms;
+        }
+        array_set(m.v, m_next(), next);
+    }
+}
+
+// one sixteenth of a song
+fn beat(m: Music, song: Int, step: Int, at: Int, step_ms: Int, intensity: Int, region: Int) with Io {
+    let s = step % 16;
+    let bar = step / 16;
+    // the key (its root, a MIDI note), its scale (0 minor, 1 major, 2
+    // harmonic minor) and the chords' roots, as degrees
+    let (root, scale, prog) = if song == title_song() { (57, 0, [0, 5, 2, 6]) }
+        else if song == night_song() { if region == 0 { (57, 0, [0, 5, 2, 6, 0, 5, 3, 4]) } else if region == 1 { (52, 0, [0, 3, 5, 4]) } else { (48, 2, [0, 6, 5, 4]) } }
+        else if song == boss_song() { (50, 2, [0, 5, 6, 4]) }
+        else if song == dawn_song() { (50, 1, [0, 4, 5, 3]) }
+        else { (45, 0, [0, 5, 3, 4]) };
+    let chord = prog.get(bar % prog.len()).unwrap_or(0);
+    let tone = |d: Int| root + degree(scale, chord + d);
+    let bar_ms = step_ms * 16;
+    let drive = if song == boss_song() { 3 } else if song == night_song() { intensity } else { 0 };
+    // the pad: the chord, held over the bar
+    if s == 0 {
+        let vol = if song == dirge() { 60 } else { 46 };
+        play(6, hz(m, tone(0) + 12), hz(m, tone(0) + 12), at, bar_ms / 3, bar_ms + bar_ms / 4, vol, -30, 1300, 210, 0);
+        play(6, hz(m, tone(2) + 12), hz(m, tone(2) + 12), at, bar_ms / 3, bar_ms + bar_ms / 4, vol, 30, 1300, 210, 0);
+        play(6, hz(m, tone(4) + 12), hz(m, tone(4) + 12), at, bar_ms / 3, bar_ms + bar_ms / 4, vol * 3 / 4, 0, 1300, 210, 0);
+    }
+    // the plucked string: the chord's notes up and down, on eighths (on
+    // sixteenths when it's urgent), sometimes resting
+    let h = hash(step, bar % 4, song * 31 + region);
+    let fast = drive >= 2;
+    if (s % 2 == 0 || fast) && (song != title_song() || h % 3 != 0) && song != dirge() {
+        let up = [0, 2, 4, 7, 9, 7, 4, 2];
+        let i = if fast { s % 8 } else { (s / 2) % 8 };
+        let d = up.get(i).unwrap_or(0);
+        let vol = if s % 4 == 0 { 120 } else { 80 };
+        play(5, hz(m, tone(d) + 12), hz(m, tone(d) + 12), at, 2, 1100, vol, if s % 4 < 2 { -45 } else { 45 }, 4200, 150, 0);
+    }
+    if song == dirge() && s % 4 == 0 {
+        // (falling notes, slowly)
+        let d = 7 - (s / 4 + bar * 2) % 8;
+        play(5, hz(m, tone(d) + 12), hz(m, tone(d) + 12), at, 2, 1600, 90, 0, 3000, 200, 0);
+    }
+    // the bass
+    if drive >= 1 || song == dawn_song() || song == title_song() {
+        let hits = if song == boss_song() { s % 2 == 0 } else if song == title_song() { s == 0 } else if drive >= 2 { s == 0 || s == 3 || s == 8 || s == 11 || s == 14 } else { s == 0 || s == 8 };
+        if hits { play(1, hz(m, tone(0) - 12), hz(m, tone(0) - 12), at, 8, step_ms * 3, 170, 0, 700, 20, 0) }
+    }
+    // drums
+    if drive >= 1 && s % 2 == 0 { play(4, 9000 * 16, 9000 * 16, at, 1, 35, if s % 4 == 2 { 40 } else { 22 }, 30, 9000, 30, 0) }
+    if drive >= 2 {
+        if s == 0 || s == 8 || (drive >= 3 && (s == 10 || s == 6)) { play(0, 150 * 16, 42 * 16, at, 1, 200, 240, 0, 2000, 10, 0) }
+        if s == 4 || s == 12 {
+            play(4, 3000 * 16, 3000 * 16, at, 1, 150, 90, -10, 4500, 70, 0);
+            play(1, 190 * 16, 150 * 16, at, 1, 90, 70, -10, 2000, 30, 0);
+        }
+    }
+    // the lead: a wandering tune over it all, two bars in four
+    if (drive >= 3 || song == dawn_song()) && (bar % 4 < 2 || song == dawn_song()) && (s == 0 || s == 3 || s == 6 || s == 8 || s == 11 || s == 14) {
+        let d = (hash(s, bar % 4, 77 + song) % 5) * 2 - 4 + (if s == 0 { 0 } else { 2 });
+        let note = root + 24 + degree(scale, chord + d.max(0));
+        let wave = if song == dawn_song() { 0 } else { 7 };
+        play(wave, hz(m, note), hz(m, note), at, 10, step_ms * 3, if song == dawn_song() { 70 } else { 44 }, 20, 2600, 170, 0);
+    }
+    // bells on the title, now and then
+    if song == title_song() && s == 10 && bar % 2 == 1 {
+        play(0, hz(m, tone(4) + 36), hz(m, tone(4) + 36), at, 3, 2400, 60, 50, 8000, 255, 0);
+    }
+}
+
+pub fn volumes(music_vol: Int, sfx_vol: Int) with Io { sound_volume(music_vol, sfx_vol) }
+
+// ---- effects
+
+// the effects the night asked for this frame (three cells each: what, a
+// number, the pan), a few of each at most
+pub fn effects(m: Music, sounds: Array<Int>, n: Int) with Io {
+    let seen = array(24, 0);
+    let mut i = 0;
+    while i < n {
+        let what = array_get(sounds, i * 3);
+        let k = array_get(sounds, i * 3 + 1);
+        let pan = array_get(sounds, i * 3 + 2);
+        let most = if what == 0 { 3 } else if what == 1 { 4 } else if what == 2 { 2 } else { 1 };
+        if array_get(seen, what) < most {
+            array_set(seen, what, array_get(seen, what) + 1);
+            effect(m, what, k, pan);
+        }
+        i = i + 1;
+    }
+}
+
+pub fn effect(m: Music, what: Int, k: Int, pan: Int) with Io {
+    let jitter = (sound_clock() * 7919) % 200;
+    if what == 0 {
+        // a hit
+        play(4, (1500 + jitter * 4) * 16, 700 * 16, 0, 1, 45, 60, pan, 2600, 20, 1);
+    } else if what == 1 {
+        // a death: a pop
+        let base = if k == 2 || k == 6 { 260 } else { 520 + jitter };
+        play(2, base * 16, 80 * 16, 0, 1, 100, 46, pan, 2000, 50, 1);
+        play(4, 900 * 16, 300 * 16, 0, 1, 70, 40, pan, 1600, 30, 1);
+    } else if what == 2 {
+        // an ember gathered: a pentatonic step up for each in a run
+        let penta = [0, 2, 4, 7, 9];
+        let note = 79 + penta.get(k % 5).unwrap_or(0) + (k / 5) * 12;
+        play(5, hz(m, note), hz(m, note), 0, 1, 380, 60, pan, 6000, 110, 1);
+    } else if what == 3 {
+        // the ember hurt
+        play(3, 280 * 16, 60 * 16, 0, 1, 260, 150, pan, 1500, 40, 1);
+        play(4, 800 * 16, 200 * 16, 0, 1, 140, 80, pan, 1200, 30, 1);
+    } else if what == 4 {
+        // flare
+        let f = if k > 0 { 1200 } else { 900 };
+        play(1, (f + jitter) * 16, (f / 2) * 16, 0, 1, 80, 46, pan, 3200, 60, 1);
+    } else if what == 5 {
+        // nova
+        play(0, 180 * 16, 45 * 16, 0, 2, 480, 190, pan, 1500, 60, 1);
+        play(4, 2000 * 16, 400 * 16, 0, 30, 520, 70, pan, 1300, 120, 1);
+    } else if what == 6 {
+        // a comet landing
+        play(0, 120 * 16, 32 * 16, 0, 1, 620, 230, pan, 1800, 50, 1);
+        play(4, 1500 * 16, 300 * 16, 0, 1, 420, 120, pan, 2200, 90, 1);
+    } else if what == 7 {
+        // lightning
+        play(2, 2200 * 16, 260 * 16, 0, 1, 130, 46, pan, 6500, 70, 1);
+        play(4, 6000 * 16, 2000 * 16, 0, 1, 110, 70, pan, 8000, 80, 1);
+    } else if what == 8 {
+        // a brazier catching: a rush of air, then a chord
+        play(4, 400 * 16, 1600 * 16, 0, 450, 950, 120, pan, 1700, 120, 1);
+        let mut n = 0;
+        while n < 3 {
+            let note = 69 + degree(1, n * 2);
+            play(5, hz(m, note), hz(m, note), sound_clock() + 300 + n * 70, 1, 1400, 100, pan, 5000, 200, 1);
+            n = n + 1;
+        }
+    } else if what == 9 {
+        // a chest, or a lodestar: notes climbing
+        let mut n = 0;
+        while n < 5 {
+            let note = 72 + degree(1, n * 2);
+            play(5, hz(m, note), hz(m, note), sound_clock() + n * 70, 1, 900, 110, 0, 6000, 180, 1);
+            n = n + 1;
+        }
+    } else if what == 10 {
+        // a level: an arpeggio up, over a swell
+        let mut n = 0;
+        while n < 6 {
+            let note = 67 + degree(1, n * 2);
+            play(5, hz(m, note), hz(m, note), sound_clock() + n * 55, 1, 1000, 120, (n - 3) * 25, 6000, 180, 1);
+            n = n + 1;
+        }
+        play(6, hz(m, 55), hz(m, 55), 0, 300, 1400, 70, 0, 1800, 220, 1);
+    } else if what == 11 {
+        // the boss's roar
+        let low = if k > 0 { 70 } else { 90 };
+        play(3, low * 16, 42 * 16, 0, 120, 1700, 190, pan, 900, 120, 1);
+        play(4, 900 * 16, 200 * 16, 0, 200, 1300, 110, pan, 700, 120, 1);
+    } else if what == 12 {
+        // spit
+        play(2, 320 * 16, 120 * 16, 0, 1, 110, 40, pan, 1300, 60, 1);
+    } else if what == 13 {
+        // a brazier snuffed
+        play(4, 1200 * 16, 200 * 16, 0, 10, 600, 100, pan, 900, 100, 1);
+        play(0, 420 * 16, 90 * 16, 0, 10, 500, 90, pan, 1500, 100, 1);
+    } else if what == 14 {
+        // wisps
+        play(0, 1200 * 16, 1900 * 16, 0, 20, 220, 40, pan, 5000, 200, 1);
+    } else if what == 15 {
+        // mended
+        play(5, hz(m, 76), hz(m, 76), 0, 1, 700, 100, pan, 5000, 150, 1);
+        play(5, hz(m, 83), hz(m, 83), sound_clock() + 90, 1, 900, 100, pan, 5000, 150, 1);
+    } else if what == 16 {
+        // something big dies
+        play(0, 90 * 16, 28 * 16, 0, 1, 900, 240, pan, 1500, 120, 1);
+        play(4, 1000 * 16, 150 * 16, 0, 1, 700, 140, pan, 1600, 120, 1);
+    } else if what == 17 {
+        // a warning
+        let f = if k > 0 { 440 } else { 660 };
+        play(7, f * 16, f * 16, 0, 5, 160, 60, 0, 2500, 120, 1);
+        play(7, (f * 4 / 3) * 16, (f * 4 / 3) * 16, sound_clock() + 180, 5, 240, 60, 0, 2500, 120, 1);
+    } else if what == 18 {
+        // a cinder
+        play(5, hz(m, 91), hz(m, 91), 0, 1, 300, 70, pan, 7000, 100, 1);
+        play(5, hz(m, 96), hz(m, 96), sound_clock() + 50, 1, 400, 70, pan, 7000, 100, 1);
+    } else if what == 20 {
+        // the menus: moving
+        play(5, hz(m, 84), hz(m, 84), 0, 1, 250, 50, 0, 5000, 80, 1);
+    } else if what == 21 {
+        // the menus: choosing
+        play(5, hz(m, 79), hz(m, 79), 0, 1, 500, 90, 0, 5000, 140, 1);
+        play(5, hz(m, 86), hz(m, 86), sound_clock() + 60, 1, 600, 90, 0, 5000, 140, 1);
+    } else if what == 22 {
+        // the menus: back, or no
+        play(5, hz(m, 67), hz(m, 67), 0, 1, 400, 70, 0, 3000, 100, 1);
+    } else if what == 23 {
+        // dawn: a great chord
+        let mut n = 0;
+        while n < 5 {
+            let note = 50 + degree(1, n * 2) + 12;
+            play(6, hz(m, note), hz(m, note), 0, 1500, 6000, 70, (n - 2) * 30, 2500, 230, 1);
+            n = n + 1;
+        }
+    }
+}
+
+pub fn ui_move() -> Int { 20 }
+pub fn ui_ok() -> Int { 21 }
+pub fn ui_back() -> Int { 22 }
+pub fn dawn_chord() -> Int { 23 }

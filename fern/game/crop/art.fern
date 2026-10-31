@@ -1,0 +1,777 @@
+// The table's picture, baked: worked out once for each farm and season,
+// then copied to the screen each frame, with what moves drawn over it.
+//
+// The table is a toy on a picnic cloth, in the sun. Each thing on it is
+// drawn from its shape in the physics (the same capsules and circles the
+// ball bounces off) into two maps: what color it is, and how high it
+// stands. Then the light: the sun's up to the left, so a surface facing
+// it is brighter (its slope from the height map), whatever stands up
+// casts a shadow down to the right, and corners where things meet the
+// ground are darker (how much higher what's round a point is).
+//
+// The bake covers a strip of the screen 288 wide (the table and the
+// wooden cabinet round it); the rest of the background is the cloth.
+
+use crate::math::{isqrt, sin, cos};
+use super::gfx::*;
+use super::physics::*;
+use super::table::*;
+
+// the strip baked: from screen x 96, 288 wide
+fn bx0() -> Int { 96 }
+fn bw() -> Int { 288 }
+
+// noise: a number from 0 to 255 for each point and seed
+pub fn hash(x: Int, y: Int, seed: Int) -> Int {
+    let mut h = x * 374761393 + y * 668265263 + seed * 2147483647;
+    h = (h ^ (h >> 13)) * 1274126177;
+    (h ^ (h >> 16)) & 255
+}
+
+// smooth noise: hash's values on a grid `cell` pixels apart, blended
+// between (0 to 255)
+pub fn vnoise(x: Int, y: Int, cell: Int, seed: Int) -> Int {
+    let gx = x.div_floor(cell);
+    let gy = y.div_floor(cell);
+    let fx = (x - gx * cell) * 256 / cell;
+    let fy = (y - gy * cell) * 256 / cell;
+    // (eased, so the grid doesn't show)
+    let ex = fx * fx * (768 - 2 * fx) >> 16;
+    let ey = fy * fy * (768 - 2 * fy) >> 16;
+    let a = hash(gx, gy, seed);
+    let b = hash(gx + 1, gy, seed);
+    let c = hash(gx, gy + 1, seed);
+    let d = hash(gx + 1, gy + 1, seed);
+    let top = a + ((b - a) * ex >> 8);
+    let bottom = c + ((d - c) * ex >> 8);
+    top + ((bottom - top) * ey >> 8)
+}
+
+// ---- the seasons' colors
+
+pub struct Palette {
+    grass: Int,
+    grass_dark: Int,
+    grass_light: Int,
+    flower_a: Int,
+    flower_b: Int,
+    dirt: Int,
+    dirt_dark: Int,
+    wood: Int,
+    wood_dark: Int,
+    rail: Int,
+    hay: Int,
+    hay_dark: Int,
+    snow: Bool,
+}
+
+pub fn palette(season: Int) -> Palette {
+    if season == 0 {
+        Palette { grass: 0x62b04c, grass_dark: 0x3f8a3a, grass_light: 0x86c862, flower_a: 0xfff2f6, flower_b: 0xffb8d0,
+            dirt: 0x8c5a36, dirt_dark: 0x6a4026, wood: 0xb4743e, wood_dark: 0x8c5228, rail: 0xf6f0e2, hay: 0xe8c45a, hay_dark: 0xc49a38, snow: false }
+    } else if season == 1 {
+        Palette { grass: 0x7cb83e, grass_dark: 0x64a034, grass_light: 0x98cc52, flower_a: 0xffe04a, flower_b: 0xfff8e0,
+            dirt: 0x946038, dirt_dark: 0x6e4428, wood: 0xb8763c, wood_dark: 0x905428, rail: 0xf8f2e4, hay: 0xf0cc5c, hay_dark: 0xcca03a, snow: false }
+    } else if season == 2 {
+        Palette { grass: 0xa8a84a, grass_dark: 0x8c8c3c, grass_light: 0xc0b858, flower_a: 0xe8682e, flower_b: 0xc8402a,
+            dirt: 0x8a5634, dirt_dark: 0x663c24, wood: 0xa86c3e, wood_dark: 0x84502a, rail: 0xf2eadc, hay: 0xe2b452, hay_dark: 0xb88a32, snow: false }
+    } else {
+        Palette { grass: 0xe8eef4, grass_dark: 0xc8d4e2, grass_light: 0xf8fbff, flower_a: 0xa8c0d8, flower_b: 0xffffff,
+            dirt: 0x7a5a48, dirt_dark: 0x5a4034, wood: 0x9c6a48, wood_dark: 0x7a4e34, rail: 0xffffff, hay: 0xdcc078, hay_dark: 0xb09650, snow: true }
+    }
+}
+
+pub fn season_name(s: Int) -> String {
+    if s == 0 { "Spring" } else if s == 1 { "Summer" } else if s == 2 { "Autumn" } else { "Winter" }
+}
+
+// ---- the cloth
+
+pub fn gingham(x: Int, y: Int) -> Int {
+    let cream = 0xf4ead6;
+    let check = 0xd86a58;
+    let a = (x / 9) % 2 == 1;
+    let b = (y / 9) % 2 == 1;
+    let t = if a && b { 150 } else if a || b { 70 } else { 0 };
+    // (the weave: a thread a pixel, a little lighter or darker)
+    let weave = if (x + y) % 2 == 0 { 6 } else { -4 };
+    let c = mix(cream, check, t);
+    rgb(red(c) + weave, green(c) + weave, blue(c) + weave)
+}
+
+// ---- the bake
+
+pub struct Art {
+    // the whole screen's background
+    bg: Array<Int>,
+    // the strip's heights (16ths of a pixel) and colors, as they were baked
+    height: Array<Int>,
+    color: Array<Int>,
+    season: Int,
+    farm: Int,
+}
+
+pub fn art() -> Art {
+    Art { bg: array(sw() * sh(), 0), height: array(288 * 270, 0), color: array(288 * 270, 0), season: -1, farm: -1 }
+}
+
+// the table, for a season, into the art's background
+pub fn bake(a: Art, t: Table, season: Int, sines: Array<Int>) {
+    let pal = palette(season);
+    let w = bw();
+    let h = sh();
+    let hgt = a.height;
+    let col = a.color;
+    // the cloth everywhere
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < sw() {
+            a.bg.set(y * sw() + x, gingham(x, y));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // the cabinet: wood, standing up off the cloth
+    y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let i = y * w + x;
+            let tx = x - 16;
+            let inside = tx >= -10 && tx < 266;
+            // (its top corners rounded)
+            let corner = if y < 14 && (tx < 4 || tx >= 252) {
+                let cx = if tx < 4 { 4 } else { 251 };
+                (tx - cx) * (tx - cx) + (y - 14) * (y - 14) > 14 * 14
+            } else { false };
+            if inside && !corner {
+                hgt.set(i, 150);
+                col.set(i, wood_grain(pal, tx, y));
+            } else {
+                hgt.set(i, 0);
+                col.set(i, gingham(x + bx0(), y));
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // the playfield: everything the walls close in, from its middle
+    let walls = array(w * h, false);
+    let p = t.p;
+    let mut s = 0;
+    while s < p.n {
+        let tk = tag_kind(shape_tag(p, s));
+        if tk == t_wall() && shape_kind(p, s) == k_seg() {
+            mark_capsule(walls, shape_ax(p, s), shape_ay(p, s), shape_bx(p, s), shape_by(p, s), shape_r(p, s));
+        }
+        s = s + 1;
+    }
+    let field = flood(walls, 121 + 16, 150);
+    y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let i = y * w + x;
+            if field.get(i) {
+                let tx = x - 16;
+                hgt.set(i, 0);
+                col.set(i, if tx >= 237 && y >= 124 { lane_wood(pal, tx, y) } else { grass(pal, tx, y) });
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // the drain: the ground falling away between the flippers
+    y = 246;
+    while y < h {
+        let mut x = 0;
+        while x < 236 {
+            let i = y * w + x + 16;
+            if field.get(i) {
+                let k = (y - 246) * (y - 246) / 2;
+                col.set(i, mix(col.get(i), 0x1e2a18, k.min(220)));
+                hgt.set(i, -(y - 246) * 3);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // the plots: tilled earth, a little sunk
+    let mut n = 0;
+    while n < t.n_plots {
+        plot_bed(a, pal, t.plot_x.get(n), t.plot_y.get(n));
+        n = n + 1;
+    }
+    // the orchard's pond
+    if t.pond_rx > 0 { pond(a, pal, t) }
+    // the inserts: colored glass in the playfield, unlit
+    n = 0;
+    while n < t.n_ins {
+        insert_glass(a, t, n, sines, false);
+        n = n + 1;
+    }
+    // the slingshots' bodies: hay bales, filling each triangle
+    sling_body(a, pal, p, 0);
+    sling_body(a, pal, p, 1);
+    // the barn
+    barn(a, pal, t);
+    // the walls, rails, posts and rubbers: raised, round in section
+    s = 0;
+    while s < p.n {
+        let tg = shape_tag(p, s);
+        let tk = tag_kind(tg);
+        let kind = shape_kind(p, s);
+        let r = shape_r(p, s);
+        if tk == t_wall() {
+            raise(a, shape_ax(p, s), shape_ay(p, s), shape_bx(p, s), shape_by(p, s), r + 1024, 112, pal.wood, 1);
+        } else if tk == t_rail() || tk == t_guide() {
+            raise(a, shape_ax(p, s), shape_ay(p, s), shape_bx(p, s), shape_by(p, s), r, 96, pal.rail, 2);
+        } else if tk == t_post() {
+            raise(a, shape_ax(p, s), shape_ay(p, s), shape_ax(p, s), shape_ay(p, s), r, 120, if shape_mat(p, s) == m_rubber() { 0xf8f8f0 } else { 0xd8dce0 }, 3);
+        } else if tk == t_sling() {
+            let rub = if shape_mat(p, s) == m_sling() { 0xe84a3a } else { 0xf4f0e8 };
+            raise(a, shape_ax(p, s), shape_ay(p, s), shape_bx(p, s), shape_by(p, s), r, 104, rub, 3);
+        } else if tk == t_barn() {
+            raise(a, shape_ax(p, s), shape_ay(p, s), shape_bx(p, s), shape_by(p, s), r + 512, 130, 0xc8463c, 4);
+        } else if tk == t_gate() {
+            raise(a, shape_ax(p, s), shape_ay(p, s), shape_bx(p, s), shape_by(p, s), r, 70, 0xb8c0c8, 3);
+        }
+        s = s + 1;
+    }
+    // fence posts along the white rails
+    s = 0;
+    while s < p.n {
+        let tk = tag_kind(shape_tag(p, s));
+        if (tk == t_rail() || tk == t_guide()) && shape_kind(p, s) == k_seg() {
+            fence_posts(a, pal, shape_ax(p, s), shape_ay(p, s), shape_bx(p, s), shape_by(p, s));
+        }
+        s = s + 1;
+    }
+    if pal.snow { snow_caps(a) }
+    light(a);
+    a.season = season;
+    a.farm = t.farm;
+}
+
+// the table baked for a season, unless it already is
+pub fn ensure(a: Art, t: Table, season: Int, sines: Array<Int>) {
+    if a.season != season || a.farm != t.farm { bake(a, t, season, sines) }
+}
+
+fn wood_grain(pal: Palette, x: Int, y: Int) -> Int {
+    // (boards running up and down, each a little different, grain wavering along them)
+    let board = (x + 40) / 11;
+    let tone = hash(board, 0, 3) % 24 - 12;
+    let wave = (hash(board, y / 9, 5) % 3) - 1;
+    let grain = (x + 40 + wave) % 11;
+    let base = if grain == 0 { pal.wood_dark } else { pal.wood };
+    let fleck = if hash(x, y, 9) < 30 { -10 } else { 0 };
+    let streak = if (hash(board, y / 3, 11) < 40) && grain > 2 && grain < 9 { -8 } else { 0 };
+    rgb(red(base) + tone + fleck + streak, green(base) + tone * 3 / 4 + fleck + streak, blue(base) + tone / 2 + fleck + streak)
+}
+
+fn lane_wood(pal: Palette, x: Int, y: Int) -> Int {
+    let plank = y / 7;
+    let tone = hash(plank, 1, 7) % 20 - 10;
+    let edge = if y % 7 == 0 { -26 } else { 0 };
+    let base = scale(pal.wood, 230);
+    rgb(red(base) + tone + edge, green(base) + tone + edge, blue(base) + tone / 2 + edge)
+}
+
+fn grass(pal: Palette, x: Int, y: Int) -> Int {
+    // (mowed in stripes, on the slant; blades of lighter and darker green;
+    // a flower here and there)
+    let stripe = ((x + y * 2 + 400) / 24) % 2 == 0;
+    let patch = vnoise(x, y, 23, 7) + vnoise(x, y, 9, 8) / 3 - 170;
+    let base0 = if stripe { mix(pal.grass, pal.grass_dark, 40) } else { mix(pal.grass, pal.grass_light, 110) };
+    let base = if patch > 0 { mix(base0, pal.grass_light, patch.min(50)) } else { mix(base0, pal.grass_dark, (-patch).min(50)) };
+    let n = hash(x, y, 1);
+    let blade = if n < 50 { pal.grass_dark } else if n > 220 { pal.grass_light } else { base };
+    let c = mix(base, blade, if pal.snow { 50 } else { 130 });
+    let f = hash(x / 3, y / 3, 2);
+    if pal.snow {
+        let drift = vnoise(x, y, 17, 9) - 128;
+        let sparkle = hash(x, y, 3) > 252;
+        if sparkle { 0xffffff } else if drift > 0 { mix(c, 0xffffff, drift) } else { mix(c, 0xb8c8e0, -drift) }
+    } else if (f > 251 || (pal.flower_a == 0xe8682e && f > 236)) && hash(x, y, 4) > 120 && (x % 3 == 1) && (y % 3 == 1) {
+        if f % 2 == 0 { pal.flower_a } else { pal.flower_b }
+    } else { c }
+}
+
+// marks the pixels a capsule (in physics units) covers, over the strip
+fn mark_capsule(m: Array<Bool>, ax: Int, ay: Int, bx: Int, by: Int, r: Int) {
+    let w = bw();
+    let x0 = ((ax.min(bx) - r) >> 12) - 1;
+    let x1 = ((ax.max(bx) + r) >> 12) + 1;
+    let y0 = ((ay.min(by) - r) >> 12) - 1;
+    let y1 = ((ay.max(by) + r) >> 12) + 1;
+    let mut y = y0.max(0);
+    while y <= y1.min(sh() - 1) {
+        let mut x = x0;
+        while x <= x1 {
+            let d = capsule_dist(ax, ay, bx, by, x * 4096 + 2048, y * 4096 + 2048);
+            let sx = x + 16;
+            if d <= r + 2048 && sx >= 0 && sx < w { m.set(y * w + sx, true) }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// how far a point is from a segment's nearest point (physics units)
+pub fn capsule_dist(ax: Int, ay: Int, bx: Int, by: Int, qx: Int, qy: Int) -> Int {
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 == 0 { 0 } else { (((qx - ax) * abx + (qy - ay) * aby) / (len2 >> 12).max(1)).clamp(0, 4096) };
+    let cx = ax + ((abx * t) >> 12);
+    let cy = ay + ((aby * t) >> 12);
+    isqrt((qx - cx) * (qx - cx) + (qy - cy) * (qy - cy))
+}
+
+// every pixel reachable from (x, y) without crossing a wall
+fn flood(walls: Array<Bool>, x: Int, y: Int) -> Array<Bool> {
+    let w = bw();
+    let h = sh();
+    let seen = array(w * h, false);
+    let stack = array(w * h, 0);
+    let mut top = 0;
+    stack.set(0, y * w + x);
+    seen.set(y * w + x, true);
+    top = 1;
+    while top > 0 {
+        top = top - 1;
+        let i = stack.get(top);
+        let px = i % w;
+        let py = i / w;
+        if px > 0 && !seen.get(i - 1) && !walls.get(i - 1) { seen.set(i - 1, true); stack.set(top, i - 1); top = top + 1; }
+        if px < w - 1 && !seen.get(i + 1) && !walls.get(i + 1) { seen.set(i + 1, true); stack.set(top, i + 1); top = top + 1; }
+        if py > 0 && !seen.get(i - w) && !walls.get(i - w) { seen.set(i - w, true); stack.set(top, i - w); top = top + 1; }
+        if py < h - 1 && !seen.get(i + w) && !walls.get(i + w) { seen.set(i + w, true); stack.set(top, i + w); top = top + 1; }
+    }
+    seen
+}
+
+// a raised shape: a capsule r wide (physics units), round on top, up to
+// `top` high, of a color; style 1 wood, 2 painted rail, 3 rubber or
+// metal, 4 the barn's red boards
+fn raise(a: Art, ax: Int, ay: Int, bx: Int, by: Int, r: Int, top: Int, color: Int, style: Int) {
+    let w = bw();
+    let x0 = ((ax.min(bx) - r) >> 12) - 1;
+    let x1 = ((ax.max(bx) + r) >> 12) + 1;
+    let y0 = ((ay.min(by) - r) >> 12) - 1;
+    let y1 = ((ay.max(by) + r) >> 12) + 1;
+    let mut y = y0.max(0);
+    while y <= y1.min(sh() - 1) {
+        let mut x = x0;
+        while x <= x1 {
+            let sx = x + 16;
+            if sx >= 0 && sx < w {
+                let d = capsule_dist(ax, ay, bx, by, x * 4096 + 2048, y * 4096 + 2048);
+                let rr = r + 1024;
+                if d < rr {
+                    // (a rounded top: sqrt(1 - (d/r)^2))
+                    let k = 4096 - d * 4096 / rr;
+                    let prof = isqrt(k * (8192 - k)) * top / 4096;
+                    let hh = prof.max(top / 3);
+                    let i = y * w + sx;
+                    if hh > a.height.get(i) || style == 3 {
+                        a.height.set(i, hh.max(a.height.get(i)));
+                        let c = if style == 1 {
+                            let n = hash(x, y, 21) % 16 - 8;
+                            rgb(red(color) + n, green(color) + n, blue(color) + n / 2)
+                        } else if style == 2 {
+                            if hash(x, y, 22) < 20 { scale(color, 236) } else { color }
+                        } else if style == 4 {
+                            if (x + y) % 5 == 0 { scale(color, 215) } else { color }
+                        } else { color };
+                        a.color.set(i, c);
+                    }
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// little square posts along a rail, a bit higher than it
+fn fence_posts(a: Art, pal: Palette, ax: Int, ay: Int, bx: Int, by: Int) {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len = isqrt(dx * dx + dy * dy) >> 12;
+    let n = (len / 12).max(1);
+    let mut i = 0;
+    while i <= n {
+        let x = (ax + dx * i / n) >> 12;
+        let y = (ay + dy * i / n) >> 12;
+        let mut yy = -1;
+        while yy <= 1 {
+            let mut xx = -1;
+            while xx <= 1 {
+                let sx = x + xx + 16;
+                let sy = y + yy;
+                if sx >= 0 && sx < bw() && sy >= 0 && sy < sh() {
+                    let k = sy * bw() + sx;
+                    a.height.set(k, 120);
+                    a.color.set(k, if xx == -1 || yy == -1 { pal.rail } else { scale(pal.rail, 225) });
+                }
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// a plot: a round bed of tilled earth, in furrows, sunk a little, with a
+// low rim of earth round it
+fn plot_bed(a: Art, pal: Palette, cx: Int, cy: Int) {
+    let r = 9;
+    let mut y = -r - 2;
+    while y <= r + 2 {
+        let mut x = -r - 2;
+        while x <= r + 2 {
+            let d2 = x * x + y * y;
+            let sx = cx + x + 16;
+            let sy = cy + y;
+            if sx >= 0 && sx < bw() && sy >= 0 && sy < sh() {
+                let i = sy * bw() + sx;
+                if d2 <= r * r {
+                    // (furrows across it, the soil crumbly)
+                    let furrow = (y + 20) % 3 == 0;
+                    let n = hash(sx, sy, 31) % 18 - 9;
+                    let base = if furrow { pal.dirt_dark } else { pal.dirt };
+                    a.color.set(i, rgb(red(base) + n, green(base) + n, blue(base) + n));
+                    a.height.set(i, if furrow { -20 } else { -8 });
+                } else if d2 <= (r + 2) * (r + 2) {
+                    let n = hash(sx, sy, 32) % 14;
+                    a.color.set(i, mix(a.color.get(i), scale(pal.dirt, 240 + n), 170));
+                    a.height.set(i, 12);
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// an insert: colored glass, lit or not, into the art (unlit) or the
+// screen (lit, see scene)
+pub fn insert_glass(a: Art, t: Table, n: Int, sines: Array<Int>, lit: Bool) {
+    let kind = t.ins_kind.get(n);
+    let cx = t.ins_x.get(n);
+    let cy = t.ins_y.get(n);
+    let color = t.ins_color.get(n);
+    let dir = t.ins_dir.get(n);
+    let c = sin(sines, dir);
+    let co = cos(sines, dir);
+    let mut y = -7;
+    while y <= 7 {
+        let mut x = -7;
+        while x <= 7 {
+            // (in the arrow's own frame: u along it, v across)
+            let u = (x * co + y * c) >> 16;
+            let v = (y * co - x * c) >> 16;
+            let inside = if kind == ik_dot() { x * x + y * y <= 10 }
+                else if kind == ik_arrow() { u >= -4 && u <= 4 && v.abs() * 2 <= (4 - u) + 1 }
+                else { x.abs() <= 4 && y >= -4 && y <= 3 + (4 - x.abs()) / 2 };
+            let rim = if kind == ik_dot() { x * x + y * y <= 17 }
+                else if kind == ik_arrow() { u >= -5 && u <= 5 && v.abs() * 2 <= (5 - u) + 2 }
+                else { x.abs() <= 5 && y >= -5 && y <= 4 + (5 - x.abs()) / 2 };
+            let sx = cx + x + 16;
+            let sy = cy + y;
+            if sx >= 0 && sx < bw() && sy >= 0 && sy < sh() {
+                let i = sy * bw() + sx;
+                if inside {
+                    let shine = if x + y < -3 { 60 } else { 0 };
+                    let glass = mix(scale(color, 170), 0x182010, 60);
+                    a.color.set(i, if shine > 0 { mix(glass, 0xffffff, 40) } else { glass });
+                    a.height.set(i, 2);
+                } else if rim {
+                    a.color.set(i, 0xd8d0b8);
+                    a.height.set(i, 8);
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// a slingshot's triangle filled with a hay bale
+fn sling_body(a: Art, pal: Palette, p: Phys, side: Int) {
+    // (its three corners: the kicking face's ends and the corner between the others)
+    let mut xs = array(6, 0);
+    let mut k = 0;
+    let mut s = 0;
+    while s < p.n {
+        if shape_tag(p, s) == tag(t_sling(), side) && shape_mat(p, s) != m_sling() && k < 6 {
+            xs.set(k, shape_ax(p, s) >> 12);
+            xs.set(k + 1, shape_ay(p, s) >> 12);
+            k = k + 2;
+        }
+        s = s + 1;
+    }
+    // first rubber: top -> corner; second: corner -> bottom; so the corners are
+    // (x0,y0) top, (x2,y2) corner, and the bottom end of the second
+    let mut bxp = 0;
+    let mut byp = 0;
+    s = 0;
+    let mut seen = 0;
+    while s < p.n {
+        if shape_tag(p, s) == tag(t_sling(), side) && shape_mat(p, s) != m_sling() {
+            seen = seen + 1;
+            if seen == 2 {
+                bxp = shape_bx(p, s) >> 12;
+                byp = shape_by(p, s) >> 12;
+            }
+        }
+        s = s + 1;
+    }
+    let ax = xs.get(0);
+    let ay = xs.get(1);
+    let cx = xs.get(2);
+    let cy = xs.get(3);
+    let x0 = ax.min(cx).min(bxp) - 1;
+    let x1 = ax.max(cx).max(bxp) + 1;
+    let mut y = ay.min(cy).min(byp) - 1;
+    let y1 = ay.max(cy).max(byp) + 1;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            let d1 = (cx - ax) * (y - ay) - (cy - ay) * (x - ax);
+            let d2 = (bxp - cx) * (y - cy) - (byp - cy) * (x - cx);
+            let d3 = (ax - bxp) * (y - byp) - (ay - byp) * (x - bxp);
+            let neg = d1 < 0 || d2 < 0 || d3 < 0;
+            let pos = d1 > 0 || d2 > 0 || d3 > 0;
+            if !(neg && pos) {
+                let sx = x + 16;
+                let i = y * bw() + sx;
+                // (straw lying along the bale, a strand a row, and twine twice round it)
+                let strand = hash(x / 4, y, 41) % 40;
+                let twine = (y - ay) % 10 == 5;
+                let c = if twine { 0x8a5a30 } else if strand < 8 { pal.hay_dark } else if strand > 34 { mix(pal.hay, 0xffffff, 70) } else { pal.hay };
+                a.color.set(i, c);
+                a.height.set(i, 70 + hash(x, y, 43) % 12);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// the barn: red boards round its door, a roof over it, hay inside, and
+// its doors swung open on the ground
+fn barn(a: Art, pal: Palette, t: Table) {
+    let w = bw();
+    // (in the barn's own frame, from the middle of its back wall: u along
+    // the way in, toward the back; v across. 256ths: d = (0.643, -0.766),
+    // n = (0.766, 0.643))
+    let bx = 214;
+    let by = 101;
+    let mut y = 70;
+    while y < 136 {
+        let mut x = 180;
+        while x < 240 {
+            let dx = x - bx;
+            let dy = y - by;
+            let u = (dx * 165 - dy * 196) / 256;
+            let v = (dx * 196 + dy * 165) / 256;
+            let sx = x + 16;
+            if sx >= 0 && sx < w {
+                let i = y * w + sx;
+                if u >= 0 && u <= 16 && v.abs() <= 11 {
+                    // the roof: shingles in rows across it, a ridge down its middle
+                    let row = u / 3;
+                    let shingle = ((v + 20 + row * 2) / 4 + row) % 2 == 0;
+                    let edge = u % 3 == 0;
+                    let ridge = v.abs() <= 1;
+                    let base = if ridge { 0x7a3a2a } else if edge { 0x6e2a22 } else if shingle { 0x9a3e30 } else { 0x8c3428 };
+                    a.color.set(i, base);
+                    a.height.set(i, 190 - v.abs() * 9);
+                } else if u < 0 && u >= -22 && v.abs() <= 9 {
+                    // inside the door: hay, in the dark
+                    let deep = (22 + u) * 9;
+                    let n = hash(x, y, 51) % 30;
+                    a.color.set(i, mix(if n < 6 { pal.hay_dark } else { pal.hay }, 0x2a1a10, (80 + deep).min(230)));
+                    a.height.set(i, -30);
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // the doors, swung open, lying on the ground either side
+    door(a, 181, 104);
+    door(a, 204, 125);
+}
+
+// a duck pond, sunk in the grass: deeper water darker toward the
+// middle, ripples, lily pads, reeds at its edge (in winter, ice)
+fn pond(a: Art, pal: Palette, t: Table) {
+    let cx = t.pond_x;
+    let cy = t.pond_y;
+    let rx = t.pond_rx + 3;
+    let ry = t.pond_ry + 3;
+    let mut y = cy - ry;
+    while y <= cy + ry {
+        let mut x = cx - rx;
+        while x <= cx + rx {
+            let dx = (x - cx) * 256 / rx;
+            let dy = (y - cy) * 256 / ry;
+            let d = isqrt(dx * dx + dy * dy);
+            let sx = x + 16;
+            let i = y * bw() + sx;
+            if d < 256 {
+                let edge = d > 200;
+                if edge {
+                    // (the muddy bank, and reeds)
+                    let reed = hash(x, y, 71) < 50;
+                    a.color.set(i, if reed { if pal.snow { 0xc8c0a0 } else { 0x4a7a2a } } else { mix(pal.dirt, pal.grass_dark, 100) });
+                    a.height.set(i, if reed { 40 } else { -8 });
+                } else if pal.snow {
+                    let crack = hash(x / 2, y, 72) < 12;
+                    a.color.set(i, if crack { 0xffffff } else { mix(0xd0e8f8, 0x90b8d8, d) });
+                    a.height.set(i, -10);
+                } else {
+                    let ripple = ((d / 18) + (x + y) / 9) % 5 == 0;
+                    let base = mix(0x6ac0e0, 0x2a6a9a, d * 200 / 256 + 30);
+                    a.color.set(i, if ripple { mix(base, 0xe8f8ff, 70) } else { base });
+                    a.height.set(i, -24);
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // lily pads (not in winter)
+    if !pal.snow {
+        lily(a, cx - 14, cy - 3);
+        lily(a, cx + 12, cy + 4);
+        lily(a, cx + 2, cy - 6);
+    }
+}
+
+fn lily(a: Art, x0: Int, y0: Int) {
+    let mut y = -2;
+    while y <= 2 {
+        let mut x = -3;
+        while x <= 3 {
+            if x * x * 4 + y * y * 9 <= 36 && !(x == 0 && y < 0) {
+                let i = (y0 + y) * bw() + x0 + x + 16;
+                a.color.set(i, if x + y < 0 { 0x6ac04a } else { 0x3e8a32 });
+                a.height.set(i, -20);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+fn door(a: Art, x0: Int, y0: Int) {
+    let mut y = 0;
+    while y < 9 {
+        let mut x = 0;
+        while x < 9 {
+            let i = (y0 + y) * bw() + x0 + x + 16;
+            let trim = x == 0 || y == 0 || x == 8 || y == 8 || x == y || x == 8 - y;
+            a.color.set(i, if trim { 0xf4ece0 } else { 0xb83c34 });
+            a.height.set(i, 20);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// in winter, snow on the tops of things: whatever stands up gets white
+// on its upper side
+fn snow_caps(a: Art) {
+    let w = bw();
+    let mut y = 1;
+    while y < sh() {
+        let mut x = 1;
+        while x < w {
+            let i = y * w + x;
+            let hh = a.height.get(i);
+            let up = a.height.get(i - w);
+            let left = a.height.get(i - 1);
+            let edge = hh > 40 && (up < hh - 10 || left < hh - 10);
+            // (on the cabinet, a dusting; on what stands in the field, caps)
+            let dust = hh >= 150 && (hash(x, y, 63) > 236 || (vnoise(x, y, 4, 62) > 200 && hash(x, y, 64) > 120));
+            let drift = hh > 40 && hh < 150 && vnoise(x, y, 7, 62) > 150;
+            if edge || drift {
+                a.color.set(i, mix(a.color.get(i), 0xf4f8ff, if edge { 220 } else { 200 }));
+            } else if dust {
+                a.color.set(i, mix(a.color.get(i), 0xf4f8ff, 150));
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// the light: each pixel's color in the sun, from the heights
+fn light(a: Art) {
+    let w = bw();
+    let h = sh();
+    let hgt = a.height;
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let i = y * w + x;
+            let hh = hgt.get(i);
+            let l = if x > 0 { hgt.get(i - 1) } else { hh };
+            let r = if x < w - 1 { hgt.get(i + 1) } else { hh };
+            let u = if y > 0 { hgt.get(i - w) } else { hh };
+            let d = if y < h - 1 { hgt.get(i + w) } else { hh };
+            // facing the sun (up and left) is brighter
+            let slope = (r - l) + (d - u);
+            let mut k = 256 + slope * 2;
+            // (a highlight where it faces the sun squarely)
+            let shine = if slope > 40 { (slope - 40) * 2 } else { 0 };
+            k = k.clamp(110, 360);
+            // shadows cast down and to the right
+            let mut shade = 0;
+            let mut step = 1;
+            while step <= 14 {
+                let ox = x - step;
+                let oy = y - step;
+                if ox >= 0 && oy >= 0 {
+                    let over = hgt.get(oy * w + ox) - hh - step * 14;
+                    if over > 0 { shade = shade.max((over * 6).min(110)) }
+                }
+                step = step + 1;
+            }
+            // corners: what's round about stands higher
+            let mut around = 0;
+            let mut n = 0;
+            let mut dy = -3;
+            while dy <= 3 {
+                let yy = y + dy;
+                if yy >= 0 && yy < h {
+                    let mut dx = -3;
+                    while dx <= 3 {
+                        let xx = x + dx;
+                        if xx >= 0 && xx < w {
+                            around = around + hgt.get(yy * w + xx);
+                            n = n + 1;
+                        }
+                        dx = dx + 2;
+                    }
+                }
+                dy = dy + 2;
+            }
+            let occl = ((around / n.max(1) - hh) / 3).clamp(0, 60);
+            let c = a.color.get(i);
+            let lit = scale(c, k - occl);
+            let shadowed = if shade > 0 { mix(lit, mix(scale(lit, 140), 0x283c64, 50), shade * 2) } else { lit };
+            let out = if shine > 0 { mix(shadowed, 0xfffff0, shine.min(120)) } else { shadowed };
+            a.bg.set(y * sw() + x + bx0(), out);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}

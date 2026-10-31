@@ -1,0 +1,504 @@
+// The autopilot: plays the flippers and the plunger. It plays the title
+// screen's table, and the tests that play whole years to see how hard
+// each week is.
+//
+// It plays the way a good player does. Before it starts it learns the
+// table: it cradles a ball on each flipper (holds the flipper up so the
+// ball comes to rest against it), lets it roll down, and flips when the
+// ball's at each point along the flipper in turn, watching where each
+// shot goes (into the barn, onto which plant). In play, when it wants
+// something (the barn, with a basket worth banking; a ripe plant) it
+// catches the ball on a raised flipper, cradles it, and makes the shot
+// that goes there most often. Otherwise it just keeps the ball alive,
+// flipping as the ball comes down. How good it is (`skill`, out of 256)
+// is how near the point on the flipper it means to hit it is.
+
+use crate::math::isqrt;
+use super::physics::*;
+use super::table::*;
+use super::play::*;
+
+// the points along a flipper it tries: buckets from 1200 to 3900 (4096ths)
+fn buckets() -> Int { 14 }
+fn bucket_at(k: Int) -> Int { 1200 + k * 2700 / (buckets() - 1) }
+
+pub struct Bot {
+    // per flipper: frames left to hold it up, what it's doing (0 keeping
+    // the ball alive, 1 catching, 2 cradling, 3 letting it roll down to
+    // the aimed point), for how long
+    hold: Array<Int>,
+    mode: Array<Int>,
+    mode_t: Array<Int>,
+    aim: Array<Int>,
+    miss: Array<Int>,
+    // what it wants: -1 nothing, 0 the barn, 1 + n plot n
+    goal: Int,
+    // the shot map: for each flipper and bucket, shots into the barn, and
+    // onto each plot first; trials made
+    to_barn: Array<Int>,
+    to_plot: Array<Int>,
+    trials: Int,
+    // aimed shots tried, at the barn and at plants
+    tries: Int,
+    // for the tests: a second table to try shots out on before making
+    // them (a player who can see where every shot will go)
+    sim: Option<Table>,
+    seed: Int,
+    skill: Int,
+    pull: Int,
+    pulled: Int,
+}
+
+pub fn bot(seed: Int, skill: Int) -> Bot {
+    Bot {
+        hold: array(4, 0), mode: array(4, 0), mode_t: array(4, 0), aim: array(4, 2600), miss: array(4, 0),
+        goal: -1,
+        to_barn: array(2 * buckets(), 0), to_plot: array(2 * buckets() * 12, 0), trials: 0, tries: 0, sim: None,
+        seed: seed, skill: skill, pull: 200, pulled: 0,
+    }
+}
+
+fn roll(b: Bot, n: Int) -> Int {
+    b.seed = (b.seed * 1103515245 + 12345) & 0x7fffffff;
+    (b.seed >> 16) % n.max(1)
+}
+
+// how far off the point it means a shot is, by its skill (4096ths)
+fn wobble(b: Bot) -> Int {
+    let spread = (300 - b.skill).max(8) * 2;
+    roll(b, spread * 2 + 1) - spread
+}
+
+// ---- learning the table
+
+// shots from a cradle on each flipper, at each point along it, onto the
+// table as it is (what's planted, as big as it'll grow, roughly)
+pub fn calibrate(b: Bot, t: Table) {
+    let mut c = 0;
+    while c < b.to_barn.len() { b.to_barn.set(c, 0); c = c + 1; }
+    c = 0;
+    while c < b.to_plot.len() { b.to_plot.set(c, 0); c = c + 1; }
+    let p = t.p;
+    let saved_on = array(t.n_plots, false);
+    let saved_r = array(t.n_plots, 0);
+    let mut i = 0;
+    while i < t.n_plots {
+        let s = t.plot_shape.get(i);
+        saved_on.set(i, p.on.get(s));
+        saved_r.set(i, shape_r(p, s));
+        if p.on.get(s) { set_shape_r(p, s, px(7)) }
+        i = i + 1;
+    }
+    let mut f = 0;
+    while f < 2 {
+        // the cradle: a ball let down the inlane onto the raised flipper
+        let fl = p.flips.get(f);
+        let other = p.flips.get(1 - f);
+        other.held = false;
+        other.ang = other.rest;
+        fl.held = true;
+        fl.ang = fl.up;
+        place(p, 0, px(if f == 0 { 31 } else { 211 }), px(186), 0, 0);
+        let mut n = 0;
+        while n < 120 {
+            simulate(p);
+            n = n + 1;
+        }
+        let ball = p.balls.get(0);
+        let cx = ball.x;
+        let cy = ball.y;
+        let mut k = 0;
+        while k < buckets() {
+            let mut trial = 0;
+            while trial < 2 {
+                cradle_shot(b, t, f, bucket_at(k) + trial * 80 - 40, k, cx, cy);
+                trial = trial + 1;
+            }
+            k = k + 1;
+        }
+        fl.held = false;
+        fl.ang = fl.rest;
+        f = f + 1;
+    }
+    b.trials = 2;
+    i = 0;
+    while i < t.n_plots {
+        let s = t.plot_shape.get(i);
+        p.on.set(s, saved_on.get(i));
+        set_shape_r(p, s, saved_r.get(i));
+        i = i + 1;
+    }
+    let mut ball = 0;
+    while ball < max_balls() {
+        p.balls.get(ball).live = false;
+        ball = ball + 1;
+    }
+}
+
+fn cradle_shot(b: Bot, t: Table, f: Int, aim: Int, k: Int, cx: Int, cy: Int) {
+    let p = t.p;
+    let fl = p.flips.get(f);
+    fl.held = true;
+    fl.ang = fl.up;
+    place(p, 0, cx, cy, 0, 0);
+    let mut n = 0;
+    // let go, and flip when the ball's rolled down to the point
+    fl.held = false;
+    let mut flipped = false;
+    let mut hold = 0;
+    n = 0;
+    let mut done = false;
+    let mut first_plot = -1;
+    while n < 160 && !done {
+        let ball = p.balls.get(0);
+        if !flipped {
+            let tt = along(p, fl, ball.x, ball.y);
+            if tt >= aim || n > 100 {
+                flipped = true;
+                hold = 14;
+            }
+        }
+        fl.held = hold > 0;
+        if hold > 0 { hold = hold - 1 }
+        simulate(p);
+        let mut e = 0;
+        while e < p.n_events {
+            let kind = ev_kind(p, e);
+            if kind == ev_enter() && ev_a(p, e) == t.s_barn {
+                b.to_barn.set(f * buckets() + k, b.to_barn.get(f * buckets() + k) + 1);
+                done = true;
+            }
+            if kind == ev_hit() && first_plot < 0 {
+                let tg = shape_tag(p, ev_a(p, e));
+                if tag_kind(tg) == t_plot() {
+                    first_plot = tag_n(tg);
+                    let o = (f * buckets() + k) * 12 + first_plot;
+                    b.to_plot.set(o, b.to_plot.get(o) + 1);
+                }
+            }
+            e = e + 1;
+        }
+        // (done once it's in, or down the drain, or come back down past where it'd matter)
+        if ball.y > px(270) || (first_plot >= 0 && n > 60) || (flipped && ball.vy > 0 && ball.y < px(150) && hold == 0) { done = true }
+        n = n + 1;
+    }
+    p.balls.get(0).live = false;
+}
+
+// where along a flipper a point is (4096ths, 0 the pivot), as it lies now
+fn along(p: Phys, fl: Flipper, x: Int, y: Int) -> Int {
+    let tx = tip_x(p, fl);
+    let ty = tip_y(p, fl);
+    let abx = tx - fl.px;
+    let aby = ty - fl.py;
+    let len2 = (abx * abx + aby * aby).max(1);
+    ((x - fl.px) * abx + (y - fl.py) * aby) / (len2 >> 12).max(1)
+}
+
+// the best point on flipper f for the goal, or -1 if none's any good
+fn best_aim(b: Bot, f: Int, goal: Int) -> Int {
+    let mut best = -1;
+    let mut best_n = 0;
+    let mut k = 0;
+    while k < buckets() {
+        let n = if goal == 0 { b.to_barn.get(f * buckets() + k) } else { b.to_plot.get((f * buckets() + k) * 12 + goal - 1) };
+        if n > best_n {
+            best_n = n;
+            best = k;
+        }
+        k = k + 1;
+    }
+    if best < 0 { -1 } else { bucket_at(best) }
+}
+
+// ---- what it wants
+
+// the goal for this moment of a week
+pub fn plan(b: Bot, w: Week) {
+    let stake = w.basket * w.mult;
+    let owed = (w.rent - w.banked).max(0);
+    let worth_banking = stake > 0 && (stake >= owed || stake * 4 >= w.rent || (w.mult >= 4 && w.basket >= 300));
+    if worth_banking && (best_aim(b, 0, 0) >= 0 || best_aim(b, 1, 0) >= 0) {
+        b.goal = 0;
+    } else {
+        // a ripe plant, else the plant nearest ripe
+        let t = w.t;
+        let mut pick = -1;
+        let mut score = -1;
+        let mut i = 0;
+        while i < t.n_plots {
+            if w.seed.get(i) >= 0 {
+                let s = if w.ripe.get(i) { 100 } else { w.growth.get(i) * 10 };
+                if s > score && (best_aim(b, 0, i + 1) >= 0 || best_aim(b, 1, i + 1) >= 0) {
+                    score = s;
+                    pick = i;
+                }
+            }
+            i = i + 1;
+        }
+        b.goal = if pick >= 0 { pick + 1 } else { -1 };
+    }
+}
+
+// ---- foresight, for the tests
+
+// gives the bot a copy of the table to try its shots on
+pub fn foresight(b: Bot, t: Table) { b.sim = Some(t) }
+
+// what flipping flipper f now would do (from the table as it is): 1 if the
+// ball goes into the barn, 2 if it hits plot `want - 1`, else 0
+fn try_flip(sim: Table, p: Phys, f: Int, want: Int) -> Int {
+    let q = sim.p;
+    let mut i = 0;
+    while i < p.n * stride() {
+        q.shapes.set(i, p.shapes.get(i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < p.n {
+        q.on.set(i, p.on.get(i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < p.n_sensors {
+        q.inside.set(i, p.inside.get(i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_balls() {
+        let a = p.balls.get(i);
+        let c = q.balls.get(i);
+        c.x = a.x;
+        c.y = a.y;
+        c.vx = a.vx;
+        c.vy = a.vy;
+        c.live = a.live;
+        c.held = a.held;
+        i = i + 1;
+    }
+    i = 0;
+    while i < p.flips.len() {
+        let a = p.flips.get(i);
+        let c = q.flips.get(i);
+        c.ang = a.ang;
+        c.omega = a.omega;
+        c.len = a.len;
+        c.held = if i == f { true } else { a.held };
+        i = i + 1;
+    }
+    q.gx = p.gx;
+    q.zone_drag = p.zone_drag;
+    let mut result = 0;
+    let mut n = 0;
+    while n < 80 && result == 0 {
+        if n == 16 { q.flips.get(f).held = false }
+        simulate(q);
+        let mut e = 0;
+        while e < q.n_events {
+            if ev_kind(q, e) == ev_enter() && ev_a(q, e) == sim.s_barn && want == 0 { result = 1 }
+            if ev_kind(q, e) == ev_hit() && want > 0 && n > 2 {
+                let tg = shape_tag(q, ev_a(q, e));
+                if tag_kind(tg) == t_plot() && tag_n(tg) == want - 1 { result = 2 }
+            }
+            e = e + 1;
+        }
+        n = n + 1;
+    }
+    result
+}
+
+// ---- the flippers
+
+// the bot's wish for each flipper this frame, into held (a Bool each)
+pub fn think(b: Bot, p: Phys, held: Array<Bool>) {
+    let mut f = 0;
+    while f < p.flips.len() {
+        held.set(f, flipper_wish(b, p, f));
+        f = f + 1;
+    }
+}
+
+fn flipper_wish(b: Bot, p: Phys, f: Int) -> Bool {
+    let fl = p.flips.get(f);
+    let mode = b.mode.get(f);
+    b.mode_t.set(f, b.mode_t.get(f) + 1);
+    let mt = b.mode_t.get(f);
+    let h = b.hold.get(f);
+    if h > 0 {
+        b.hold.set(f, h - 1);
+        // (a ball come to rest on it while it's up: cradle it, if there's a shot to make)
+        if h == 1 && ball_resting(p, fl) && f < 2 && b.goal >= 0 && b.trials > 0 && best_aim(b, f, b.goal) >= 0 { set_mode(b, f, 2) }
+        true
+    } else if mode == 1 {
+        // catching: up, until the ball's at rest on it (or gone)
+        if ball_resting(p, fl) {
+            if mt > 10 { set_mode(b, f, 2) }
+        } else if !ball_near(p, fl, px(30)) && mt > 20 {
+            set_mode(b, f, 0);
+        }
+        mode == 1 && b.mode.get(f) != 0
+    } else if mode == 2 {
+        // cradled: a moment, then let it roll for the shot
+        if !ball_resting(p, fl) && mt > 5 && !ball_near(p, fl, px(14)) { set_mode(b, f, 0); false }
+        else if mt > 12 + roll(b, 8) {
+            let aim = if b.goal >= 0 { best_aim(b, f, b.goal) } else { -1 };
+            b.aim.set(f, if aim >= 0 { aim } else { 1800 + roll(b, 1800) });
+            b.miss.set(f, wobble(b));
+            if b.goal == 0 && aim >= 0 { b.tries = b.tries + 1 }
+            set_mode(b, f, 3);
+            false
+        } else { true }
+    } else if mode == 3 {
+        // rolling down: flip at the point
+        let mut go = mt > 100;
+        let mut i = 0;
+        while i < max_balls() {
+            let ball = p.balls.get(i);
+            if ball.live && !ball.held && ball_near(p, fl, px(16)) && along(p, fl, ball.x, ball.y) >= b.aim.get(f) + b.miss.get(f) { go = true }
+            i = i + 1;
+        }
+        if go {
+            b.hold.set(f, 16);
+            set_mode(b, f, 0);
+            true
+        } else { false }
+    } else {
+        // keeping the ball alive: flip as it comes down, or (raising the
+        // flipper early, before the ball's there) catch it when there's a
+        // shot to make
+        let can_catch = b.goal >= 0 && b.trials > 0 && f < 2 && best_aim(b, f, b.goal) >= 0;
+        let seer = match b.sim { Some(sim) => {
+            // (with foresight: flip now if now's the moment for the goal)
+            if b.goal >= 0 && f < 2 && ball_near(p, fl, px(22)) && roll(b, 256) < b.skill / 2 + 128 {
+                try_flip(sim, p, f, b.goal) > 0
+            } else { false }
+        }, None => false };
+        if seer {
+            if b.goal == 0 { b.tries = b.tries + 1 }
+            b.hold.set(f, 16);
+            true
+        } else if can_catch && b.sim.is_none() && arriving(p, fl, 9) && roll(b, 256) < b.skill {
+            set_mode(b, f, 1);
+            true
+        } else if about_to_cross(b, p, fl, f) {
+            {
+                b.hold.set(f, 16);
+                b.aim.set(f, 1800 + roll(b, 1800));
+                b.miss.set(f, wobble(b));
+            }
+            true
+        } else { false }
+    }
+}
+
+fn set_mode(b: Bot, f: Int, m: Int) {
+    b.mode.set(f, m);
+    b.mode_t.set(f, 0);
+}
+
+// whether a ball's sitting still on the flipper
+fn ball_resting(p: Phys, fl: Flipper) -> Bool {
+    let mut found = false;
+    let mut i = 0;
+    while i < max_balls() {
+        let ball = p.balls.get(i);
+        if ball.live && !ball.held {
+            let d = axis_dist(p, fl, ball.x, ball.y);
+            if d < ball_r() + fl.r0 + px(2) && speed(ball) < px(1) / 2 { found = true }
+        }
+        i = i + 1;
+    }
+    found
+}
+
+fn ball_near(p: Phys, fl: Flipper, r: Int) -> Bool {
+    let mut found = false;
+    let mut i = 0;
+    while i < max_balls() {
+        let ball = p.balls.get(i);
+        if ball.live && !ball.held && axis_dist(p, fl, ball.x, ball.y) < r { found = true }
+        i = i + 1;
+    }
+    found
+}
+
+// how far (x, y) is from the flipper's axis as it is now
+fn axis_dist(p: Phys, fl: Flipper, x: Int, y: Int) -> Int {
+    let tx = tip_x(p, fl);
+    let ty = tip_y(p, fl);
+    let abx = tx - fl.px;
+    let aby = ty - fl.py;
+    let len2 = (abx * abx + aby * aby).max(1);
+    let t = (((x - fl.px) * abx + (y - fl.py) * aby) / (len2 >> 12).max(1)).clamp(0, 4096);
+    let cx = fl.px + ((abx * t) >> 12);
+    let cy = fl.py + ((aby * t) >> 12);
+    isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy))
+}
+
+// whether a ball will be at the aimed part of the flipper within the
+// next frames (as far as the flipper takes to swing)
+fn about_to_cross(b: Bot, p: Phys, fl: Flipper, f: Int) -> Bool {
+    let tx = tip_x(p, fl);
+    let ty = tip_y(p, fl);
+    let abx = tx - fl.px;
+    let aby = ty - fl.py;
+    let len2 = (abx * abx + aby * aby).max(1);
+    let want = b.aim.get(f) + b.miss.get(f);
+    let mut yes = false;
+    let mut i = 0;
+    while i < max_balls() {
+        let ball = p.balls.get(i);
+        if ball.live && !ball.held {
+            // (two frames ahead, with gravity)
+            let k = 2;
+            let x = ball.x + ball.vx * k;
+            let y = ball.y + ball.vy * k + p.gy * k * k / 2;
+            let t = ((x - fl.px) * abx + (y - fl.py) * aby) / (len2 >> 12).max(1);
+            let cx = fl.px + ((abx * t.clamp(0, 4096)) >> 12);
+            let cy = fl.py + ((aby * t.clamp(0, 4096)) >> 12);
+            let d = isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+            let above = y < cy + px(2);
+            if d < ball_r() + fl.r0 + px(5) && t > want - 700 && t < 4400 && above { yes = true }
+            // (a ball coming down fast past the tip: flip anyway, rather than lose it)
+            if d < ball_r() + fl.r0 + px(3) && t > 900 && t < 4400 && ball.vy > px(3) { yes = true }
+        }
+        i = i + 1;
+    }
+    yes
+}
+
+// whether a ball will come down onto the flipper within k frames
+fn arriving(p: Phys, fl: Flipper, k: Int) -> Bool {
+    let tx = tip_x(p, fl);
+    let ty = tip_y(p, fl);
+    let abx = tx - fl.px;
+    let aby = ty - fl.py;
+    let len2 = (abx * abx + aby * aby).max(1);
+    let mut yes = false;
+    let mut i = 0;
+    while i < max_balls() {
+        let ball = p.balls.get(i);
+        if ball.live && !ball.held && ball.vy > 0 && speed(ball) < px(4) {
+            let x = ball.x + ball.vx * k;
+            let y = ball.y + ball.vy * k + p.gy * k * k / 2;
+            let t = ((x - fl.px) * abx + (y - fl.py) * aby) / (len2 >> 12).max(1);
+            let cx = fl.px + ((abx * t.clamp(0, 4096)) >> 12);
+            let cy = fl.py + ((aby * t.clamp(0, 4096)) >> 12);
+            let d = isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+            if d < ball_r() + fl.r0 + px(8) && t > -800 && t < 3600 { yes = true }
+        }
+        i = i + 1;
+    }
+    yes
+}
+
+// the plunger: whether to keep it pulled this frame (it's released when
+// this goes false)
+pub fn plunge(b: Bot) -> Bool {
+    if b.pulled == 0 { b.pull = 140 + roll(b, 116) }
+    b.pulled = b.pulled + 1;
+    if b.pulled > b.pull / 4 {
+        b.pulled = 0;
+        false
+    } else { true }
+}

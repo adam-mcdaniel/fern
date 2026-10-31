@@ -1,0 +1,13 @@
+// The module `lib::geometry`.
+pub mod shapes;
+
+#[derive(Show, Eq)]
+pub struct Point { x: Int, y: Int }
+
+pub fn distance2(a: Point, b: Point) -> Int {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy
+}
+
+pub fn origin() -> Point { Point { x: 0, y: 0 } }

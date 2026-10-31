@@ -1,0 +1,82 @@
+// Algebraic effects and handlers: an effect declares operations; code
+// performs them; a handler decides what they do, and can resume the code
+// where it performed one (or not). Effects are in the types: main can't
+// leave one unhandled.
+
+effect Yield<T> {
+    fn yield(value: T);
+}
+
+// a generator: yields the squares below n
+fn squares(n: Int) {
+    let mut i = 0;
+    while i < n {
+        yield(i * i);
+        i = i + 1;
+    }
+}
+
+// collects what a generator yields into a list
+fn collect<T, 'e>(gen: fn() -> () with {Yield<T>, 'e}) -> List<T> with 'e {
+    handle gen() {
+        return(u) => Nil,
+        yield(x) => Cons(x, resume(())),
+    }
+}
+
+effect State {
+    fn get() -> Int;
+    fn put(value: Int);
+}
+
+// state, as a handler: each operation's clause gives back a function of
+// the state
+fn run_state(start: Int, body: fn() -> Int with {State}) -> Int {
+    let f = handle body() {
+        return(v) => |s| v,
+        get() => |s| resume(s)(s),
+        put(v) => |s| resume(())(v),
+    };
+    f(start)
+}
+
+fn count_up() -> Int with {State} {
+    put(get() + 1);
+    put(get() * 10);
+    get()
+}
+
+fn safe_div(a: Int, b: Int) -> Int with {Fail} {
+    if b == 0 { fail("divided by zero") } else { a / b }
+}
+
+fn main() {
+    println(collect(|| squares(6)).show());
+    // the sum of what's yielded, without making a list
+    let total = handle squares(5) {
+        return(u) => 0,
+        yield(x) => x + resume(()),
+    };
+    println(total.show());
+    println(run_state(4, count_up).show());
+    println(attempt(|| safe_div(10, 2)).show());
+    println(attempt(|| safe_div(1, 0)).show());
+    // a handler that doesn't resume: stops at the first yield
+    let first = handle squares(10) {
+        return(u) => -1,
+        yield(x) => if x > 10 { x } else { resume(()) },
+    };
+    println(first.show());
+    // printing inside a handled computation: Io passes through
+    handle squares(3) {
+        return(u) => println("done"),
+        yield(x) => { print(x.show() ++ " "); resume(()) },
+    }
+}
+// expect: [0, 1, 4, 9, 16, 25]
+// expect: 30
+// expect: 50
+// expect: Ok(5)
+// expect: Err("divided by zero")
+// expect: 16
+// expect: 0 1 4 done

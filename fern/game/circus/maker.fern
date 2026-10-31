@@ -1,0 +1,311 @@
+// Making the acts, by trying them. Each hook after the first is put where
+// Stella can reach it: from her swing on the hook before, every moment of
+// letting go is tried (on a copy of her), and the next hook goes where
+// the most of those flights come within reach of it, a gap along that
+// suits the act. So every act can be finished, and how forgiving it is
+// (how many frames of letting go will do) is chosen: wide in the first
+// acts, narrower later. Hoops go on the way of a good flight; balloons a
+// little off it (for those who aim); trampolines where a fast flight comes
+// down, in some acts; in the longer acts a platform to rest on every so
+// often; the end platform where the last good flight comes down. Then the
+// autopilot performs it, for the time and the style to beat.
+
+use super::acts::*;
+use super::body::*;
+use super::bot::*;
+use super::play::*;
+use super::fx::{fx};
+
+fn copy_of(s: Stella) -> Stella {
+    Stella { x: s.x, y: s.y, vx: s.vx, vy: s.vy, state: s.state, hook: s.hook, rope: s.rope, angle: s.angle, spin: s.spin, tuck: false, turned: 0, plat: s.plat, t: s.t, squash: 0, sx: array(scarf_len(), s.x), sy: array(scarf_len(), s.y) }
+}
+
+// how forgiving a hook at (hx, hy) would be from this swing: of the
+// releases k = 1 to 110 frames from now, the longest run of them in a row
+// that fly within reach of it; and the middle of that run
+fn window(s: Stella, a: Act, hx: Int, hy: Int, sines: Array<Int>, mid: Array<Int>) -> Int {
+    let mut longest = 0;
+    let mut run = 0;
+    mid.set(0, 1);
+    let mut k = 1;
+    while k < 110 {
+        if reaches(s, a, k, hx, hy, sines) {
+            run = run + 1;
+            if run > longest {
+                longest = run;
+                mid.set(0, k - run / 2);
+            }
+        } else { run = 0 }
+        k = k + 1;
+    }
+    longest
+}
+
+// whether letting go after k frames flies Stella within reach of (hx, hy)
+fn reaches(s: Stella, a: Act, k: Int, hx: Int, hy: Int, sines: Array<Int>) -> Bool {
+    let c = copy_of(s);
+    let mut f = 0;
+    let mut yes = false;
+    let mut alive = true;
+    while f < k + 90 && !yes && alive {
+        move_stella(c, a, f < k, false, f, sines);
+        if f > k {
+            let dx = hx - c.x / 256;
+            let dy = hy - c.y / 256;
+            if dx > -24 && hy < c.y / 256 + 10 && dx * dx + dy * dy < (reach() - 12) * (reach() - 12) && dx < 90 { yes = true }
+            if c.state != s_air() { alive = false }
+        }
+        f = f + 1;
+    }
+    yes
+}
+
+// the flight from letting go after k frames: Stella, after f frames of flying
+fn fly_for(s: Stella, a: Act, k: Int, f: Int, sines: Array<Int>) -> Stella {
+    let c = copy_of(s);
+    let mut i = 0;
+    while i < k + f && c.state != s_fallen() {
+        move_stella(c, a, i < k, false, i, sines);
+        i = i + 1;
+    }
+    c
+}
+
+// Stella grabbing hook h as soon as she can, from a flight
+fn catch_hook(s: Stella, a: Act, k: Int, h: Int, sines: Array<Int>) -> Stella {
+    let c = copy_of(s);
+    let mut i = 0;
+    let mut was = true;
+    while i < k + 120 && !(c.state == s_swing() && c.hook == h) && c.state != s_fallen() {
+        let held = i < k || (i > k + 2 && target(c, a, i, sines) == h);
+        move_stella(c, a, held, held && !was, i, sines);
+        was = held;
+        i = i + 1;
+    }
+    c.t = 0;
+    c
+}
+
+// Stella, standing on a platform, leaping for a hook put an easy reach
+// ahead of her: her on it, swinging (or not, if she missed after all)
+fn leap_catch(a: Act, s: Stella, sines: Array<Int>) -> Stella {
+    let top = a.py.get(s.plat);
+    hook(a, s.x / 256 + 100 + aroll(a, 20), top - 98 + aroll(a, 14), h_bar());
+    let c = copy_of(s);
+    let mut f = 0;
+    while f < 120 && c.state != s_swing() && c.state != s_fallen() {
+        move_stella(c, a, f > 2, f == 3, f, sines);
+        f = f + 1;
+    }
+    c.t = 0;
+    c
+}
+
+// where the farthest of the flights from this swing comes down to a
+// platform's height (or -1)
+fn farthest(s: Stella, a: Act, sines: Array<Int>) -> Int { farthest_at(s, a, 156, sines) }
+
+// where the farthest of the flights from this swing comes down to height y
+fn farthest_at(s: Stella, a: Act, y: Int, sines: Array<Int>) -> Int {
+    let mut best = -1;
+    let mut kk = 10;
+    while kk < 90 {
+        let c = fly_for(s, a, kk, 1, sines);
+        let mut g = 0;
+        while g < 160 && c.state == s_air() && c.y < y * 256 {
+            move_stella(c, a, false, false, g, sines);
+            g = g + 1;
+        }
+        if c.state == s_air() && c.x / 256 > best { best = c.x / 256 }
+        kk = kk + 4;
+    }
+    best
+}
+
+// Stella, swinging, let go to land on platform p: the middle of the
+// releases that do, landed (or her swinging still, if none do)
+fn land_on(s: Stella, a: Act, p: Int, sines: Array<Int>) -> Stella {
+    let mut run = 0;
+    let mut longest = 0;
+    let mut best = -1;
+    let mut k = 1;
+    while k < 110 {
+        let c = fly_for(s, a, k, 1, sines);
+        let mut g = 0;
+        while g < 160 && c.state == s_air() {
+            move_stella(c, a, false, false, g, sines);
+            g = g + 1;
+        }
+        if c.state == s_stand() && c.plat == p {
+            run = run + 1;
+            if run > longest { longest = run; best = k - run / 2; }
+        } else { run = 0 }
+        k = k + 1;
+    }
+    if best < 0 || longest < 6 { s } else {
+        let c = fly_for(s, a, best, 1, sines);
+        let mut g = 0;
+        while g < 160 && c.state == s_air() {
+            move_stella(c, a, false, false, g, sines);
+            g = g + 1;
+        }
+        c.t = 0;
+        c
+    }
+}
+
+// the best place for the next hook from this swing, of ten tried: along
+// a gap that grows with the act (or past a trampoline at reach_x, and then
+// only to be reached by bouncing), at heights that vary; into found: x, y,
+// how good (below 0: nothing will do), and the middle release for it
+fn search(s: Stella, a: Act, reach_x: Int, bits_before: Int, tier: Int, aim: Int, least: Int, sines: Array<Int>, found: Array<Int>) {
+    let cx = a.hx.get(s.hook);
+    let mid = array(1, 0);
+    found.set(2, -1);
+    let mut tries = 0;
+    while tries < 10 {
+        let gap = if reach_x > cx { reach_x - cx + 30 + aroll(a, 90) } else { 100 + tier * 4 + aroll(a, 40 + tier * 3) };
+        let y = (24 + aroll(a, 80 + tier.min(20))).clamp(20, 110);
+        let mut wnd = window(s, a, cx + gap, y, sines, mid);
+        if reach_x > cx && wnd > 0 {
+            let keep = mid.get(0);
+            let n_bits = a.n_bits;
+            a.n_bits = bits_before;
+            if window(s, a, cx + gap, y, sines, mid) >= least { wnd = 0 }
+            a.n_bits = n_bits;
+            mid.set(0, keep);
+        }
+        // (as forgiving as this act's meant to be, give or take, with a
+        // little randomness; failing that, the most forgiving there is)
+        let score = if wnd >= least { 1000 - (wnd - aim).abs() * 4 + aroll(a, 8) } else { wnd };
+        if wnd >= 6 && score > found.get(2) {
+            found.set(0, cx + gap);
+            found.set(1, y);
+            found.set(2, score);
+            found.set(3, mid.get(0));
+        }
+        tries = tries + 1;
+    }
+}
+
+// the act numbered n, made
+pub fn build(n: Int, sines: Array<Int>) -> Act {
+    let a = new_act(n);
+    let tier = n.min(40);
+    // the first hook, an easy reach from the leap
+    let mut s = leap_catch(a, stella(a), sines);
+    let count = if n == 0 { 1 } else if n == 1 { 1 } else if n == 2 { 2 } else { 3 + tier / 3 + aroll(a, 2) };
+    // how forgiving each catch is (frames of letting go that will do): aimed
+    // at, and the least that will do
+    let aim = (30 - tier).max(if tier >= 30 { 8 } else { 10 });
+    let least = (aim * 2 / 3).max(6);
+    // a place to rest every so many hooks, in the longer acts
+    let rest_every = if tier < 20 { 5 } else { 6 };
+    // trampolines: in the acts named for them, and now and then later
+    let bouncy = n == 13 || n == 14 || (tier >= 15 && aroll(a, 3) == 0);
+    let mid = array(1, 0);
+    let mut k = 1;
+    let mut since_rest = 1;
+    let mut attempts = 0;
+    while k < count && attempts < count * 4 {
+        attempts = attempts + 1;
+        // (a place to rest, where the flights come down)
+        if since_rest >= rest_every && count - k >= 3 {
+            let far = farthest(s, a, sines);
+            if far > 0 {
+                let x0 = far - 60;
+                plat(a, x0, x0 + 70, 160);
+                let landed = land_on(s, a, a.n_plats - 1, sines);
+                let leapt = if landed.state == s_stand() { leap_catch(a, landed, sines) } else { landed };
+                if landed.state == s_stand() && leapt.state == s_swing() && leapt.hook == a.n_hooks - 1 {
+                    s = leapt;
+                    k = k + 1;
+                } else {
+                    // (it didn't work out: no rest here)
+                    if landed.state == s_stand() { a.n_hooks = a.n_hooks - 1 }
+                    a.n_plats = a.n_plats - 1;
+                }
+            }
+            since_rest = 0;
+        }
+        let cur = s.hook;
+        let cx = a.hx.get(cur);
+        // (now and then a trampoline, where the fastest flight comes down)
+        let bits_before = a.n_bits;
+        let mut reach_x = cx;
+        if bouncy && (n == 13 || n == 14 || aroll(a, 2) == 0) {
+            let far = farthest_at(s, a, 200, sines);
+            if far > cx + 120 {
+                bit(a, b_tramp(), far - 6, 206);
+                reach_x = far;
+            }
+        }
+        let found = array(4, 0);
+        search(s, a, reach_x, bits_before, tier, aim, least, sines, found);
+        if reach_x > cx && found.get(2) < 500 {
+            // (the trampoline didn't help: away with it, and look plainly)
+            a.n_bits = bits_before;
+            search(s, a, cx, bits_before, tier, aim, least, sines, found);
+        }
+        let mut best_x = found.get(0);
+        let mut best_y = found.get(1);
+        let best_w = found.get(2);
+        let mut best_mid = found.get(3);
+        if best_w < 0 {
+            // (nothing in reach at all: a short hop instead, somewhere)
+            best_x = cx + 70 + aroll(a, 30);
+            best_y = (a.hy.get(cur) + aroll(a, 30) - 10).clamp(20, 100);
+            window(s, a, best_x, best_y, sines, mid);
+            best_mid = mid.get(0).max(1);
+        }
+        let kind = if aroll(a, 3) == 0 { h_ring() } else { h_bar() };
+        let h = hook(a, best_x, best_y, kind);
+        let caught = catch_hook(s, a, best_mid, h, sines);
+        if caught.state == s_swing() && caught.hook == h {
+            // a hoop on the way of the middle flight, now and then; a balloon off it
+            if tier >= 5 && aroll(a, 3) == 0 {
+                let mid_fly = fly_for(s, a, best_mid, 12, sines);
+                if mid_fly.state == s_air() { bit(a, b_hoop(), mid_fly.x / 256, mid_fly.y / 256) }
+            }
+            if tier >= 6 && aroll(a, 3) == 0 {
+                let up = fly_for(s, a, best_mid, 20, sines);
+                if up.state == s_air() { bit(a, b_balloon(), up.x / 256 + 6, (up.y / 256 - 26).max(12)) }
+            }
+            s = caught;
+            k = k + 1;
+            since_rest = since_rest + 1;
+        } else {
+            // (it couldn't be caught after all: take it away, and try again)
+            a.n_hooks = a.n_hooks - 1;
+            a.n_bits = bits_before;
+        }
+    }
+    // the end platform: where the best flight from the last hook comes down
+    let best = farthest(s, a, sines);
+    a.len = if best > 0 { (best - 70 - (if n < 3 { 0 } else { tier })).max(a.hx.get(s.hook) + 40) } else { a.hx.get(s.hook) + 160 };
+    finish_act(a);
+    judge(a, sines);
+    a
+}
+
+// the time and style to beat, from the autopilot performing the act: the
+// time it takes letting go at the safest moments (and a little more), and
+// most of the style it shows (it never flips on purpose; she can)
+fn judge(a: Act, sines: Array<Int>) {
+    let sh = show_act(a, fx(), sines);
+    let b = bot(256);
+    let mut f = 0;
+    while f < 60 * 90 && !sh.done && sh.falls == 0 {
+        let k = think(b, sh.s, a, sh.t, sines);
+        step_show(sh, k >= 2);
+        sh.fx.n_sounds = 0;
+        f = f + 1;
+    }
+    if sh.done {
+        a.par = sh.clock + sh.clock / 10 + 20;
+        a.style_goal = (sh.style * 9 / 10 / 50 * 50).max(100);
+    } else {
+        a.par = 90 + a.len * 60 / 280;
+        a.style_goal = 150 + a.n * 50;
+    }
+}

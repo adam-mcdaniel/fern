@@ -1,0 +1,13 @@
+// An operator works on a type with its trait: a Vec2 here can be added,
+// but not multiplied.
+
+struct Vec2 { x: Int, y: Int }
+
+impl Add for Vec2 { fn add(self, o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } } }
+
+fn main() {
+    let v = Vec2 { x: 1, y: 2 };
+    let w = v + v;
+    let z = v * v;
+}
+// error: Vec2 doesn't implement Mul

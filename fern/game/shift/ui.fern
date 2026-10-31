@@ -1,0 +1,426 @@
+// The screens round the shift: the title, the menus, choosing who and
+// where, the workshop, the options; and over the shift, the level's cards,
+// a crate opening, the pause, the end.
+
+use crate::math::{sin, cos, isqrt};
+use super::gfx::*;
+use super::art::{Art};
+use super::run::*;
+use super::arms::*;
+use super::icons::{icon};
+use super::scene::{bot};
+use super::save::{sv_credits, sv_shop, sv_regions, sv_best, sv_wins, sv_music, sv_sfx, sv_full, sv_shake, sv_numbers, has_char, char_lock, region_name, region_text};
+
+// ---- pieces
+
+// s broken into lines no wider than `width`, at its spaces
+pub fn wrap(g: Gfx, s: String, width: Int) -> List<String> {
+    let words = s.split(" ");
+    let mut lines = [];
+    let mut line = "";
+    words.each(|w| {
+        let tried = if line == "" { w } else { line ++ " " ++ w };
+        if text_w(g, tried, 1) > width && line != "" {
+            lines = Cons(line, lines);
+            line = w;
+        } else {
+            line = tried;
+        }
+    });
+    if line != "" { lines = Cons(line, lines) }
+    lines.reverse()
+}
+
+// a panel: what's behind it darkened, a border
+pub fn panel(g: Gfx, x: Int, y: Int, w: Int, h: Int, border: Int) {
+    dim(g, x, y, w, h, 2);
+    tint(g, x, y, w, h, 0x0a1418, 60);
+    outline(g, x, y, w, h, border);
+    // (its corners, brighter)
+    put(g, x, y, 0xf0fcff);
+    put(g, x + w - 1, y, 0xf0fcff);
+    put(g, x, y + h - 1, 0xf0fcff);
+    put(g, x + w - 1, y + h - 1, 0xf0fcff);
+}
+
+fn seconds_text(s: Int) -> String { (s / 60).show().pad_left(2, "0") ++ ":" ++ (s % 60).show().pad_left(2, "0") }
+
+// a robot, big: a character's portrait (or its shadow, if locked), in a
+// pool of light, looking about
+pub fn portrait(g: Gfx, c: Int, x: Int, y: Int, size: Int, frame: Int, t: Array<Int>, locked: Bool) {
+    if !locked { glow(g, x, y + size * 4, size * 9, 0x183038) }
+    let face = 256 + (sin(t, frame * 3 + c * 200) >> 9);
+    bot(g, x, y, size, if locked { 0x202024 } else { char_color(c) }, face, frame, frame + c * 7, t, if locked { 0 } else { 150 }, false);
+    if locked { say_at(g, "?", x, y - size * 2, 2, 0x606870) }
+}
+
+// a vertical list, the chosen one marked; the mouse, if it's over one,
+// chooses it: which it's over, or -1
+pub fn list(g: Gfx, items: List<String>, sel: Int, y0: Int, gap: Int, frame: Int, mx: Int, my: Int, t: Array<Int>) -> Int {
+    let mut i = 0;
+    let mut over = -1;
+    items.each(|s| {
+        let y = y0 + i * gap;
+        let w = text_w(g, s, 2);
+        if my >= y - 3 && my < y + 17 && mx > sw() / 2 - w / 2 - 20 && mx < sw() / 2 + w / 2 + 20 { over = i }
+        if i == sel {
+            let pulse = (sin(t, frame * 8) >> 13) + 8;
+            glow(g, sw() / 2, y + 7, 30 + pulse, 0x082830);
+            say_mid(g, s, y, 2, 0xc8f4ff);
+            let wing = w / 2 + 12 + pulse / 4;
+            say(g, ">", sw() / 2 - wing - 4, y + 2, 1, 0x60d8f0);
+            say(g, "<", sw() / 2 + wing, y + 2, 1, 0x60d8f0);
+        } else {
+            say_mid(g, s, y, 2, 0x7a8a90);
+        }
+        i = i + 1;
+    });
+    over
+}
+
+// ---- the title
+
+pub fn draw_title(g: Gfx, frame: Int, t: Array<Int>, rise: Int) {
+    let y = 46 - (256 - rise) / 16;
+    title(g, "NIGHT SHIFT", sw() / 2 - text_w(g, "NIGHT SHIFT", 5) / 2, y, 5, 0xf0ffff, 0x30b8c8, scale(0x103848, rise));
+    say_mid(g, "THE POWER'S OUT. SOMETHING IS GROWING. YOU'RE ON THE CLOCK.", y + 46, 1, mix(0x000000, 0xb8c8d0, rise));
+}
+
+// ---- choosing a character
+
+pub fn draw_chars(g: Gfx, save: Array<Int>, sel: Int, frame: Int, t: Array<Int>) {
+    say_mid(g, "WHO'S ON SHIFT?", 24, 2, 0xd8f8ff);
+    let n = characters();
+    let cw = 104;
+    let gap = 10;
+    let x0 = (sw() - (cw * n + gap * (n - 1))) / 2;
+    let mut c = 0;
+    while c < n {
+        let x = x0 + c * (cw + gap);
+        let chosen = c == sel;
+        let locked = !has_char(save, c);
+        let y = if chosen { 56 } else { 62 };
+        panel(g, x, y, cw, 150, if chosen { 0x60d8e8 } else { 0x304048 });
+        portrait(g, c, x + cw / 2, y + 46, 3, frame, t, locked);
+        say_at(g, if locked { "LOCKED" } else { char_name(c) }, x + cw / 2, y + 86, 2, if locked { 0x707880 } else if chosen { 0xe8fcff } else { 0xa8b8c0 });
+        let lines = if locked { wrap(g, char_lock(c), cw - 10) } else { let (a, b) = char_text(c); wrap(g, a ++ " " ++ b, cw - 10) };
+        let mut ly = y + 106;
+        lines.each(|l| {
+            say_at(g, l, x + cw / 2, ly, 1, if locked { 0x908080 } else { 0x98a8b0 });
+            ly = ly + 9;
+        });
+        c = c + 1;
+    }
+    say_mid(g, "LEFT / RIGHT TO CHOOSE    ENTER TO BEGIN    ESC TO GO BACK", 248, 1, 0x687880);
+}
+
+// ---- choosing where
+
+pub fn draw_regions(g: Gfx, save: Array<Int>, sel: Int, frame: Int, t: Array<Int>) {
+    say_mid(g, "WHERE TO?", 24, 2, 0xd8f8ff);
+    let open = super::save::get(save, sv_regions());
+    let cw = 140;
+    let gap = 12;
+    let x0 = (sw() - (cw * 3 + gap * 2)) / 2;
+    let mut k = 0;
+    while k < 3 {
+        let x = x0 + k * (cw + gap);
+        let chosen = k == sel;
+        let locked = k >= open;
+        let y = if chosen { 56 } else { 62 };
+        panel(g, x, y, cw, 150, if chosen { 0x60d8e8 } else { 0x304048 });
+        // a little picture of it: its walls, deck, and what stands there, in the dark
+        scene_card(g, k, x + 8, y + 8, cw - 16, 58, frame, t, locked);
+        say_at(g, if locked { "???" } else { region_name(k) }, x + cw / 2, y + 74, 1, if chosen { 0xe8fcff } else { 0xa8b8c0 });
+        if locked {
+            say_at(g, "FINISH A SHIFT IN", x + cw / 2, y + 96, 1, 0x808890);
+            say_at(g, region_name(k - 1) ++ " TO OPEN", x + cw / 2, y + 106, 1, 0x808890);
+        } else {
+            let mut ly = y + 90;
+            wrap(g, region_text(k), cw - 12).each(|l| {
+                say_at(g, l, x + cw / 2, ly, 1, 0x98a8b0);
+                ly = ly + 9;
+            });
+            say_at(g, "BEST  " ++ seconds_text(super::save::get(save, sv_best(k))), x + cw / 2, y + 120, 1, 0x90c0c8);
+            say_at(g, "SHIFTS DONE  " ++ super::save::get(save, sv_wins(k)).show(), x + cw / 2, y + 132, 1, 0x90c0c8);
+        }
+        k = k + 1;
+    }
+    say_mid(g, "LEFT / RIGHT TO CHOOSE    ENTER TO BEGIN    ESC TO GO BACK", 248, 1, 0x687880);
+}
+
+fn scene_card(g: Gfx, k: Int, x: Int, y: Int, w: Int, h: Int, frame: Int, t: Array<Int>, locked: Bool) {
+    let (wall, ground, stand) = if locked { (0x0a080c, 0x141018, 0x0c0a10) } else if k == 0 { (0x0c1418, 0x18241c, 0x0c2a14) } else if k == 1 { (0x0c1424, 0x1a2634, 0x2a4458) } else { (0x100c10, 0x222024, 0x34343c) };
+    let mut row = 0;
+    while row < h {
+        let c = if row < h / 2 { mix(0x04040a, wall, row * 512 / h) } else { mix(ground, scale(ground, 120), (row - h / 2) * 512 / h) };
+        rect(g, x, y + row, w, 1, c);
+        row = row + 1;
+    }
+    if !locked {
+        // what stands there, against the dark: plants, pods or bulkheads
+        let mut i = 0;
+        while i < 9 {
+            let bx = x + 4 + i * (w - 8) / 8;
+            let bh = 8 + ((i * 37 + k * 11) % 13);
+            if k == 2 { rect(g, bx - 4, y + h / 2 - bh, 9, bh + 4, stand) }
+            else if k == 1 { rect(g, bx - 3, y + h / 2 - bh, 7, bh + 2, stand); rect(g, bx - 1, y + h / 2 - bh + 2, 3, bh - 4, 0x58a0c0) }
+            else { disc(g, bx, y + h / 2 - bh / 2, bh / 2 + 2, stand) }
+            i = i + 1;
+        }
+        // a relay in the middle, its light on the deck
+        let (fx, fy) = (x + w / 2, y + h * 3 / 4);
+        glow(g, fx, fy, 26, 0x204858);
+        rect(g, fx - 1, fy - 10, 2, 10, 0x80909c);
+        rect(g, fx - 3, fy - 12, 6, 3, 0xd8f8ff);
+        if k == 0 { disc(g, x + 18, y + h - 8, 2, 0xd050c0); glow(g, x + 18, y + h - 8, 6, 0x401838) }
+        if k == 2 { rect(g, x + 6, y + h - 10, w / 3, 2, 0x40d060) }
+    }
+    outline(g, x, y, w, h, 0x203038);
+}
+
+// ---- the workshop
+
+pub fn draw_workshop(g: Gfx, save: Array<Int>, sel: Int, frame: Int, t: Array<Int>, flash: Int) {
+    say_mid(g, "THE WORKSHOP", 16, 3, 0xd8f8ff);
+    let credits = super::save::get(save, sv_credits());
+    say_mid(g, credits.show() ++ " CREDITS", 42, 1, 0x70e0c0);
+    let cols = 5;
+    let tw = 76;
+    let th = 54;
+    let gap = 8;
+    let x0 = (sw() - (tw * cols + gap * (cols - 1))) / 2;
+    let mut h = 0;
+    while h < shop_count() {
+        let x = x0 + (h % cols) * (tw + gap);
+        let y = 58 + (h / cols) * (th + gap);
+        let lv = super::save::get(save, sv_shop(h));
+        let max = shop_max(h);
+        let chosen = h == sel;
+        panel(g, x, y, tw, th, if chosen { 0x60d8e8 } else if lv >= max { 0x306070 } else { 0x304048 });
+        if chosen && flash > 0 { glow(g, x + tw / 2, y + th / 2, 40, scale(0x206878, flash * 16)) }
+        say_at(g, shop_name(h), x + tw / 2, y + 6, 1, if chosen { 0xe8fcff } else { 0xa8b8c0 });
+        // its levels, as pips
+        let mut p = 0;
+        while p < max {
+            let px = x + tw / 2 - max * 4 + p * 8 + 1;
+            rect(g, px, y + 20, 6, 6, 0x101c20);
+            if p < lv { rect(g, px + 1, y + 21, 4, 4, 0x50d0d0) }
+            p = p + 1;
+        }
+        let cost_s = if lv >= max { "DONE" } else { shop_cost(h, lv).show() };
+        say_at(g, cost_s, x + tw / 2, y + 36, 1, if lv >= max { 0x90c080 } else if shop_cost(h, lv) <= credits { 0x90f0e0 } else { 0x607078 });
+        h = h + 1;
+    }
+    // what the chosen one does
+    let lv = super::save::get(save, sv_shop(sel));
+    let max = shop_max(sel);
+    panel(g, 60, 190, 360, 40, 0x304048);
+    say_mid(g, shop_name(sel) ++ "  " ++ lv.show() ++ "/" ++ max.show(), 197, 1, 0xd8f8ff);
+    say_mid(g, shop_text(sel), 211, 1, 0xa8b8c0);
+    say_mid(g, "ENTER TO BUY    ESC TO GO BACK", 248, 1, 0x687880);
+}
+
+// ---- options
+
+pub fn option_count() -> Int { 6 }
+
+pub fn draw_options(g: Gfx, save: Array<Int>, sel: Int, frame: Int) {
+    say_mid(g, "OPTIONS", 30, 3, 0xd8f8ff);
+    let names = ["MUSIC", "SOUND", "FULLSCREEN", "SCREEN SHAKE", "DAMAGE NUMBERS", "BACK"];
+    let mut i = 0;
+    names.each(|n| {
+        let y = 80 + i * 22;
+        let chosen = i == sel;
+        let c = if chosen { 0xc8f4ff } else { 0x7a8a90 };
+        if chosen { glow(g, sw() / 2, y + 4, 40, 0x082830) }
+        if i == 5 { say_mid(g, n, y, 1, c) } else {
+            say(g, n, 130, y, 1, c);
+            if i < 2 {
+                let v = super::save::get(save, if i == 0 { sv_music() } else { sv_sfx() });
+                let mut k = 0;
+                while k < 10 {
+                    rect(g, 260 + k * 9, y, 7, 7, if k * 10 < v { 0x50d0d0 } else { 0x183038 });
+                    k = k + 1;
+                }
+                say(g, v.show() ++ "%", 356, y, 1, c);
+            } else {
+                let on = super::save::get(save, if i == 2 { sv_full() } else if i == 3 { sv_shake() } else { sv_numbers() }) > 0;
+                say(g, if on { "ON" } else { "OFF" }, 260, y, 1, if on { 0x90f0e0 } else { 0x707880 });
+            }
+        }
+        i = i + 1;
+    });
+    say_mid(g, "UP / DOWN TO CHOOSE    LEFT / RIGHT TO CHANGE    ESC TO GO BACK", 248, 1, 0x687880);
+}
+
+// ---- a level gained: the cards to choose from
+
+pub fn draw_levelup(g: Gfx, r: Run, offers: Array<Int>, sel: Int, anim: Int, frame: Int) {
+    dim(g, 0, 0, sw(), sh(), 1);
+    let rise = (anim * 20).min(256);
+    title(g, "LEVEL UP!", sw() / 2 - text_w(g, "LEVEL UP!", 3) / 2, 30 - (256 - rise) / 12, 3, 0xf8ffff, 0xffa030, scale(0x103848, rise));
+    let n = count_offers(offers);
+    if n == 0 {
+        say_mid(g, "NOTHING LEFT TO INSTALL. YOU'RE REPAIRED.", 130, 1, 0xd8f8ff);
+    }
+    let cw = if n >= 4 { 108 } else { 132 };
+    let gap = 10;
+    let x0 = (sw() - (cw * n + gap * (n - 1))) / 2;
+    let mut k = 0;
+    while k < n {
+        let u = offers.get(k);
+        let chosen = k == sel;
+        // (each card comes up from below, one after another)
+        let delay = k * 4;
+        let up = ((anim - delay) * 24).clamp(0, 256);
+        let x = x0 + k * (cw + gap);
+        let y = 70 + (256 - up) * 200 / 256 - (if chosen { 6 } else { 0 });
+        card(g, r, u, x, y, cw, 150, chosen, frame);
+        k = k + 1;
+    }
+    say_mid(g, "LEFT / RIGHT TO CHOOSE    ENTER TO TAKE", 252, 1, 0x8898a0);
+}
+
+pub fn count_offers(offers: Array<Int>) -> Int {
+    let mut n = 0;
+    let mut i = 0;
+    while i < offers.len() {
+        if offers.get(i) >= 0 { n = n + 1 }
+        i = i + 1;
+    }
+    n
+}
+
+fn card(g: Gfx, r: Run, u: Int, x: Int, y: Int, w: Int, h: Int, chosen: Bool, frame: Int) {
+    let lv = r.lv.get(u);
+    let border = if chosen { 0xffc860 } else if is_weapon(u) { 0x3a5a68 } else { 0x48506a };
+    if chosen { glow(g, x + w / 2, y + 30, 50, 0x082028) }
+    panel(g, x, y, w, h, border);
+    if chosen { outline(g, x + 1, y + 1, w - 2, h - 2, 0x306070) }
+    rect(g, x + w / 2 - 19, y + 10, 38, 38, 0x080c10);
+    outline(g, x + w / 2 - 19, y + 10, 38, 38, border);
+    icon(g, u, x + w / 2 - 16, y + 13, 2, frame, r.table);
+    say_at(g, name(u), x + w / 2, y + 56, 1, if chosen { 0xf0fcff } else { 0xc0d0d8 });
+    let tag = if lv == 0 { "NEW!" } else { "LV " ++ lv.show() ++ " > " ++ (lv + 1).show() };
+    say_at(g, tag, x + w / 2, y + 68, 1, if lv == 0 { 0x90ff90 } else { 0x60d8e8 });
+    let (a, b) = describe(u, lv + 1);
+    let mut ly = y + 86;
+    wrap(g, a ++ " " ++ b, w - 12).each(|l| {
+        say_at(g, l, x + w / 2, ly, 1, 0xa0b4bc);
+        ly = ly + 10;
+    });
+    if lv == 0 && is_weapon(u) {
+        say_at(g, "EVOLVES WITH " ++ name(partner(u)), x + w / 2, y + h - 14, 1, 0x507880);
+    } else if lv + 1 == max_level() && is_weapon(u) && r.lv.get(partner(u)) > 0 {
+        say_at(g, "READY TO EVOLVE!", x + w / 2, y + h - 14, 1, if frame / 15 % 2 == 0 { 0xffe070 } else { 0x50d0d0 });
+    }
+}
+
+// ---- a crate opening
+
+pub fn draw_crate(g: Gfx, a: Art, r: Run, reward: Int, evolved: Bool, anim: Int, frame: Int) {
+    dim(g, 0, 0, sw(), sh(), 1);
+    let (cx, cy) = (sw() / 2, 120);
+    let open = anim > 50;
+    // light pouring out, turning
+    let k = ((anim - 30) * 6).clamp(0, 256);
+    if k > 0 {
+        let mut i = 0;
+        while i < 12 {
+            let an = i * 85 + frame * 2;
+            let len = 60 + k / 3;
+            ray(g, cx, cy, cx + ((cos(r.table, an) * len) >> 16), cy + ((sin(r.table, an) * len) >> 16), scale(0x206080, k));
+            ray(g, cx + 1, cy, cx + 1 + ((cos(r.table, an) * len) >> 16), cy + ((sin(r.table, an) * len) >> 16), scale(0x103040, k));
+            i = i + 1;
+        }
+        glow(g, cx, cy, 30 + k / 6, scale(0x306070, k));
+    }
+    let shake_x = if anim < 50 { (sin(r.table, anim * 90) >> 15) * anim / 25 } else { 0 };
+    draw_big(g, a.crate, cx + shake_x, cy + 14, false, 255, false, 4);
+    if open {
+        let u = reward;
+        let rise = ((anim - 50) * 16).min(256);
+        if u >= 0 {
+            let top = if evolved { "EVOLUTION!" } else { "SUPPLIES!" };
+            title(g, top, cx - text_w(g, top, 2) / 2, 28, 2, 0xf8ffff, 0x40c0d0, scale(0x103848, rise));
+            panel(g, cx - 110, 168, 220, 70, 0x60d8e8);
+            rect(g, cx - 100, 178, 38, 38, 0x080c10);
+            icon(g, u, cx - 97, 181, 2, frame, r.table);
+            let nm = if evolved { name(u) ++ " > " ++ evolved_name(u) } else { name(u) ++ "  LV " ++ r.lv.get(u).show() };
+            say(g, nm, cx - 54, 180, 1, 0xf0fcff);
+            let (l1, l2) = if evolved { evolved_text(u) } else { describe(u, r.lv.get(u)) };
+            say(g, l1, cx - 54, 194, 1, 0xa0b4bc);
+            say(g, l2, cx - 54, 204, 1, 0xa0b4bc);
+        } else {
+            title(g, "SPARE PARTS!", cx - text_w(g, "SPARE PARTS!", 2) / 2, 28, 2, 0xf8ffff, 0x40c0d0, scale(0x103040, rise));
+            say_mid(g, "FULLY REPAIRED, AND A FEW CREDITS.", 190, 1, 0xd8f8ff);
+        }
+        if anim > 80 { say_mid(g, "ENTER TO GO ON", 250, 1, 0x8898a0) }
+    }
+}
+
+// ---- paused
+
+pub fn draw_pause(g: Gfx, r: Run, sel: Int, frame: Int, mx: Int, my: Int) -> Int {
+    dim(g, 0, 0, sw(), sh(), 1);
+    say_mid(g, "PAUSED", 40, 3, 0xd8f8ff);
+    let over = list(g, ["RESUME", "OPTIONS", "CLOCK OUT"], sel, 90, 24, frame, mx, my, r.table);
+    // what each weapon has done this shift
+    let mut y = 180;
+    let mut u = 0;
+    let mut most = 1;
+    while u < 8 {
+        most = most.max(r.dealt.get(u));
+        u = u + 1;
+    }
+    u = 0;
+    while u < 8 {
+        if r.lv.get(u) > 0 {
+            icon(g, u, 140, y - 4, 1, frame, r.table);
+            say(g, if r.evo.get(u) > 0 { evolved_name(u) } else { name(u) }, 160, y, 1, 0xa8b8c0);
+            rect(g, 240, y + 1, 100 * r.dealt.get(u) / most, 5, 0x30a0b0);
+            say(g, r.dealt.get(u).show(), 346, y, 1, 0x788890);
+            y = y + 14;
+        }
+        u = u + 1;
+    }
+    over
+}
+
+// ---- the end of a shift
+
+pub fn draw_results(g: Gfx, r: Run, won: Bool, anim: Int, earned: Int, news: List<String>, frame: Int) {
+    dim(g, 0, 0, sw(), sh(), 1);
+    let head = if won { "SHIFT COMPLETE" } else { "SYSTEMS OFFLINE" };
+    let rise = (anim * 8).min(256);
+    if won { title(g, head, sw() / 2 - text_w(g, head, 3) / 2, 24, 3, 0xf8ffff, 0x60e0f0, scale(0x205060, rise)) }
+    else { title(g, head, sw() / 2 - text_w(g, head, 2) / 2, 26, 2, 0xd0e0e8, 0x506878, scale(0x102028, rise)) }
+    panel(g, 90, 64, 300, 140, 0x3a5a68);
+    let secs = r.time / 60;
+    let rows = [("THE SHIFT", seconds_text(secs)), ("LEVEL", r.level.show()), ("CLEARED", r.kills.show()),
+                ("RELAYS ONLINE", super::play::online_count(r).show() ++ "/" ++ super::world::relay_count(r.w).show()), ("CREDITS FOUND", r.credits.show())];
+    let mut i = 0;
+    rows.each(|row| {
+        let (k, v) = row;
+        if anim > 20 + i * 12 {
+            say(g, k, 110, 76 + i * 16, 1, 0x98a8b0);
+            say(g, v, 370 - text_w(g, v, 1), 76 + i * 16, 1, 0xf0fcff);
+        }
+        i = i + 1;
+    });
+    if anim > 90 {
+        // the credits earned, counted up
+        let shown = (earned * (anim - 90) / 40).min(earned);
+        say(g, "CREDITS EARNED", 110, 168, 2, 0x70e0c0);
+        say(g, shown.show(), 370 - text_w(g, shown.show(), 2), 168, 2, 0xc0fff0);
+    }
+    let mut ny = 212;
+    if anim > 140 {
+        news.each(|n| {
+            say_mid(g, n, ny, 1, if frame / 10 % 2 == 0 { 0xffe070 } else { 0x40c0d0 });
+            ny = ny + 11;
+        });
+    }
+    if anim > 150 { say_mid(g, "ENTER TO RETURN TO THE WORKSHOP", 252, 1, 0x8898a0) }
+}

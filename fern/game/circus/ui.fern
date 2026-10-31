@@ -1,0 +1,297 @@
+// The screens round the acts: the title (a circus poster, its name
+// framed in marquee bulbs that chase round), choosing an act (a tour at
+// a time, ten acts each with its stars), the card at the end of an act
+// (BRAVO!, the three stars filling in one by one), the pause, the
+// options; and over the act itself, its name, the clock, the style, the
+// combo, and the hints for the first acts.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+use super::acts::*;
+use super::save::*;
+
+pub fn ink() -> Int { 0x2a1a20 }
+pub fn cream() -> Int { 0xfbf0dc }
+pub fn gold() -> Int { 0xffc830 }
+pub fn crimson() -> Int { 0xd8323a }
+
+// a star, filled or not (r pixels): five points, the top one up, with a
+// dark edge; tested a pixel at a time against its ten corners
+pub fn star(g: Gfx, x: Int, y: Int, r: Int, on: Bool, sines: Array<Int>) {
+    // (the corners, in 16ths of a pixel: outer and inner by turns)
+    let cx = array(10, 0);
+    let cy = array(10, 0);
+    let mut k = 0;
+    while k < 10 {
+        let a = 768 + k * 1024 / 10;
+        let rr = if k % 2 == 0 { r * 16 } else { r * 16 * 42 / 100 };
+        cx.set(k, (cos(sines, a) * rr) >> 16);
+        cy.set(k, (sin(sines, a) * rr) >> 16);
+        k = k + 1;
+    }
+    let fill = if on { gold() } else { 0x8a7a72 };
+    let hi = if on { 0xfff4b0 } else { 0xa89a90 };
+    let edge = if on { 0x8a4a10 } else { 0x4a3a3a };
+    let mut dy = -r - 1;
+    while dy <= r + 1 {
+        let mut dx = -r - 1;
+        while dx <= r + 1 {
+            if inside(cx, cy, dx * 16, dy * 16) {
+                let rim = !inside(cx, cy, dx * 16 - 16, dy * 16) || !inside(cx, cy, dx * 16 + 16, dy * 16) || !inside(cx, cy, dx * 16, dy * 16 - 16) || !inside(cx, cy, dx * 16, dy * 16 + 16);
+                put(g, x + dx, y + dy, if rim { edge } else if dy < 0 && dx <= 0 { hi } else { fill });
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// whether (px, py) is inside the polygon of ten corners (crossings, even or odd)
+fn inside(cx: Array<Int>, cy: Array<Int>, px: Int, py: Int) -> Bool {
+    let mut yes = false;
+    let mut i = 0;
+    let mut j = 9;
+    while i < 10 {
+        let yi = cy.get(i);
+        let yj = cy.get(j);
+        if (yi > py) != (yj > py) {
+            let xc = cx.get(i) + (cx.get(j) - cx.get(i)) * (py - yi) / (yj - yi);
+            if px < xc { yes = !yes }
+        }
+        j = i;
+        i = i + 1;
+    }
+    yes
+}
+
+// a panel: cream card with a red border
+pub fn panel(g: Gfx, x: Int, y: Int, w: Int, h: Int) {
+    round_blend(g, x + 3, y + 4, w, h, 6, 0x0a0410, 120);
+    round_rect(g, x, y, w, h, 6, 0x8a1a2a);
+    round_rect(g, x + 2, y + 2, w - 4, h - 4, 5, cream());
+}
+
+pub fn button(g: Gfx, x: Int, y: Int, w: Int, h: Int, s: String, chosen: Bool) {
+    round_blend(g, x + 1, y + 2, w, h, 4, 0x0a0410, 100);
+    round_rect(g, x, y, w, h, 4, if chosen { 0x8a1a2a } else { 0xa89880 });
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 3, if chosen { crimson() } else { cream() });
+    text_mid(g, s, x + w / 2, y + h / 2 - 4, 1, if chosen { 0xffffff } else { ink() });
+}
+
+// the title: its name in a frame of bulbs that chase round
+pub fn draw_title(g: Gfx, frame: Int, sines: Array<Int>) {
+    let x = 80;
+    let y = 10;
+    let w = 320;
+    let h = 92;
+    round_blend(g, x + 4, y + 6, w, h, 10, 0x0a0410, 140);
+    round_rect(g, x, y, w, h, 10, 0x6a0a1a);
+    round_rect(g, x + 4, y + 4, w - 8, h - 8, 8, crimson());
+    // (the bulbs: lit by turns, chasing round the frame)
+    let n = 44;
+    let mut i = 0;
+    while i < n {
+        let (bx, by) = round_path(x + 4, y + 4, w - 8, h - 8, i, n);
+        let on = (i + frame / 4) % 3 == 0;
+        disc(g, bx, by, 2, if on { 0xfff4b0 } else { 0x8a5a20 });
+        if on { glow(g, bx, by, 6, 0x302010) }
+        i = i + 1;
+    }
+    text_mid(g, "THE AMAZING", 240, y + 16, 2, 0xffe8a0);
+    let s = "STELLA";
+    let k = 5;
+    let tw = text_w(g, s, k);
+    let mut cx = 240 - tw / 2;
+    let mut j = 0;
+    while j < s.len() {
+        let ch = s.substring(j, j + 1);
+        let bob = sin(sines, frame * 6 + j * 120) * 3 >> 16;
+        text(g, ch, cx + 2, y + 38 + bob + 3, k, 0x3a0a10);
+        say(g, ch, cx, y + 38 + bob, k, if j % 2 == 0 { 0xfff0b0 } else { gold() }, 0x6a1a10);
+        cx = cx + (char_w(g, ch.char_at(0)) + 1) * k;
+        j = j + 1;
+    }
+    say_mid(g, "hold to grab, let go to fly", 240, y + h + 8, 1, 0xfff0d0, 0x3a0a10);
+}
+
+// the i-th of n points round a rectangle's edge
+fn round_path(x: Int, y: Int, w: Int, h: Int, i: Int, n: Int) -> (Int, Int) {
+    let per = 2 * (w + h);
+    let d = i * per / n;
+    if d < w { (x + d, y) } else if d < w + h { (x + w, y + d - w) } else if d < 2 * w + h { (x + w - (d - w - h), y + h) } else { (x, y + h - (d - 2 * w - h)) }
+}
+
+// the acts of a tour: ten cards, each its number, its name, its stars
+pub fn draw_acts(g: Gfx, d: Array<Int>, tour: Int, sel: Int, frame: Int, sines: Array<Int>, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x0a0410, 110);
+    let open = tour_open(d, tour);
+    say_mid(g, "{  " ++ tour_name(tour) ++ "  }", 240, 18, 2, if open { 0xfff0b0 } else { 0xa89890 }, 0x3a0a10);
+    text_mid(g, total_stars(d).show() ++ " stars", 240, 40, 1, gold());
+    let mut over = -1;
+    if tour == 3 {
+        // the Encore: one card
+        let x = 170;
+        let y = 80;
+        if mx >= x && mx < x + 140 && my >= y && my < y + 90 { over = 0 }
+        panel(g, x, y, 140, 90);
+        print_mid(g, "ENCORE", 240, y + 14, 2, crimson(), 0xe8d8c0);
+        text_mid(g, if open { "acts without end" } else { "needs " ++ tour_need(3).show() ++ " stars" }, 240, y + 40, 1, ink());
+        if open { text_mid(g, "best: " ++ get(d, sv_encore()).show() ++ " acts", 240, y + 56, 1, 0x8a6a40) }
+        if sel == 0 { outline(g, x - 3, y - 3, 146, 96, if (frame / 8) % 2 == 0 { gold() } else { 0xffffff }) }
+    } else {
+        let mut i = 0;
+        while i < 10 {
+            let n = tour * 10 + i;
+            let x = 30 + (i % 5) * 86;
+            let y = 64 + (i / 5) * 86;
+            if mx >= x && mx < x + 78 && my >= y && my < y + 76 { over = i }
+            let chosen = i == sel;
+            let lift = if chosen { 3 } else { 0 };
+            panel(g, x, y - lift, 78, 76);
+            if open {
+                print_mid(g, (n + 1).show(), x + 39, y + 8 - lift, 2, crimson(), 0xe8d8c0);
+                text_mid(g, act_name(n), x + 39, y + 32 - lift, 1, ink());
+                let st = get(d, sv_stars(n));
+                let mut k = 0;
+                while k < 3 {
+                    star(g, x + 21 + k * 18, y + 54 - lift, 6, k < st, sines);
+                    k = k + 1;
+                }
+            } else {
+                text_mid(g, "?", x + 39, y + 24 - lift, 2, 0xb8a898);
+            }
+            if chosen { outline(g, x - 3, y - 3 - lift, 84, 82, if (frame / 8) % 2 == 0 { gold() } else { 0xffffff }) }
+            i = i + 1;
+        }
+        if !open {
+            let msg = "needs " ++ tour_need(tour).show() ++ " stars to open";
+            let w = text_w(g, msg, 1) + 24;
+            round_rect(g, 240 - w / 2, 131, w, 22, 5, 0x6a0a1a);
+            round_rect(g, 240 - w / 2 + 2, 133, w - 4, 18, 4, crimson());
+            say_mid(g, msg, 240, 138, 1, 0xffffff, 0x3a0a10);
+        }
+    }
+    text_mid(g, "left and right: tours        back: the title", 240, 252, 1, 0xd8c8c0);
+    over
+}
+
+// the end of an act: BRAVO, and the stars filling in
+pub fn draw_bravo(g: Gfx, n: Int, stars: Int, time: Int, par: Int, style: Int, goal: Int, best: Bool, t: Int, sel: Int, sines: Array<Int>) {
+    let x = 130;
+    let w = 220;
+    let h = 170;
+    let y = 40 - (if t < 12 { (12 - t) * (12 - t) } else { 0 });
+    panel(g, x, y, w, h);
+    say_mid(g, "BRAVO!", 240, y + 10, 3, gold(), 0x6a1a10);
+    text_mid(g, act_name(n), 240, y + 40, 1, 0x8a6a60);
+    let lines = ["Finished the act",
+        "Time " ++ secs(time) ++ (if time <= par { ", under " } else { ", needs " }) ++ secs(par),
+        "Style " ++ style.show() ++ (if style >= goal { ", over " } else { ", needs " }) ++ goal.show()];
+    let oks = [true, time <= par, style >= goal];
+    let mut i = 0;
+    let mut rest = lines;
+    let mut ok_rest = oks;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let ok = match ok_rest { Cons(o, more) => { ok_rest = more; o }, Nil => false };
+                let shown = t > 20 + i * 18;
+                let yy = y + 54 + i * 20;
+                star(g, x + 24, yy + 3, 7, shown && ok, sines);
+                text(g, s, x + 38, yy, 1, if ok { ink() } else { 0x9a8a80 });
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    if best && t > 80 { say_mid(g, "a new best!", 240, y + 118, 1, 0xffe04a, 0x6a3a10) }
+    let opts = ["Next act", "Again", "Acts"];
+    let mut k = 0;
+    let mut o = opts;
+    loop {
+        match o {
+            Nil => { break; }
+            Cons(s, tail) => {
+                button(g, x + 12 + k * 68, y + h - 30, 62, 20, s, k == sel);
+                k = k + 1;
+                o = tail;
+            }
+        }
+    }
+}
+
+pub fn secs(frames: Int) -> String { (frames / 60).show() ++ "." ++ ((frames % 60) * 10 / 60).show() ++ "s" }
+
+// over the act: its name, the clock, the style, the combo
+pub fn draw_hud(g: Gfx, n: Int, clock: Int, style: Int, combo: Int, frame: Int) {
+    round_blend(g, 4, 4, 150, 18, 4, 0x0a0410, 130);
+    text(g, (if n >= 30 { "Encore" } else { "Act " ++ (n + 1).show() }) ++ ": " ++ act_name(n), 10, 9, 1, 0xfff0d0);
+    round_blend(g, 210, 4, 60, 18, 4, 0x0a0410, 130);
+    text_mid(g, secs(clock), 240, 9, 1, 0xffffff);
+    round_blend(g, 380, 4, 96, 18, 4, 0x0a0410, 130);
+    text(g, "style", 386, 9, 1, 0xd8b8c8);
+    num_right(g, style, 470, 9, 1, gold());
+    if combo > 0 {
+        let k = if combo >= 4 { 2 } else { 1 };
+        say_mid(g, "combo x" ++ (combo + 1).show(), 240, 28, k, if combo >= 4 { 0xff9ad8 } else { 0xfff0b0 }, 0x3a0a10);
+    }
+}
+
+// a hint, for the first acts: what to press
+pub fn hint(g: Gfx, s: String, x: Int, y: Int, frame: Int) {
+    let w = text_w(g, s, 1) + 12;
+    let cx = x.clamp(w / 2 + 4, sw() - w / 2 - 4);
+    let bob = if (frame / 10) % 2 == 0 { 0 } else { 1 };
+    round_blend(g, cx - w / 2, y - 3 + bob, w, 14, 4, 0x0a0410, 190);
+    outline(g, cx - w / 2 + 1, y - 2 + bob, w - 2, 12, 0x6a4a30);
+    text_mid(g, s, cx, y + bob, 1, 0xfff4c0);
+}
+
+pub fn draw_pause(g: Gfx, sel: Int, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x0a0410, 130);
+    say_mid(g, "INTERMISSION", 240, 50, 3, gold(), 0x3a0a10);
+    let items = ["Carry on", "Start again", "Choose an act", "Options", "The title"];
+    let mut over = -1;
+    let mut i = 0;
+    let mut rest = items;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let y = 90 + i * 26;
+                if mx >= 180 && mx < 300 && my >= y && my < y + 20 { over = i }
+                button(g, 180, y, 120, 20, s, i == sel);
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    over
+}
+
+pub fn draw_options(g: Gfx, d: Array<Int>, sel: Int, mx: Int, my: Int) -> Int {
+    rect_blend(g, 0, 0, sw(), sh(), 0x0a0410, 130);
+    panel(g, 150, 60, 180, 140);
+    say_mid(g, "OPTIONS", 240, 70, 2, gold(), 0x3a0a10);
+    let names = ["Music", "Sounds", "Full screen", "Done"];
+    let mut over = -1;
+    let mut i = 0;
+    let mut rest = names;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(s, tail) => {
+                let y = 100 + i * 22;
+                if mx >= 158 && mx < 322 && my >= y - 4 && my < y + 14 { over = i }
+                if i == sel { round_rect(g, 158, y - 4, 164, 18, 3, 0xf0d8b8) }
+                text(g, s, 166, y, 1, ink());
+                let v = if i == 0 { "{ " ++ get(d, sv_music()).show() ++ "% }" } else if i == 1 { "{ " ++ get(d, sv_sfx()).show() ++ "% }" } else if i == 2 { if get(d, sv_full()) > 0 { "{ on }" } else { "{ off }" } } else { "" };
+                text_right(g, v, 314, y, 1, if i == sel { crimson() } else { 0x8a7a70 });
+                i = i + 1;
+                rest = tail;
+            }
+        }
+    }
+    over
+}

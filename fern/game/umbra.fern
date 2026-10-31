@@ -1,0 +1,994 @@
+// UMBRA: a thief in a dark house. Steal every jewel, then slip out the way
+// you came. The lamps throw pools of light, and every wall, crate and
+// cabinet throws a shadow; the guards walk their rounds with lanterns, and
+// their beams sweep the rooms. In the shadows you're all but invisible. In
+// the light, a guard who looks your way sees you; in a lantern's beam, at
+// once. The gem at the bottom of the screen shows how lit you are.
+//
+// A guard who glimpses you, or hears you, comes to look ("?"); one who sees
+// you, chases ("!"), by the shortest way. Break his line of sight and he
+// searches where he lost you, then gives up. If he catches you, you're
+// caught. Running is fast, and loud. E snuffs out a lamp beside you, for a
+// darker way through; but a guard who finds it out lights it again, and
+// wonders who put it out.
+//
+// Arrows move, holding X runs, E snuffs a lamp, escape quits.
+//
+// The light: each lamp casts rays all round, each stopping at the first
+// wall or furniture it meets, and the fan of triangles between them is
+// filled with light, fading with distance, so what's behind a wall from the
+// lamp is in shadow. The house's colors times the lamps' light (and a little
+// moonlight) is worked out once, until a lamp goes out or is lit; the
+// lanterns' light is cast every frame, in a cone, onto that.
+
+mod screen;
+mod draw;
+mod math;
+
+use screen::*;
+use draw::{Canvas, canvas, show, text, text_width, fill_rect, line};
+use math::{sines, sin, cos, rng, random};
+
+fn width() -> Int { 320 }
+fn height() -> Int { 200 }
+// the house: 32 by 18 tiles of 10 pixels (the panel below)
+fn cols() -> Int { 32 }
+fn rows() -> Int { 18 }
+fn tile() -> Int { 10 }
+fn floor_h() -> Int { 180 }
+
+fn open() -> Int { 0 }
+fn wall() -> Int { 1 }
+fn furniture() -> Int { 2 }
+fn outside() -> Int { 3 }
+
+// ---- the house
+
+struct Lamp { x: Int, y: Int, radius: Int, on: Bool }
+
+// a guard: where (16ths of a pixel), which way he faces (1024ths of a
+// turn), his round (tiles, packed y * cols + x) and which of it he's
+// walking to, what he's doing, how alarmed he is (0 to 100), where he's
+// going when not on his round (pixels), and a timer for it
+struct Guard { id: Int, x: Int, y: Int, facing: Int, round: Array<Int>, next: Int, state: Int, alarm: Int, goal: (Int, Int), timer: Int }
+
+fn patrolling() -> Int { 0 }
+fn wary() -> Int { 1 }
+fn chasing() -> Int { 2 }
+fn searching() -> Int { 3 }
+
+struct House { map: Array<Int>, picture: Array<Int>, lamps: List<Lamp>, gems: List<(Int, Int)>, coins: List<(Int, Int)>, guards: List<Guard>, start: (Int, Int), total: Int }
+
+fn tile_at(m: Array<Int>, tx: Int, ty: Int) -> Int {
+    if tx < 0 || ty < 0 || tx >= cols() || ty >= rows() { outside() } else { array_get(m, ty * cols() + tx) }
+}
+
+fn solid(m: Array<Int>, px: Int, py: Int) -> Bool {
+    let t = tile_at(m, px / tile(), py / tile());
+    t == wall() || t == furniture()
+}
+
+// splits a part of the house (in tiles) into rooms with a wall between, a
+// doorway through it, again and again while the parts are big enough
+fn split(m: Array<Int>, r: Array<Int>, x: Int, y: Int, w: Int, h: Int, rooms: List<(Int, Int, Int, Int)>) -> List<(Int, Int, Int, Int)> {
+    let across = w >= h * 2 || (w > 9 && random(r, 3) > 0 && w >= h);
+    if across && w >= 11 {
+        // a wall down at column p, with a doorway two tiles high
+        let p = x + 4 + random(r, w - 8);
+        let door = y + random(r, h - 1);
+        let mut j = 0;
+        while j < h {
+            if j + y != door && j + y != door + 1 { array_set(m, (y + j) * cols() + p, wall()) }
+            j = j + 1;
+        }
+        let left = split(m, r, x, y, p - x, h, rooms);
+        split(m, r, p + 1, y, x + w - p - 1, h, left)
+    } else if !across && h >= 9 {
+        let p = y + 3 + random(r, h - 6);
+        let door = x + random(r, w - 1);
+        let mut j = 0;
+        while j < w {
+            if j + x != door && j + x != door + 1 { array_set(m, p * cols() + x + j, wall()) }
+            j = j + 1;
+        }
+        let top = split(m, r, x, y, w, p - y, rooms);
+        split(m, r, x, p + 1, w, y + h - p - 1, top)
+    } else {
+        Cons((x, y, w, h), rooms)
+    }
+}
+
+// how many steps each tile is from tile `from`, walking round walls and
+// furniture (9999: not at all)
+fn steps_from(m: Array<Int>, from: Int) -> Array<Int> {
+    let n = cols() * rows();
+    let d = array(n, 9999);
+    array_set(d, from, 0);
+    let queue = array(n, 0);
+    array_set(queue, 0, from);
+    let mut head = 0;
+    let mut tail = 1;
+    while head < tail {
+        let i = array_get(queue, head);
+        head = head + 1;
+        let here = array_get(d, i);
+        let (x, y) = (i % cols(), i / cols());
+        let try = |nx: Int, ny: Int| {
+            if tile_at(m, nx, ny) == open() {
+                let j = ny * cols() + nx;
+                if array_get(d, j) > here + 1 {
+                    array_set(d, j, here + 1);
+                    array_set(queue, tail, j);
+                    tail = tail + 1;
+                }
+            }
+        };
+        try(x + 1, y);
+        try(x - 1, y);
+        try(x, y + 1);
+        try(x, y - 1);
+    }
+    d
+}
+
+fn center(room: (Int, Int, Int, Int)) -> (Int, Int) {
+    let (x, y, w, h) = room;
+    (x + w / 2, y + h / 2)
+}
+
+// the house for level n: rooms split off with doorways; a way out in an
+// outside wall, where you start; furniture, lamps (not in every room),
+// jewels in the rooms furthest in, coins about, and guards walking rounds
+// through the rooms. (A house where some room can't be reached, or no
+// round fits, is thrown away for the next.)
+fn build(n: Int, seed: Int, table: Array<Int>) -> House {
+    let mut attempt = 0;
+    let mut result = None;
+    while result.is_none() {
+        result = try_build(n, seed * 101 + attempt * 7, table);
+        attempt = attempt + 1;
+    }
+    result.unwrap()
+}
+
+fn try_build(n: Int, seed: Int, table: Array<Int>) -> Option<House> {
+    let r = rng(seed);
+    let (c, rw) = (cols(), rows());
+    let m = array(c * rw, open());
+    let mut i = 0;
+    while i < c * rw {
+        let (x, y) = (i % c, i / c);
+        if x == 0 || y == 0 || x == c - 1 || y == rw - 1 { array_set(m, i, wall()) }
+        i = i + 1;
+    }
+    let rooms = split(m, r, 1, 1, c - 2, rw - 2, []);
+    // the way in and out: a gap in the left wall, where you start (on the
+    // threshold, where the guards' rounds never come, to watch them from)
+    let door_y = 3 + random(r, rw - 7);
+    array_set(m, door_y * c, outside());
+    array_set(m, (door_y + 1) * c, outside());
+    let start = (tile() / 2, door_y * tile() + tile());
+    let start_tile = door_y * c + 1;
+    let reach = steps_from(m, start_tile);
+    let unreachable = rooms.any(|room| {
+        let (cx, cy) = center(room);
+        array_get(reach, cy * c + cx) >= 9999
+    });
+    if unreachable || rooms.len() < 5 {
+        None
+    } else {
+        // furniture: a block or two in the bigger rooms, kept clear of the
+        // doorways (any that would cut off a part of the room goes again)
+        rooms.each(|room| {
+            let (x, y, w, h) = room;
+            if w * h >= 20 {
+                let mut k = random(r, 3);
+                while k > 0 {
+                    let (fx, fy) = (x + 1 + random(r, (w - 2).max(1)), y + 1 + random(r, (h - 2).max(1)));
+                    let fi = fy * c + fx;
+                    if array_get(m, fi) == open() {
+                        array_set(m, fi, furniture());
+                        let after = steps_from(m, start_tile);
+                        let cut = (0..c * rw).to_list().any(|j| array_get(reach, j) < 9999 && array_get(m, j) == open() && array_get(after, j) >= 9999);
+                        if cut { array_set(m, fi, open()) }
+                    }
+                    k = k - 1;
+                }
+            }
+        });
+        let reach = steps_from(m, start_tile);
+        // lamps: in the middle of about half the rooms (never the one by the
+        // way in: a thief comes in through the dark)
+        let by_door = |room: (Int, Int, Int, Int)| { let (x, y, w, h) = room; x <= 1 && door_y >= y - 1 && door_y <= y + h };
+        let lamps = rooms.filter(|room| !by_door(room) && random(r, 10) < 5).map(|room| {
+            let (x, y, w, h) = room;
+            Lamp { x: (x * 2 + w) * tile() / 2, y: (y * 2 + h) * tile() / 2, radius: w.max(h) * tile() * 3 / 5 + 18, on: true }
+        });
+        // the jewels: in the rooms furthest from the way out, one each
+        let far_rooms = rooms.sort_on(|room| { let (cx, cy) = center(room); -array_get(reach, cy * c + cx) });
+        let count = (3 + n / 2).min(6).min(rooms.len() - 1);
+        let gems = far_rooms.take(count).map(|room| {
+            let (x, y, w, h) = room;
+            let mut spot = center(room);
+            let mut k = 0;
+            while k < 10 {
+                let (gx, gy) = (x + random(r, w), y + random(r, h));
+                if array_get(m, gy * c + gx) == open() { spot = (gx, gy) }
+                k = k + 1;
+            }
+            let (gx, gy) = spot;
+            (gx * tile() + tile() / 2, gy * tile() + tile() / 2)
+        });
+        let coins = (0..12).to_list().map(|_| {
+            let mut spot = (0, 0);
+            let mut k = 0;
+            while k < 20 {
+                let (cx, cy) = (1 + random(r, c - 2), 1 + random(r, rw - 2));
+                if array_get(m, cy * c + cx) == open() && array_get(reach, cy * c + cx) < 9999 { spot = (cx * tile() + tile() / 2, cy * tile() + tile() / 2) }
+                k = k + 1;
+            }
+            spot
+        }).filter(|p| { let (x, _) = p; x > 0 });
+        // the guards: each walks a round of three or four rooms, starting
+        // well away from the way in
+        let guard_count = (1 + n).min(6);
+        let mut guards = [];
+        let mut g = 0;
+        while g < guard_count {
+            let stops = (0..3 + random(r, 2)).to_list().map(|_| center(rooms.drop(random(r, rooms.len())).head().unwrap()));
+            let round = route(m, stops);
+            // (a round that goes nowhere, all its stops in one room, won't do)
+            if array_length(round) > 4 {
+                let first = array_get(round, 0);
+                let (fx, fy) = (first % c, first / c);
+                if array_get(reach, first) > 8 {
+                    guards = Cons(Guard { id: g, x: (fx * tile() + tile() / 2) * 16, y: (fy * tile() + tile() / 2) * 16, facing: random(r, 1024), round: round, next: 1, state: patrolling(), alarm: 0, goal: (0, 0), timer: 0 }, guards);
+                }
+            }
+            g = g + 1;
+        }
+        if guards.len() < guard_count.min(2) {
+            None
+        } else {
+            let picture = paint(m, rooms, r);
+            Some(House { map: m, picture: picture, lamps: lamps, gems: gems, coins: coins, guards: guards, start: start, total: gems.len() })
+        }
+    }
+}
+
+// a round through these stops and back to the first: the tiles along the
+// shortest way between each and the next
+fn route(m: Array<Int>, stops: List<(Int, Int)>) -> Array<Int> {
+    let c = cols();
+    let looped = stops.append(stops.take(1));
+    let mut tiles = [];
+    let mut prev = stops.head().unwrap();
+    looped.drop(1).each(|stop| {
+        let (sx, sy) = stop;
+        let d = steps_from(m, sy * c + sx);
+        let (px, py) = prev;
+        let mut at = py * c + px;
+        let mut k = 0;
+        while array_get(d, at) > 0 && array_get(d, at) < 9999 && k < 200 {
+            tiles = Cons(at, tiles);
+            let (x, y) = (at % c, at / c);
+            let mut best = at;
+            [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)].each(|p| {
+                let (nx, ny) = p;
+                if tile_at(m, nx, ny) == open() && array_get(d, ny * c + nx) < array_get(d, best) { best = ny * c + nx }
+            });
+            at = best;
+            k = k + 1;
+        }
+        prev = stop;
+    });
+    Array::from_list(tiles.reverse(), 0)
+}
+
+// ---- the house's colors
+
+fn shade(color: Int, k: Int) -> Int {
+    let ch = |s: Int| ((color >> s & 255) * k / 256).clamp(0, 255);
+    ch(16) * 65536 + ch(8) * 256 + ch(0)
+}
+
+// every pixel of the house as it looks in full light: wooden boards,
+// carpets with borders, stone tiles; walls with a lit top edge and a dark
+// bottom one; crates and cabinets; the garden outside the way out
+fn paint(m: Array<Int>, rooms: List<(Int, Int, Int, Int)>, r: Array<Int>) -> Array<Int> {
+    let (w, t) = (width(), tile());
+    let pic = array(w * floor_h(), 0);
+    let style = array(cols() * rows(), 0);
+    let tints = array(cols() * rows(), 0);
+    rooms.each(|room| {
+        let (x, y, rw, rh) = room;
+        let s = random(r, 4);
+        let carpet = [rgb(130, 40, 45), rgb(40, 70, 120), rgb(50, 100, 70), rgb(110, 80, 40)].drop(random(r, 4)).head().unwrap();
+        let mut j = 0;
+        while j < rw * rh {
+            let i = (y + j / rw) * cols() + x + j % rw;
+            array_set(style, i, s);
+            array_set(tints, i, carpet);
+            j = j + 1;
+        }
+    });
+    let mut p = 0;
+    while p < w * floor_h() {
+        let (px, py) = (p % w, p / w);
+        let (tx, ty) = (px / t, py / t);
+        let ti = ty * cols() + tx;
+        let k = tile_at(m, tx, ty);
+        let noise = random(r, 24);
+        let color = if k == wall() {
+            let (lx, ly) = (px % t, py % t);
+            if ly == 0 { rgb(120, 110, 100) } else if ly == t - 1 { rgb(30, 26, 24) } else { shade(rgb(80, 72, 66), 200 + noise + if (lx + ly) % 5 == 0 { -30 } else { 0 }) }
+        } else if k == furniture() {
+            let (lx, ly) = (px % t, py % t);
+            if lx == 0 || ly == 0 || lx == t - 1 || ly == t - 1 { rgb(70, 45, 25) } else if lx == ly || lx == t - 1 - ly { rgb(120, 85, 50) } else { shade(rgb(150, 105, 60), 220 + noise) }
+        } else if k == outside() {
+            shade(rgb(40, 80, 45), 180 + noise * 2)
+        } else {
+            let s = array_get(style, ti);
+            if s == 0 {
+                // boards: four pixels wide, their ends staggered
+                let board = (py + tx * 3) / 4;
+                let seam = (py + tx * 3) % 4 == 0 || (px + board * 7) % 23 == 0;
+                if seam { rgb(70, 45, 28) } else { shade(rgb(150, 100, 60), 190 + (board * 37) % 40 + noise) }
+            } else if s == 1 {
+                let edge = tile_at(m, (px - 4) / t, py / t) != open() || tile_at(m, (px + 4) / t, py / t) != open() || tile_at(m, px / t, (py - 4) / t) != open() || tile_at(m, px / t, (py + 4) / t) != open();
+                let carpet = array_get(tints, ti);
+                if edge { shade(carpet, 150) } else if (px + py) % 6 == 0 { shade(carpet, 300) } else { shade(carpet, 230 + noise) }
+            } else {
+                let check = (px / 5 + py / 5) % 2 == 0;
+                if px % 5 == 0 || py % 5 == 0 { rgb(70, 70, 75) } else { shade(if check { rgb(170, 170, 165) } else { rgb(120, 120, 125) }, 210 + noise) }
+            }
+        };
+        array_set(pic, p, color);
+        p = p + 1;
+    }
+    pic
+}
+
+// ---- the light
+
+// light, a pixel each: its red, green and blue (each 0 to 256, and more
+// where lights overlap) packed in one number, 11 bits each
+struct Light { packed: Array<Int> }
+
+fn new_light() -> Light { Light { packed: array(width() * floor_h(), 0) } }
+
+fn clear_light(l: Light) { l.packed.fill(0) }
+
+fn pack(r: Int, g: Int, b: Int) -> Int { (r << 22) + (g << 11) + b }
+
+// where rays from (cx, cy), out to `radius`, across `spread` (1024ths of a
+// turn) from angle `from`, stop: at what's solid (a few pixels into it, so
+// the walls' faces are lit), or at the radius. Their ends, x then y.
+fn ray_ends(m: Array<Int>, cx: Int, cy: Int, radius: Int, from: Int, spread: Int, rays: Int, table: Array<Int>) -> Array<Int> {
+    let ends = array((rays + 1) * 2, 0);
+    let mut i = 0;
+    while i <= rays {
+        let a = (from + spread * i / rays) & 1023;
+        let (dx, dy) = (cos(table, a), sin(table, a));
+        let mut d = 0;
+        let mut hit = false;
+        while d < radius && !hit {
+            d = d + 2;
+            if solid(m, cx + (dx * d >> 16), cy + (dy * d >> 16)) { hit = true }
+        }
+        let reach = if hit { d + 2 } else { d };
+        array_set(ends, i * 2, cx + (dx * reach >> 16));
+        array_set(ends, i * 2 + 1, cy + (dy * reach >> 16));
+        i = i + 1;
+    }
+    ends
+}
+
+// each row of a triangle, top to bottom, clipped to the house: the span
+// from its left edge up to (not including) its right, so the triangles of a
+// fan meet without overlapping
+fn rows_of(x0: Int, y0: Int, x1: Int, y1: Int, x2: Int, y2: Int, f: fn(Int, Int, Int) -> ()) {
+    // (sorted by y: a at the top, c at the bottom)
+    let (ax, ay, bx, by, cx, cy) = if y0 <= y1 && y0 <= y2 { if y1 <= y2 { (x0, y0, x1, y1, x2, y2) } else { (x0, y0, x2, y2, x1, y1) } }
+        else if y1 <= y2 { if y0 <= y2 { (x1, y1, x0, y0, x2, y2) } else { (x1, y1, x2, y2, x0, y0) } }
+        else if y0 <= y1 { (x2, y2, x0, y0, x1, y1) } else { (x2, y2, x1, y1, x0, y0) };
+    let mut y = ay.max(0);
+    while y < cy.min(floor_h()) {
+        // where the long edge (a to c) and the short one (a to b, or b to c) cross this row
+        let long = ax + (cx - ax) * (y - ay) / (cy - ay).max(1);
+        let short = if y < by { ax + (bx - ax) * (y - ay) / (by - ay).max(1) } else { bx + (cx - bx) * (y - by) / (cy - by).max(1) };
+        let (left, right) = (long.min(short).max(0), long.max(short).min(width()));
+        if left < right { f(y, left, right) }
+        y = y + 1;
+    }
+}
+
+// how strong light from a source is d2 (squared) from it, out of 256, with
+// r2 its reach squared: fading as the square of the distance, to nothing
+fn falloff(d2: Int, r2: Int) -> Int {
+    let k = (r2 - d2) * 256 / r2;
+    k * k >> 8
+}
+
+// light cast from (cx, cy) into the light buffer, in (r, g, b): the fan of
+// triangles between its rays filled
+fn cast(l: Light, m: Array<Int>, cx: Int, cy: Int, radius: Int, from: Int, spread: Int, rays: Int, r: Int, g: Int, b: Int, table: Array<Int>) {
+    let ends = ray_ends(m, cx, cy, radius, from, spread, rays, table);
+    let r2 = radius * radius;
+    let w = width();
+    let mut i = 0;
+    while i < rays {
+        rows_of(cx, cy, array_get(ends, i * 2), array_get(ends, i * 2 + 1), array_get(ends, i * 2 + 2), array_get(ends, i * 2 + 3), |y, left, right| {
+            let dy = y - cy;
+            let mut x = left;
+            while x < right {
+                let d2 = (x - cx) * (x - cx) + dy * dy;
+                if d2 < r2 {
+                    let k = falloff(d2, r2);
+                    let p = y * w + x;
+                    array_set(l.packed, p, array_get(l.packed, p) + pack(r * k >> 8, g * k >> 8, b * k >> 8));
+                }
+                x = x + 1;
+            }
+        });
+        i = i + 1;
+    }
+}
+
+// a lantern's light, straight onto the picture: each pixel it reaches made
+// brighter by the house's own color there times the light
+fn cast_onto(c: Canvas, pic: Array<Int>, m: Array<Int>, cx: Int, cy: Int, radius: Int, from: Int, spread: Int, rays: Int, r: Int, g: Int, b: Int, table: Array<Int>) {
+    let ends = ray_ends(m, cx, cy, radius, from, spread, rays, table);
+    let r2 = radius * radius;
+    let w = width();
+    let mut i = 0;
+    while i < rays {
+        rows_of(cx, cy, array_get(ends, i * 2), array_get(ends, i * 2 + 1), array_get(ends, i * 2 + 2), array_get(ends, i * 2 + 3), |y, left, right| {
+            let dy = y - cy;
+            let mut x = left;
+            while x < right {
+                let d2 = (x - cx) * (x - cx) + dy * dy;
+                if d2 < r2 {
+                    let k = falloff(d2, r2);
+                    let p = y * w + x;
+                    let base = array_get(pic, p);
+                    let old = array_get(c.pixels, p);
+                    let nr = ((old >> 16 & 255) + ((base >> 16 & 255) * r * k >> 16)).min(255);
+                    let ng = ((old >> 8 & 255) + ((base >> 8 & 255) * g * k >> 16)).min(255);
+                    let nb = ((old & 255) + ((base & 255) * b * k >> 16)).min(255);
+                    array_set(c.pixels, p, (nr << 16) + (ng << 8) + nb);
+                }
+                x = x + 1;
+            }
+        });
+        i = i + 1;
+    }
+}
+
+// a small glow onto the picture, with no shadows (a jewel's)
+fn glow(c: Canvas, cx: Int, cy: Int, radius: Int, r: Int, g: Int, b: Int) {
+    let w = width();
+    let r2 = radius * radius;
+    let mut y = (cy - radius).max(0);
+    while y < (cy + radius).min(floor_h()) {
+        let mut x = (cx - radius).max(0);
+        while x < (cx + radius).min(w) {
+            let d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            if d2 < r2 {
+                let k = (r2 - d2) * 256 / r2;
+                let p = y * w + x;
+                let old = array_get(c.pixels, p);
+                let nr = ((old >> 16 & 255) + (r * k >> 8)).min(255);
+                let ng = ((old >> 8 & 255) + (g * k >> 8)).min(255);
+                let nb = ((old & 255) + (b * k >> 8)).min(255);
+                array_set(c.pixels, p, (nr << 16) + (ng << 8) + nb);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// the lamps' light: cast again whenever one goes out or is lit
+fn lamplight(l: Light, h: House, table: Array<Int>) {
+    clear_light(l);
+    h.lamps.each(|lamp| if lamp.on { cast(l, h.map, lamp.x, lamp.y, lamp.radius, 0, 1024, 180, 230, 165, 95, table) });
+}
+
+// how lit a pixel is by the lamps (0 to 255)
+fn lit(l: Light, x: Int, y: Int) -> Int {
+    if x < 0 || y < 0 || x >= width() || y >= floor_h() { 0 } else {
+        let v = array_get(l.packed, y * width() + x);
+        (((v >> 22) + (v >> 11 & 2047) + (v & 2047)) / 3).min(255)
+    }
+}
+
+fn lantern_reach() -> Int { 100 }
+
+// how lit a point is by a guard's lantern (0 to 255): in its beam, with
+// nothing in between
+fn lantern_on(g: Guard, m: Array<Int>, x: Int, y: Int, table: Array<Int>) -> Int {
+    let (gx, gy) = (g.x / 16, g.y / 16);
+    let (dx, dy) = (x - gx, y - gy);
+    let d2 = dx * dx + dy * dy;
+    let r2 = lantern_reach() * lantern_reach();
+    let d = isqrt(d2).max(1);
+    let facing = (dx * cos(table, g.facing) + dy * sin(table, g.facing)) / d >> 8;
+    if d2 < r2 && facing > 200 && clear_between(m, gx, gy, x, y) { falloff(d2, r2) } else { 0 }
+}
+
+// the house in the lamps' light: each color times its light, plus a little
+// moonlight (done again whenever the lamps change)
+fn bake(pic: Array<Int>, l: Light, out: Array<Int>) {
+    let n = width() * floor_h();
+    let mut p = 0;
+    while p < n {
+        let base = array_get(pic, p);
+        let v = array_get(l.packed, p);
+        let r = ((base >> 16 & 255) * ((v >> 22) + 18) >> 8).min(255);
+        let g = ((base >> 8 & 255) * ((v >> 11 & 2047) + 20) >> 8).min(255);
+        let b = ((base & 255) * ((v & 2047) + 34) >> 8).min(255);
+        array_set(out, p, (r << 16) + (g << 8) + b);
+        p = p + 1;
+    }
+}
+
+// ---- seeing and being seen
+
+fn isqrt(n: Int) -> Int {
+    if n < 2 { n.max(0) } else {
+        let mut x = 1;
+        let mut m = n;
+        while m > 0 { m = m >> 2; x = x << 1; }
+        let mut y = (x + n / x) / 2;
+        while y < x { x = y; y = (x + n / x) / 2; }
+        x
+    }
+}
+
+// whether nothing solid is between two points (pixels)
+fn clear_between(m: Array<Int>, x0: Int, y0: Int, x1: Int, y1: Int) -> Bool {
+    let steps = ((x1 - x0).abs().max((y1 - y0).abs()) / 3).max(1);
+    let mut ok = true;
+    let mut k = 1;
+    while k < steps && ok {
+        if solid(m, x0 + (x1 - x0) * k / steps, y0 + (y1 - y0) * k / steps) { ok = false }
+        k = k + 1;
+    }
+    ok
+}
+
+// the angle (1024ths) nearest to the direction (dx, dy)
+fn angle_to(dx: Int, dy: Int, table: Array<Int>) -> Int {
+    let mut best = 0;
+    let mut best_dot = -(1 << 62);
+    let mut a = 0;
+    while a < 1024 {
+        let d = dx * cos(table, a) + dy * sin(table, a);
+        if d > best_dot { best_dot = d; best = a }
+        a = a + 8;
+    }
+    best
+}
+
+// how much a guard sees of a thief at (px, py), this frame: in his
+// lantern's beam, a lot; in light where he's looking, by how lit; right by
+// him, some; behind walls and furniture, or in the dark out of his beam,
+// nothing
+fn sighting(g: Guard, m: Array<Int>, px: Int, py: Int, light: Int, table: Array<Int>) -> Int {
+    let (gx, gy) = (g.x / 16, g.y / 16);
+    let (dx, dy) = (px - gx, py - gy);
+    let d = isqrt(dx * dx + dy * dy).max(1);
+    // (the cosine of the angle between where he faces and the thief, in 256ths)
+    let facing = (dx * cos(table, g.facing) + dy * sin(table, g.facing)) / d >> 8;
+    if d > 110 || !clear_between(m, gx, gy, px, py) { 0 }
+    else if d < 100 && facing > 210 { 5 }
+    else if d < 80 && facing > 110 && light > 40 { light / 32 }
+    else if d < 12 { 2 }
+    else { 0 }
+}
+
+// ---- the guards
+
+fn speed_of(state: Int) -> Int {
+    if state == patrolling() { 7 } else if state == wary() { 10 } else if state == chasing() { 20 } else { 10 }
+}
+
+// a guard's frame: where he goes (his round, or where he's looking, or after
+// the thief), how he turns, and how alarmed he grows
+fn think(g: Guard, m: Array<Int>, px: Int, py: Int, light: Int, noise: Int, table: Array<Int>, frame: Int) -> Guard {
+    let seen = sighting(g, m, px, py, light, table);
+    let (gx, gy) = (g.x / 16, g.y / 16);
+    let heard = noise > 0 && (px - gx) * (px - gx) + (py - gy) * (py - gy) < noise * noise;
+    let alarm = if seen > 0 { (g.alarm + seen).min(100) } else if heard { (g.alarm + 2).max(45).min(100) } else { (g.alarm - 1).max(0) };
+    // what he's doing now
+    let (state, goal, timer) = if alarm >= 100 && seen > 0 { (chasing(), (px, py), 180) }
+        else if g.state == chasing() { if g.timer > 0 { (chasing(), g.goal, g.timer - 1) } else { (searching(), g.goal, 240) } }
+        else if (seen > 0 || heard) && alarm >= 40 { (wary(), (px, py), 200) }
+        else if g.state == wary() || g.state == searching() { if g.timer > 0 { (g.state, g.goal, g.timer - 1) } else { (patrolling(), g.goal, 0) } }
+        else { (patrolling(), g.goal, 0) };
+    // where to: the next tile of his round, or the way to his goal
+    let (tx, ty) = if state == patrolling() {
+        let t = array_get(g.round, g.next);
+        ((t % cols()) * tile() + tile() / 2, (t / cols()) * tile() + tile() / 2)
+    } else {
+        let (ax, ay) = goal;
+        next_step(m, gx, gy, ax, ay)
+    };
+    let (dx, dy) = (tx - gx, ty - gy);
+    let d = isqrt(dx * dx + dy * dy);
+    let arrived = d < 2;
+    let next = if state == patrolling() && arrived { (g.next + 1) % array_length(g.round) } else { g.next };
+    // (searching: standing where he lost you, looking round)
+    let standing = state == searching() && arrived;
+    let sp = speed_of(state);
+    let (nx, ny) = if arrived || standing { (g.x, g.y) } else { (g.x + dx * sp / d.max(1), g.y + dy * sp / d.max(1)) };
+    let want = if standing { (g.facing + 6) & 1023 } else if state == chasing() || state == wary() && seen > 0 { angle_to(px - gx, py - gy, table) } else if arrived { g.facing } else { angle_to(dx, dy, table) };
+    // (turning toward it; on his round, his lantern sweeping a little)
+    let turn = ((want - g.facing + 512) & 1023) - 512;
+    let sweep = if state == patrolling() { sin(table, frame * 6 + g.id * 200) * 40 >> 16 } else { 0 };
+    let facing = (g.facing + turn.clamp(-14, 14) + sweep / 8) & 1023;
+    Guard { id: g.id, x: nx, y: ny, facing: facing, round: g.round, next: next, state: state, alarm: alarm, goal: goal, timer: timer }
+}
+
+// the middle of the next tile on the shortest way from (x, y) to (tx, ty)
+// (pixels), or (tx, ty) itself, once in its tile
+fn next_step(m: Array<Int>, x: Int, y: Int, tx: Int, ty: Int) -> (Int, Int) {
+    let (cx, cy) = (x / tile(), y / tile());
+    let (gx, gy) = (tx / tile(), ty / tile());
+    if cx == gx && cy == gy || tile_at(m, gx, gy) != open() { (tx, ty) } else {
+        let d = steps_from(m, gy * cols() + gx);
+        let mut best = (cx, cy);
+        let mut best_d = array_get(d, cy * cols() + cx);
+        [(cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)].each(|p| {
+            let (nx, ny) = p;
+            if tile_at(m, nx, ny) == open() && array_get(d, ny * cols() + nx) < best_d {
+                best_d = array_get(d, ny * cols() + nx);
+                best = p;
+            }
+        });
+        let (bx, by) = best;
+        (bx * tile() + tile() / 2, by * tile() + tile() / 2)
+    }
+}
+
+// ---- drawing what moves
+
+fn disc(c: Canvas, x: Int, y: Int, r: Int, color: Int) {
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            if dx * dx + dy * dy <= r * r + r {
+                let (px, py) = (x + dx, y + dy);
+                if px >= 0 && py >= 0 && px < width() && py < floor_h() { array_set(c.pixels, py * width() + px, color) }
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+fn draw_guard(c: Canvas, g: Guard, l: Light, table: Array<Int>, frame: Int) {
+    let (x, y) = (g.x / 16, g.y / 16);
+    let k = 90 + lit(l, x, y);
+    disc(c, x, y, 4, shade(rgb(150, 60, 50), k));
+    disc(c, x, y, 2, shade(rgb(60, 40, 35), k));
+    // his lantern, at his front
+    let (fx, fy) = (x + (cos(table, g.facing) * 5 >> 16), y + (sin(table, g.facing) * 5 >> 16));
+    disc(c, fx, fy, 1, rgb(255, 245, 200));
+    // what he's thinking, over his head
+    if g.state == chasing() {
+        text(c, "!", x - 1, y - 12, 1, rgb(255, 60, 50));
+    } else if g.state == wary() || g.state == searching() {
+        text(c, "?", x - 1, y - 12, 1, rgb(255, 210, 60));
+    }
+    if g.alarm > 0 && g.state != chasing() {
+        fill_rect(c, x - 5, y - 6, 10, 1, rgb(40, 30, 30));
+        fill_rect(c, x - 5, y - 6, g.alarm / 10, 1, if g.alarm >= 40 { rgb(255, 160, 40) } else { rgb(200, 200, 200) });
+    }
+}
+
+fn draw_thief(c: Canvas, x: Int, y: Int, light: Int, facing: Int, table: Array<Int>) {
+    // (a dark figure, picked out only as much as the light falls on it)
+    let k = 60 + light;
+    disc(c, x, y, 4, shade(rgb(70, 80, 100), k));
+    disc(c, x, y, 2, shade(rgb(30, 35, 45), k));
+    let (fx, fy) = (x + (cos(table, facing) * 3 >> 16), y + (sin(table, facing) * 3 >> 16));
+    disc(c, fx, fy, 1, shade(rgb(200, 190, 170), k));
+}
+
+fn draw_gem(c: Canvas, x: Int, y: Int, frame: Int, table: Array<Int>) {
+    let pulse = 180 + (sin(table, frame * 20 + x * 7) * 70 >> 16);
+    let color = shade(rgb(120, 255, 210), pulse);
+    let mut d = 0;
+    while d <= 3 {
+        fill_rect(c, x - (3 - d), y - d, (3 - d) * 2 + 1, 1, color);
+        fill_rect(c, x - (3 - d), y + d, (3 - d) * 2 + 1, 1, color);
+        d = d + 1;
+    }
+    fill_rect(c, x - 1, y - 1, 1, 1, rgb(255, 255, 255));
+    if frame % 40 < 4 { fill_rect(c, x + 2, y - 4, 1, 1, rgb(255, 255, 255)) }
+}
+
+// ---- the panel
+
+fn panel(c: Canvas, level: Int, got: Int, total: Int, lives: Int, score: Int, light: Int, spotted: Bool, frame: Int) {
+    let top = floor_h();
+    fill_rect(c, 0, top, width(), height() - top, rgb(14, 13, 18));
+    let ink = rgb(200, 195, 210);
+    text(c, "LEVEL " ++ level.show(), 6, top + 7, 1, ink);
+    text(c, "JEWELS " ++ got.show() ++ "/" ++ total.show(), 52, top + 7, 1, if got == total { rgb(120, 255, 200) } else { ink });
+    text(c, "LIVES " ++ lives.show(), 114, top + 7, 1, ink);
+    text(c, "SCORE " ++ score.show(), 156, top + 7, 1, ink);
+    // the light gem: dark when you're hidden, bright when you're lit
+    let gx = 270;
+    let k = light.clamp(10, 255);
+    let color = shade(rgb(255, 220, 140), k);
+    let mut d = 0;
+    while d <= 5 {
+        fill_rect(c, gx - (5 - d), top + 10 - d, (5 - d) * 2 + 1, 1, color);
+        fill_rect(c, gx - (5 - d), top + 10 + d, (5 - d) * 2 + 1, 1, color);
+        d = d + 1;
+    }
+    text(c, if light < 40 { "HIDDEN" } else if light < 110 { "DIM" } else { "LIT" }, 280, top + 7, 1, ink);
+    if got == total && frame / 20 % 2 == 0 {
+        text(c, "NOW GET OUT", 210, top + 7, 1, rgb(120, 255, 200));
+    }
+}
+
+fn centered(c: Canvas, s: String, y: Int, size: Int, color: Int) {
+    let x = (width() - text_width(s, size)) / 2;
+    text(c, s, x + 1, y + 1, size, rgb(0, 0, 0));
+    text(c, s, x, y, size, color);
+}
+
+// ---- the game
+
+enum Phase { Title, Sneaking, Caught(Int), Escaped(Int), Over }
+
+// the thief moved by (dx, dy) (16ths of a pixel), one way at a time, stopped
+// by what's solid (it's a circle of radius 3)
+fn slide(m: Array<Int>, x: Int, y: Int, dx: Int, dy: Int) -> (Int, Int) {
+    let free = |ax: Int, ay: Int| {
+        let (px, py) = (ax / 16, ay / 16);
+        px >= 3 && !solid(m, px - 3, py - 3) && !solid(m, px + 3, py - 3) && !solid(m, px - 3, py + 3) && !solid(m, px + 3, py + 3)
+    };
+    let nx = if free(x + dx, y) { x + dx } else { x };
+    let ny = if free(nx, y + dy) { y + dy } else { y };
+    (nx, ny)
+}
+
+fn main() {
+    if !screen_open(width(), height(), 3, "umbra") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let table = sines();
+    let dice = rng(screen_ticks() + 11);
+    let lamps_light = new_light();
+    let baked = array(width() * floor_h(), 0);
+    let mut seed = random(dice, 100000);
+    let mut level = 1;
+    let mut house = build(level, seed, table);
+    lamplight(lamps_light, house, table);
+    bake(house.picture, lamps_light, baked);
+    let (sx0, sy0) = house.start;
+    let mut tx = sx0 * 16;
+    let mut ty = sy0 * 16;
+    let mut facing = 0;
+    let mut got = 0;
+    let mut lives = 3;
+    let mut score = 0;
+    let mut spotted = false;
+    let mut phase = Title;
+    let mut frame = 0;
+    let mut beep = 0;
+    let mut rings = [];
+    let mut message = "";
+    let mut message_time = 0;
+    let mut here_light = 0;
+    loop {
+        let (px, py) = (tx / 16, ty / 16);
+        let mut noise = 0;
+        match phase {
+            Title => {
+                if key_pressed(key_space()) {
+                    level = 1;
+                    lives = 3;
+                    score = 0;
+                    seed = random(dice, 100000);
+                    house = build(level, seed, table);
+                    lamplight(lamps_light, house, table);
+                    bake(house.picture, lamps_light, baked);
+                    let (sx, sy) = house.start;
+                    tx = sx * 16;
+                    ty = sy * 16;
+                    got = 0;
+                    spotted = false;
+                    message = "STEAL THE JEWELS. STAY IN THE SHADOWS.";
+                    message_time = 200;
+                    phase = Sneaking;
+                }
+            }
+            Sneaking => {
+                let run = key_down(key("x"));
+                let sp = if run { 24 } else { 12 };
+                let mx = (if key_down(key_right()) { 1 } else { 0 }) - (if key_down(key_left()) { 1 } else { 0 });
+                let my = (if key_down(key_down_arrow()) { 1 } else { 0 }) - (if key_down(key_up()) { 1 } else { 0 });
+                if mx != 0 || my != 0 {
+                    let (nx, ny) = slide(house.map, tx, ty, mx * sp * (if my != 0 { 181 } else { 256 }) / 256, my * sp * (if mx != 0 { 181 } else { 256 }) / 256);
+                    tx = nx;
+                    ty = ny;
+                    facing = angle_to(mx, my, table);
+                    if run {
+                        noise = 70;
+                        if frame % 12 == 0 { rings = Cons((tx / 16, ty / 16, 0), rings) }
+                    }
+                }
+                let (px, py) = (tx / 16, ty / 16);
+                // jewels and coins underfoot
+                let (taken, left) = house.gems.partition(|g| { let (gx, gy) = g; (gx - px).abs() < 6 && (gy - py).abs() < 6 });
+                let (coins, coins_left) = house.coins.partition(|g| { let (gx, gy) = g; (gx - px).abs() < 5 && (gy - py).abs() < 5 });
+                if !taken.is_empty() || !coins.is_empty() {
+                    got = got + taken.len();
+                    score = score + 250 * taken.len() + 20 * coins.len();
+                    beep = if taken.is_empty() { 2 } else { 6 };
+                    if !taken.is_empty() {
+                        message = if got == house.total { "THAT'S ALL OF THEM. NOW BACK THE WAY YOU CAME." } else { "A JEWEL!" };
+                        message_time = 120;
+                    }
+                    house = House { map: house.map, picture: house.picture, lamps: house.lamps, gems: left, coins: coins_left, guards: house.guards, start: house.start, total: house.total };
+                }
+                // snuffing a lamp
+                if key_pressed(key("e")) {
+                    let near = house.lamps.any(|lp| lp.on && (lp.x - px).abs() < 14 && (lp.y - py).abs() < 14);
+                    if near {
+                        let lamps = house.lamps.map(|lp| if lp.on && (lp.x - px).abs() < 14 && (lp.y - py).abs() < 14 { Lamp { x: lp.x, y: lp.y, radius: lp.radius, on: false } } else { lp });
+                        house = House { map: house.map, picture: house.picture, lamps: lamps, gems: house.gems, coins: house.coins, guards: house.guards, start: house.start, total: house.total };
+                        lamplight(lamps_light, house, table);
+                        bake(house.picture, lamps_light, baked);
+                        message = "YOU SNUFF OUT THE LAMP";
+                        message_time = 90;
+                    }
+                }
+                // the guards: each sees, hears, decides and moves; one who
+                // finds a lamp out lights it, and wonders
+                let mut relit = false;
+                let guards = house.guards.map(|g| {
+                    let g2 = think(g, house.map, px, py, here_light, noise, table, frame);
+                    let (gx, gy) = (g2.x / 16, g2.y / 16);
+                    let dark_lamp = house.lamps.any(|lp| !lp.on && (lp.x - gx).abs() < 12 && (lp.y - gy).abs() < 12);
+                    if dark_lamp && g2.state != chasing() {
+                        relit = true;
+                        Guard { id: g2.id, x: g2.x, y: g2.y, facing: g2.facing, round: g2.round, next: g2.next, state: wary(), alarm: g2.alarm.max(45), goal: (gx, gy), timer: 150 }
+                    } else { g2 }
+                });
+                let lamps = if relit {
+                    house.lamps.map(|lp| if !lp.on && guards.any(|g| (lp.x - g.x / 16).abs() < 12 && (lp.y - g.y / 16).abs() < 12) { Lamp { x: lp.x, y: lp.y, radius: lp.radius, on: true } } else { lp })
+                } else { house.lamps };
+                house = House { map: house.map, picture: house.picture, lamps: lamps, gems: house.gems, coins: house.coins, guards: guards, start: house.start, total: house.total };
+                if relit {
+                    lamplight(lamps_light, house, table);
+                    bake(house.picture, lamps_light, baked);
+                    message = "A GUARD RELIGHTS THE LAMP. HE LOOKS ROUND.";
+                    message_time = 120;
+                }
+                if guards.any(|g| g.state == chasing()) {
+                    if !spotted { beep = 10 }
+                    spotted = true;
+                }
+                // caught: a guard upon you
+                if guards.any(|g| (g.x / 16 - px).abs() < 7 && (g.y / 16 - py).abs() < 7) {
+                    lives = lives - 1;
+                    beep = 30;
+                    phase = Caught(150);
+                } else if got == house.total && px < tile() / 2 + 2 {
+                    // out the way in, with everything
+                    score = score + 500 + if spotted { 0 } else { 1000 };
+                    beep = 20;
+                    phase = Escaped(180);
+                }
+            }
+            Caught(t) => {
+                if t > 0 { phase = Caught(t - 1) } else if lives > 0 {
+                    // the house as it was, and you back at the way in
+                    house = build(level, seed, table);
+                    lamplight(lamps_light, house, table);
+                    bake(house.picture, lamps_light, baked);
+                    let (sx, sy) = house.start;
+                    tx = sx * 16;
+                    ty = sy * 16;
+                    got = 0;
+                    spotted = false;
+                    phase = Sneaking;
+                } else {
+                    phase = Over;
+                }
+            }
+            Escaped(t) => {
+                if t > 0 { phase = Escaped(t - 1) } else {
+                    level = level + 1;
+                    seed = random(dice, 100000);
+                    house = build(level, seed, table);
+                    lamplight(lamps_light, house, table);
+                    bake(house.picture, lamps_light, baked);
+                    let (sx, sy) = house.start;
+                    tx = sx * 16;
+                    ty = sy * 16;
+                    got = 0;
+                    spotted = false;
+                    message = "LEVEL " ++ level.show() ++ ": A BIGGER HOUSE, MORE GUARDS";
+                    message_time = 160;
+                    phase = Sneaking;
+                }
+            }
+            Over => {
+                if key_pressed(key_space()) { phase = Title }
+            }
+        }
+        beep = (beep - 1).max(0);
+        screen_beep(beep > 0);
+        message_time = (message_time - 1).max(0);
+        rings = rings.filter(|rg| { let (_, _, age) = rg; age < 20 }).map(|rg| { let (x, y, age) = rg; (x, y, age + 1) });
+
+        // the picture: the house in the lamps' light, then the lanterns'
+        // beams and the jewels' glow on it
+        let mut i = 0;
+        while i < width() * floor_h() {
+            array_set(c.pixels, i, array_get(baked, i));
+            i = i + 1;
+        }
+        house.guards.each(|g| cast_onto(c, house.picture, house.map, g.x / 16, g.y / 16, lantern_reach(), (g.facing - 70) & 1023, 140, 30, 210, 225, 255, table));
+        house.gems.each(|gm| { let (gx, gy) = gm; glow(c, gx, gy, 14, 30, 90, 75) });
+        let (px, py) = (tx / 16, ty / 16);
+        here_light = (lit(lamps_light, px, py) + house.guards.fold(0, |s, g| s + lantern_on(g, house.map, px, py, table))).min(255);
+        // what's in the house
+        house.lamps.each(|lp| disc(c, lp.x, lp.y, 1, if lp.on { rgb(255, 240, 190) } else { rgb(70, 60, 50) }));
+        house.coins.each(|cn| { let (x, y) = cn; disc(c, x, y, 1, shade(rgb(250, 210, 80), 120 + lit(lamps_light, x, y))) });
+        house.gems.each(|gm| { let (x, y) = gm; draw_gem(c, x, y, frame, table) });
+        rings.each(|rg| {
+            let (x, y, age) = rg;
+            let r = age * 3;
+            let k = 255 - age * 12;
+            let mut a = 0;
+            while a < 1024 {
+                let (rx, ry) = (x + (cos(table, a) * r >> 16), y + (sin(table, a) * r >> 16));
+                if rx >= 0 && ry >= 0 && rx < width() && ry < floor_h() { array_set(c.pixels, ry * width() + rx, shade(rgb(200, 200, 220), k)) }
+                a = a + 32;
+            }
+        });
+        house.guards.each(|g| draw_guard(c, g, lamps_light, table, frame));
+        match phase {
+            Title => {}
+            _ => draw_thief(c, px, py, here_light, facing, table),
+        }
+        panel(c, level, got, house.total, lives, score, here_light, spotted, frame);
+        if message_time > 0 { centered(c, message, 4, 1, rgb(230, 225, 240)) }
+        match phase {
+            Title => {
+                centered(c, "UMBRA", 40, 6, rgb(240, 220, 180));
+                centered(c, "STEAL THE JEWELS. STAY IN THE SHADOWS.", 90, 1, rgb(220, 215, 230));
+                centered(c, "ARROWS MOVE   HOLD X TO RUN (LOUD)   E SNUFFS A LAMP", 112, 1, rgb(190, 180, 150));
+                centered(c, "LIGHT GIVES YOU AWAY. A LANTERN'S BEAM, AT ONCE.", 122, 1, rgb(190, 180, 150));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 146, 2, rgb(255, 255, 255)) }
+            }
+            Caught(_) => centered(c, if lives > 0 { "CAUGHT!" } else { "CAUGHT FOR GOOD" }, 70, 3, rgb(255, 80, 60)),
+            Escaped(_) => {
+                centered(c, "ESCAPED!", 60, 3, rgb(120, 255, 200));
+                if !spotted { centered(c, "NEVER SEEN: A GHOST. +1000", 90, 1, rgb(220, 255, 240)) }
+            }
+            Over => {
+                centered(c, "GAME OVER", 60, 3, rgb(255, 80, 60));
+                centered(c, "SCORE " ++ score.show() ++ "   LEVEL " ++ level.show(), 94, 1, rgb(230, 225, 240));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 140, 2, rgb(255, 255, 255)) }
+            }
+            _ => {}
+        }
+        frame = frame + 1;
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}

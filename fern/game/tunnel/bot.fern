@@ -1,0 +1,167 @@
+// The autopilot: digs for the colony. It plays the title screen's ant
+// farm, and the tests that play weeks on end to see how the pressure
+// builds.
+//
+// Every second or so it looks for food the ants can't get to yet, worst
+// spoiling first, and digs the cheapest tunnel there from anywhere
+// already dug: a flood outward from every tunnel cell through diggable
+// soil, a cell costing its digging, until it reaches the food; then the
+// way back, dug.
+
+use super::world::*;
+use super::colony::*;
+use super::dig::*;
+
+pub struct Bot { cost: Array<Int>, from: Array<Int>, queue: Array<Int>, think: Int, dug: Int }
+
+pub fn bot() -> Bot {
+    let n = gw() * gh();
+    Bot { cost: array(n, 0), from: array(n, -1), queue: array(n * 3, 0), think: 0, dug: 0 }
+}
+
+pub fn play(b: Bot, c: Colony) {
+    b.think = b.think + 1;
+    if b.think >= 50 {
+        b.think = 0;
+        let w = c.w;
+        // the neediest food not yet reached
+        let mut pick = -1;
+        let mut worst = -1;
+        let mut s = 0;
+        while s < max_sources() {
+            if w.src_alive.get(s) && !connected(w, s) {
+                let need = w.src_rot.get(s) * 4 + w.src_pile.get(s) * 60;
+                if need > worst {
+                    worst = need;
+                    pick = s;
+                }
+            }
+            s = s + 1;
+        }
+        if pick >= 0 { dig_to(b, c, pick) } else { join_rooms(b, c) }
+    }
+}
+
+// a chamber not yet joined to the colony gets a tunnel
+fn join_rooms(b: Bot, c: Colony) {
+    let w = c.w;
+    let q = w.to_kind.get(k_queen());
+    let mut k = 0;
+    let mut done = false;
+    while k < w.n_ch && !done {
+        let i = idx(w.ch_x.get(k) + 1, w.ch_y.get(k) + 1);
+        if q.get(i) >= far() && w.ch_kind.get(k) != k_queen() {
+            dig_toward_cell(b, c, w.ch_x.get(k) + 1, w.ch_y.get(k) + 1, false, k);
+            done = true;
+        }
+        k = k + 1;
+    }
+}
+
+// where the bot would put a new chamber of a kind: near the food of that
+// kind (the middle of it), where one fits; its top left, or -1
+pub fn choose_spot(c: Colony, kind: Int, cw: Int) -> Int {
+    let w = c.w;
+    let mut sx = 0;
+    let mut sy = 0;
+    let mut n = 0;
+    let mut s = 0;
+    while s < max_sources() {
+        if w.src_alive.get(s) && (w.src_kind.get(s) == kind || kind == k_sump()) {
+            sx = sx + w.src_x.get(s);
+            sy = sy + w.src_y.get(s).max(surface() + 4);
+            n = n + 1;
+        }
+        s = s + 1;
+    }
+    let cx = if n > 0 { sx / n } else { gw() / 2 };
+    let cy = if n > 0 { sy / n } else { gh() / 2 };
+    let mut best = -1;
+    let mut best_d = far();
+    let mut y = surface() + 3;
+    while y < gh() - 4 {
+        let mut x = 1;
+        while x < gw() - cw - 1 {
+            let d = (x + cw / 2 - cx).abs() + (y - cy).abs() * 2;
+            if d < best_d && room_fits(w, x, y, cw, 3) {
+                best_d = d;
+                best = idx(x, y);
+            }
+            x = x + 2;
+        }
+        y = y + 2;
+    }
+    best
+}
+
+// the cheapest tunnel from what's dug to food s, dug if there are the points
+pub fn dig_to(b: Bot, c: Colony, s: Int) {
+    dig_toward_cell(b, c, c.w.src_x.get(s), c.w.src_y.get(s), c.w.src_buried.get(s), -1)
+}
+
+// the cheapest tunnel from what's dug (but not chamber `own`) to a cell
+// (stopping beside it if `beside`)
+pub fn dig_toward_cell(b: Bot, c: Colony, target_x: Int, target_y: Int, beside: Bool, own: Int) {
+    let w = c.w;
+    let n = gw() * gh();
+    let mut i = 0;
+    let q = b.queue;
+    let mut head = 0;
+    let mut tail = 0;
+    while i < n {
+        b.from.set(i, -1);
+        if walkable(w, i) && (own < 0 || w.room.get(i) != own) && w.to_kind.get(k_queen()).get(i) < far() {
+            b.cost.set(i, 0);
+            q.set(tail, i);
+            tail = tail + 1;
+        } else {
+            b.cost.set(i, far());
+        }
+        i = i + 1;
+    }
+    // (a flood: cells taken in order of what's been spent getting there,
+    // near enough, by keeping the queue in passes)
+    let mut reached = -1;
+    while head < tail && reached < 0 {
+        let cc = q.get(head);
+        head = head + 1;
+        let x = cc % gw();
+        let y = cc / gw();
+        let mut dy = -1;
+        while dy <= 1 {
+            let mut dx = -1;
+            while dx <= 1 {
+                let nx = x + dx;
+                let ny = y + dy;
+                if (dx != 0 || dy != 0) && inside(nx, ny) && ny > surface() {
+                    let j = idx(nx, ny);
+                    let hit = nx == target_x && ny == target_y;
+                    if hit && reached < 0 {
+                        reached = cc;
+                    } else if diggable(w, j) && !(beside && hit) {
+                        let nc = b.cost.get(cc) + dig_cost(w, j);
+                        if nc < b.cost.get(j) && tail < q.len() {
+                            b.cost.set(j, nc);
+                            b.from.set(j, cc);
+                            q.set(tail, j);
+                            tail = tail + 1;
+                        }
+                    }
+                }
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+    }
+    if reached >= 0 && b.cost.get(reached) <= c.dig {
+        let mut at = reached;
+        let mut guard = 0;
+        while at >= 0 && !walkable(w, at) && guard < 2000 {
+            c.dig = c.dig - dig_cost(w, at);
+            set_dug(w, at, true);
+            b.dug = b.dug + 1;
+            at = b.from.get(at);
+            guard = guard + 1;
+        }
+    }
+}

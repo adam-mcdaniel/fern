@@ -1,0 +1,113 @@
+// A sudoku solver, with Choose. It fills the empty cell with the fewest
+// digits left that fit, guessing among them with `choose`, and finishes
+// when no cell is empty. It never checks whether a guess was right: a
+// cell with no digits left makes `choose` pick from nothing, which gives
+// up, and the handler goes back to the last guess and tries the next. So
+// the search reads as if it always guessed right, and the handler is the
+// backtracking: `first_way` stops at the first solution, `all_ways` finds
+// them all.
+
+// A board is 81 cells, a row at a time, 0 for empty. A guess doesn't change
+// a board, it makes a new one: going back to a guess has to find the board
+// as it was then.
+fn solve(board: Array<Int>) -> Array<Int> with {Choose} {
+    match most_constrained(board) {
+        None => board,
+        Some((cell, options)) => {
+            let digit = choose_from(digits(options));
+            let next = board.copy();
+            next.set(cell, digit);
+            solve(next)
+        }
+    }
+}
+
+// the empty cell with the fewest digits that fit, and those digits (bit d
+// for digit d), or None if the board's full
+fn most_constrained(board: Array<Int>) -> Option<(Int, Int)> {
+    // the digits in each row, column and box
+    let rows = Array::new(9, 0);
+    let cols = Array::new(9, 0);
+    let boxes = Array::new(9, 0);
+    let mut i = 0;
+    while i < 81 {
+        let d = board.get(i);
+        if d != 0 {
+            rows.set(i / 9, rows.get(i / 9) | 1 << d);
+            cols.set(i % 9, cols.get(i % 9) | 1 << d);
+            boxes.set(box_of(i), boxes.get(box_of(i)) | 1 << d);
+        }
+        i = i + 1;
+    }
+    let mut best = -1;
+    let mut best_options = 0;
+    let mut fewest = 10;
+    let mut j = 0;
+    while j < 81 && fewest > 0 {
+        if board.get(j) == 0 {
+            let used = rows.get(j / 9) | cols.get(j % 9) | boxes.get(box_of(j));
+            // (bits 1 to 9, less those used)
+            let options = 0x3fe ^ used & 0x3fe;
+            let n = options.count_ones();
+            if n < fewest {
+                best = j;
+                best_options = options;
+                fewest = n;
+            }
+        }
+        j = j + 1;
+    }
+    if best < 0 { None } else { Some((best, best_options)) }
+}
+
+fn box_of(i: Int) -> Int { i / 27 * 3 + i % 9 / 3 }
+
+// the digits whose bits are set
+fn digits(options: Int) -> List<Int> {
+    (1..=9).filter(|d| options >> d & 1 == 1)
+}
+
+// "53..7...." and so on: a digit, or . or 0 for empty
+fn parse(s: String) -> Array<Int> {
+    Array::from_list(s.chars().filter(|c| c.is_digit() || c == 46).map(|c| if c == 46 { 0 } else { c - 48 }), 0)
+}
+
+fn show(board: Array<Int>) {
+    let mut row = 0;
+    while row < 9 {
+        let cells = (0..9).map(|col| board.get(row * 9 + col).show());
+        println(cells.take(3).concat().replace("0", ".") ++ "|" ++ cells.drop(3).take(3).concat().replace("0", ".") ++ "|" ++ cells.drop(6).concat().replace("0", "."));
+        if row == 2 || row == 5 {
+            println("---+---+---");
+        }
+        row = row + 1;
+    }
+}
+
+// (This runs the easy one, on fern's VM. Arto Inkala's, said to be the
+// hardest there is, takes thousands of guesses: too many to interpret
+// quickly, but it's under a second as C, `fern sudoku.fern --c --release`
+// and `cc -O2`:
+// 8..........36......7..9.2...5...7.......457.....1...3...1....68..85...1..9....4..)
+fn main() {
+    let board = parse("..3.2.6..9..3.5..1..18.64....81.29..7.......8..67.82....26.95..8..2.3..9..5.1.3..");
+    //let board = parse("8..........36......7..9.2...5...7.......457.....1...3...1....68..85...1..9....4..");
+    show(board);
+    println("\nsolution:");
+    match first_way(|| solve(board)) {
+        Some(b) => show(b),
+        None => println("no solution"),
+    }
+    // a proper puzzle has just the one
+    println("\nsolutions: " ++ all_ways(|| solve(board)).len().show());
+}
+// expect: 483 921 657
+// expect: 967 345 821
+// expect: 251 876 493
+// expect: 548 132 976
+// expect: 729 564 138
+// expect: 136 798 245
+// expect: 372 689 514
+// expect: 814 253 769
+// expect: 695 417 382
+// expect: solutions: 1

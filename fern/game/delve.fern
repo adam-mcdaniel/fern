@@ -1,0 +1,955 @@
+// DELVE: eight floors down into the dark, to bring back the Ember Crown
+// from the Warden who keeps it. Your torch is all that holds the dark back,
+// and it burns down with every turn: find oil, for when it's out, you can
+// hardly see, and what's in the dark strikes harder.
+//
+// Every step is a turn, and on each the monsters move too: they come at
+// you when they see you, and strike when they're beside you. Walk into one
+// to fight it. Gold, potions, oil, and better blades and armor lie about;
+// what you walk over, you pick up. Kills make you stronger. Find the stairs
+// down (a dark pit in the floor) on each floor.
+//
+// Up and down step forward and back, left and right turn, A and D step
+// aside, space waits a turn, P drinks a potion, escape quits.
+//
+// The view is cast a column at a time: a ray from the eye across the map
+// to the wall it meets, which is drawn as tall as near it is; the floor and
+// ceiling a row at a time; and the monsters and things in front of the
+// walls they're nearer than. All of it lit by the torch, fading to black.
+
+mod screen;
+mod draw;
+mod math;
+
+use screen::*;
+use draw::{Canvas, canvas, show, text, text_width, fill_rect};
+use math::{sines, sin, cos, rng, random};
+
+fn width() -> Int { 320 }
+fn height() -> Int { 200 }
+// the 3D view's height (the panel is below it)
+fn view() -> Int { 166 }
+// the map's width and height, in tiles
+fn tiles() -> Int { 32 }
+fn floors() -> Int { 8 }
+
+fn wall() -> Int { 1 }
+fn open() -> Int { 0 }
+fn stairs() -> Int { 2 }
+
+// ---- pictures
+
+// a 16 by 16 picture from rows of characters, each a color by `key` (the
+// color of key's nth character is values' nth); '.' is see-through (-1)
+fn picture(rows: List<String>, key: String, values: List<Int>) -> Array<Int> {
+    let a = array(256, -1);
+    let mut y = 0;
+    rows.each(|row| {
+        let mut x = 0;
+        while x < 16 && x < string_length(row) {
+            let ch = char_at(row, x);
+            let mut k = 0;
+            while k < string_length(key) {
+                if char_at(key, k) == ch {
+                    match values.drop(k).head() {
+                        Some(v) => array_set(a, y * 16 + x, v),
+                        None => {}
+                    }
+                }
+                k = k + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    });
+    a
+}
+
+// the pictures, by number (see `kinds` and `item_picture`)
+fn pictures() -> Array<Array<Int>> {
+    let ps = array(16, array(256, -1));
+    array_set(ps, 0, picture([
+        "................", "................", "................", "................",
+        "................", "................", "................", "................",
+        "......bbbbb.....", "....bbbbbbbbb...", "..ebbbbbbbbbbb.p", ".wbbbbbbbbbbbbpp",
+        "..bbbbbbbbbbbbp.", "...dbbbbbbbbbd..", "....d.d...d.d...", "................"],
+        "bdpew", [rgb(125, 95, 75), rgb(70, 50, 40), rgb(230, 150, 150), rgb(255, 60, 60), rgb(240, 240, 230)]));
+    array_set(ps, 1, picture([
+        "................", "................", "................", "................",
+        "p..............p", "pp....d..d....pp", "ppp...dddd...ppp", "pppp.ddeedd.pppp",
+        "ppppppddddpppppp", ".ppppppddpppppp.", "..pppp.dd.pppp..", "...pp..dd..pp...",
+        "....p......p....", "................", "................", "................"],
+        "pde", [rgb(115, 75, 150), rgb(60, 35, 80), rgb(255, 230, 80)]));
+    array_set(ps, 2, picture([
+        "......wwww......", ".....wwwwww.....", ".....wkwwkw.....", ".....wwwwww.....",
+        "......wkkw......", ".......ww.......", "....wwwwwwww....", "...w.wgwwgw.w...",
+        "...w.wwwwww.w...", "...w..wgwg..w...", "......wwww......", "......w..w......",
+        ".....ww..ww.....", ".....w....w.....", ".....w....w.....", "....ww....ww...."],
+        "wgk", [rgb(225, 220, 200), rgb(150, 145, 130), rgb(25, 20, 20)]));
+    array_set(ps, 3, picture([
+        "................", "................", "................", "................",
+        "................", "................", "......gggg......", "....gggggggg....",
+        "...gghhgggggg...", "..gghhggkggkgg..", "..ggggggkggkgg..", ".gggggggggggggg.",
+        ".gggggggggggggg.", ".dggggggggggggd.", "..dddddddddddd..", "................"],
+        "gdhk", [rgb(90, 200, 90), rgb(40, 120, 50), rgb(190, 255, 190), rgb(20, 40, 20)]));
+    array_set(ps, 4, picture([
+        "......gggg......", ".....gggggg.....", ".....grggrg.....", ".....gggggg.....",
+        "......gddg......", ".......gg.......", "....cccccccc....", "...gccccccccg...",
+        "..gg.cccccc.gg..", "..g..cccccc..g..", "..g..cccccc..g..", ".....cccccc.....",
+        ".....gg..gg.....", ".....gg..gg.....", "....ggg..ggg....", "................"],
+        "gdrc", [rgb(125, 155, 110), rgb(60, 80, 55), rgb(255, 40, 40), rgb(95, 75, 60)]));
+    array_set(ps, 5, picture([
+        "................", "................", "................", "................",
+        "................", "k..k........k..k", ".k..k......k..k.", "..k..kkkkkk..k..",
+        "...kkkkkkkkkk...", "..kkkkrkkrkkkk..", ".k..kkkkkkkk..k.", "k..k.kkkkkk.k..k",
+        "..k..k.kk.k..k..", ".k..k......k..k.", "................", "................"],
+        "kr", [rgb(45, 40, 55), rgb(255, 50, 50)]));
+    array_set(ps, 6, picture([
+        ".....bbbbbb.....", "....bbbbbbbb....", "...bbkkbbkkbb...", "...bbkkbbkkbb...",
+        "...bbbbbbbbbb...", "...bbbbkkbbbb...", "..bbbbbbbbbbbb..", ".bbdbbbbbbbbdbb.",
+        "bbd.bbbbbbbb.dbb", "bd..bbbbbbbb..db", "....bbbbbbbb....", "....bbbbbbbb....",
+        "....bdbbbbdb....", "....b.db.bd.....", "...d..b..b..d...", "................"],
+        "bdk", [rgb(170, 200, 255), rgb(90, 110, 180), rgb(20, 25, 50)]));
+    array_set(ps, 7, picture([
+        "....ssssssss....", "...ssssssssss...", "...ssyssssyss...", "...ssssssssss...",
+        "..dssssssssssd..", ".ssssssssssssss.", "sssdssssssssdsss", "sss.ssssssss.sss",
+        "sss.ssddddss.sss", "dd..ssssssss..dd", "....ssssssss....", "....sss..sss....",
+        "....sss..sss....", "...ssss..ssss...", "...ssss..ssss...", "................"],
+        "sdy", [rgb(135, 130, 120), rgb(80, 75, 70), rgb(255, 180, 60)]));
+    array_set(ps, 8, picture([
+        "h..............h", "hh....aaaa....hh", ".hh..aaaaaa..hh.", "..hhaaaaaaaahh..",
+        "....aayaayaa....", "....aaaaaaaa....", "..mmaaaddaaamm..", ".mmaaaaaaaaaamm.",
+        "mm.aaaaaaaaaa.mm", "m..aadaaaadaa..m", "m..aaaaaaaaaa..m", "...aaaaaaaaaa...",
+        "....aaa..aaa....", "....aaa..aaa....", "...mmmm..mmmm...", "................"],
+        "adhym", [rgb(140, 30, 30), rgb(70, 15, 15), rgb(225, 215, 185), rgb(255, 220, 80), rgb(150, 150, 165)]));
+    // things to pick up: gold, a potion, oil, a blade, armor, the crown
+    array_set(ps, 9, picture([
+        "................", "................", "................", "................",
+        "................", "................", "................", "................",
+        "......yyy.......", "....yyoyyy......", "...yyyyyoyyy....", "..yyoyyyyyyoyy..",
+        "..oyyyyoyyyyyo..", "...ooooooooooo..", "................", "................"],
+        "yo", [rgb(245, 205, 60), rgb(180, 130, 30)]));
+    let flask = ["................", "................", "................", "................",
+        "................", "......cc........", "......gg........", ".....grrg.......",
+        "....grrrrg......", "...grwrrrrg.....", "...grrrrrrg.....", "...grrrrrrg.....",
+        "....grrrrg......", ".....gggg.......", "................", "................"];
+    array_set(ps, 10, picture(flask, "rwgc", [rgb(225, 40, 55), rgb(255, 255, 255), rgb(180, 200, 225), rgb(140, 100, 60)]));
+    array_set(ps, 11, picture(flask, "rwgc", [rgb(235, 155, 40), rgb(255, 255, 255), rgb(180, 200, 225), rgb(140, 100, 60)]));
+    array_set(ps, 12, picture([
+        "................", "............m...", "...........mm...", "..........mm....",
+        ".........mm.....", "........mm......", ".......mm.......", "......mm........",
+        "...y.mm.........", "....yy..........", "....hy..........", "...h..y.........",
+        "..h.............", "................", "................", "................"],
+        "mhy", [rgb(205, 210, 220), rgb(120, 80, 40), rgb(240, 200, 70)]));
+    array_set(ps, 13, picture([
+        "................", "................", "................", "....mm....mm....",
+        "...mmmmmmmmmm...", "...mmmmmmmmmm...", "....mmmddmmm....", "....mmmmmmmm....",
+        "....mmmddmmm....", "....mmmmmmmm....", ".....mmmmmm.....", "................",
+        "................", "................", "................", "................"],
+        "md", [rgb(165, 170, 185), rgb(90, 95, 110)]));
+    array_set(ps, 14, picture([
+        "................", "................", "................", "................",
+        "................", "..y....y....y...", "..yy..yyy..yy...", "..yyyyyryyyyy...",
+        "..yyyyyyyyyyy...", "..ybyyyryyyby...", "..yyyyyyyyyyy...", "................",
+        "................", "................", "................", "................"],
+        "yrb", [rgb(250, 210, 70), rgb(230, 30, 50), rgb(60, 120, 255)]));
+    ps
+}
+
+// ---- the walls, floor and ceiling
+
+// a 32 by 32 texture of each, in the floor's colors (they change as you go
+// down): bricks, flagstones, rough stone, and the stairs' pit
+struct Textures { wall: Array<Int>, floor: Array<Int>, roof: Array<Int>, pit: Array<Int> }
+
+fn tint(base: Int, k: Int) -> Int {
+    let ch = |shift: Int| ((base >> shift & 255) * k / 256).clamp(0, 255);
+    ch(16) * 65536 + ch(8) * 256 + ch(0)
+}
+
+fn textures(depth: Int, r: Array<Int>) -> Textures {
+    let theme = [rgb(150, 115, 80), rgb(125, 125, 130), rgb(105, 130, 100), rgb(140, 70, 60)];
+    let base = theme.drop((depth - 1) / 2 % 4).head().unwrap();
+    let wall = array(1024, 0);
+    let floor = array(1024, 0);
+    let roof = array(1024, 0);
+    let pit = array(1024, 0);
+    let mut i = 0;
+    while i < 1024 {
+        let (x, y) = (i % 32, i / 32);
+        let noise = 200 + random(r, 56);
+        // bricks 16 wide and 8 high, every other row half a brick along
+        let along = (x + if y / 8 % 2 == 0 { 0 } else { 8 }) % 16;
+        let mortar = y % 8 == 0 || along == 0;
+        array_set(wall, i, if mortar { tint(base, 90) } else { tint(base, noise - (y % 8) * 4) });
+        // flagstones 16 square
+        let edge = x % 16 == 0 || y % 16 == 0;
+        array_set(floor, i, if edge { tint(base, 60) } else { tint(base, noise * 3 / 5) });
+        array_set(roof, i, tint(base, (noise - 60) / 3));
+        // the pit: rings darker toward the middle
+        let ring = (x - 16).abs().max((y - 16).abs());
+        array_set(pit, i, if ring > 13 { tint(base, 70) } else { tint(base, ring * 8 + if ring % 3 == 0 { 0 } else { 10 }) });
+        i = i + 1;
+    }
+    Textures { wall: wall, floor: floor, roof: roof, pit: pit }
+}
+
+// ---- the dungeon
+
+// a monster's kind: its name, picture, how tough it is, how often it moves
+// (every `slow` turns), what killing it is worth, and the first floor it's
+// found on
+struct Kind { name: String, picture: Int, hp: Int, atk: Int, def: Int, slow: Int, xp: Int, from: Int }
+
+fn kinds() -> List<Kind> {
+    [Kind { name: "RAT", picture: 0, hp: 4, atk: 2, def: 0, slow: 1, xp: 2, from: 1 },
+     Kind { name: "BAT", picture: 1, hp: 3, atk: 2, def: 0, slow: 1, xp: 2, from: 1 },
+     Kind { name: "SKELETON", picture: 2, hp: 9, atk: 3, def: 1, slow: 1, xp: 5, from: 2 },
+     Kind { name: "SLIME", picture: 3, hp: 12, atk: 3, def: 0, slow: 2, xp: 5, from: 2 },
+     Kind { name: "GHOUL", picture: 4, hp: 15, atk: 5, def: 1, slow: 1, xp: 9, from: 4 },
+     Kind { name: "SPIDER", picture: 5, hp: 10, atk: 5, def: 1, slow: 1, xp: 8, from: 4 },
+     Kind { name: "WRAITH", picture: 6, hp: 18, atk: 6, def: 2, slow: 1, xp: 14, from: 6 },
+     Kind { name: "GOLEM", picture: 7, hp: 30, atk: 8, def: 3, slow: 2, xp: 18, from: 6 },
+     Kind { name: "WARDEN", picture: 8, hp: 90, atk: 11, def: 4, slow: 1, xp: 0, from: 99 }]
+}
+
+fn kind(k: Int) -> Kind { kinds().drop(k).head().unwrap() }
+
+// a kind grows stronger the further below its first floor it's met
+fn toughness(k: Kind, depth: Int) -> Int { (depth - k.from).max(0) }
+fn attack_of(k: Kind, depth: Int) -> Int { k.atk + toughness(k, depth) * 2 / 3 }
+fn defense_of(k: Kind, depth: Int) -> Int { k.def + toughness(k, depth) / 3 }
+fn health_of(k: Kind, depth: Int) -> Int { k.hp + toughness(k, depth) * 4 }
+
+// a monster: its kind, where it is and was (for moving smoothly between),
+// how hurt, and how long it's still flashing from a blow
+struct Monster { id: Int, kind: Int, x: Int, y: Int, was_x: Int, was_y: Int, hp: Int, flash: Int }
+
+// a thing on the floor: gold (with how much), a potion, oil, a blade or
+// armor (with how good), or the crown
+struct Item { what: Int, x: Int, y: Int, amount: Int }
+
+fn gold() -> Int { 0 }
+fn potion() -> Int { 1 }
+fn oil() -> Int { 2 }
+fn blade() -> Int { 3 }
+fn armor() -> Int { 4 }
+fn crown() -> Int { 5 }
+
+fn item_picture(i: Item) -> Int { 9 + i.what }
+
+struct Level { depth: Int, map: Array<Int>, seen: Array<Int>, monsters: List<Monster>, items: List<Item>, start: (Int, Int), textures: Textures }
+
+fn tile(l: Level, x: Int, y: Int) -> Int {
+    if x < 0 || y < 0 || x >= tiles() || y >= tiles() { wall() } else { array_get(l.map, y * tiles() + x) }
+}
+
+fn walkable(l: Level, x: Int, y: Int) -> Bool { tile(l, x, y) != wall() }
+
+// a floor: rooms where they fit, each joined to the one before by a
+// corridor; you start in the first, the stairs (or on the last floor, the
+// Warden and the crown) are in the one furthest from it; monsters and things
+// in the others
+fn dig(depth: Int, seed: Int) -> Level {
+    let r = rng(seed * 7 + depth * 1013);
+    let n = tiles();
+    let map = array(n * n, wall());
+    let mut rooms = [];
+    let mut tries = 0;
+    while tries < 80 && rooms.len() < 10 {
+        let (w, h) = (4 + random(r, 5), 4 + random(r, 4));
+        let (x, y) = (1 + random(r, n - w - 2), 1 + random(r, n - h - 2));
+        let clear = rooms.all(|room| {
+            let (rx, ry, rw, rh) = room;
+            x + w + 1 < rx || rx + rw + 1 < x || y + h + 1 < ry || ry + rh + 1 < y
+        });
+        if clear {
+            let mut j = 0;
+            while j < w * h {
+                array_set(map, (y + j / w) * n + x + j % w, open());
+                j = j + 1;
+            }
+            match rooms.head() {
+                Some(prev) => {
+                    let (px, py, pw, ph) = prev;
+                    corridor(map, x + w / 2, y + h / 2, px + pw / 2, py + ph / 2, random(r, 2) == 0);
+                }
+                None => {}
+            }
+            rooms = Cons((x, y, w, h), rooms);
+        }
+        tries = tries + 1;
+    }
+    let rooms = rooms.reverse();
+    let center = |room: (Int, Int, Int, Int)| {
+        let (x, y, w, h) = room;
+        (x + w / 2, y + h / 2)
+    };
+    let start = center(rooms.head().unwrap());
+    let far = distances(map, start);
+    let last = rooms.fold(rooms.head().unwrap(), |best, room| {
+        let (bx, by) = center(best);
+        let (cx, cy) = center(room);
+        if array_get(far, cy * n + cx) > array_get(far, by * n + bx) { room } else { best }
+    });
+    let mut monsters = [];
+    let mut items = [];
+    let mut id = 0;
+    let (ex, ey) = center(last);
+    if depth < floors() {
+        array_set(map, ey * n + ex, stairs());
+    } else {
+        monsters = Cons(Monster { id: 999, kind: 8, x: ex, y: ey - 1, was_x: ex, was_y: ey - 1, hp: kind(8).hp, flash: 0 }, monsters);
+        items = Cons(Item { what: crown(), x: ex, y: ey, amount: 0 }, items);
+    }
+    let level0 = Level { depth: depth, map: map, seen: array(n * n, 0), monsters: [], items: [], start: start, textures: textures(depth, r) };
+    let allowed = kinds().filter(|k| k.from <= depth);
+    let spot = |room: (Int, Int, Int, Int)| {
+        let (x, y, w, h) = room;
+        (x + random(r, w), y + random(r, h))
+    };
+    rooms.drop(1).each(|room| {
+        let count = random(r, 2 + depth / 3) + if depth >= 3 { 1 } else { 0 } + if depth >= 6 { 1 } else { 0 };
+        let mut k = 0;
+        while k < count {
+            let (mx, my) = spot(room);
+            let taken = monsters.any(|m| m.x == mx && m.y == my);
+            if !taken && (mx, my) != start && tile(level0, mx, my) == open() {
+                // (the newer kinds more often, deeper down)
+                let choices = allowed.len();
+                let pick = random(r, choices).max(random(r, choices));
+                let name = allowed.drop(pick).head().unwrap().name;
+                let kidx = kinds().position(|kk| kk.name == name).unwrap();
+                monsters = Cons(Monster { id: id, kind: kidx, x: mx, y: my, was_x: mx, was_y: my, hp: health_of(kind(kidx), depth), flash: 0 }, monsters);
+                id = id + 1;
+            }
+            k = k + 1;
+        }
+        let drop = |what: Int, amount: Int| {
+            let (ix, iy) = spot(room);
+            if tile(level0, ix, iy) == open() { items = Cons(Item { what: what, x: ix, y: iy, amount: amount }, items) }
+        };
+        if random(r, 10) < 6 { drop(gold(), 5 + random(r, 10 * depth)) }
+        if random(r, 10) < 3 { drop(potion(), 0) }
+        if random(r, 10) < 3 { drop(oil(), 0) }
+        if random(r, 100) < 14 { drop(blade(), (depth + 1) / 2 + random(r, 2)) }
+        if random(r, 100) < 14 { drop(armor(), (depth + 1) / 2 + random(r, 2)) }
+    });
+    Level { depth: depth, map: map, seen: array(n * n, 0), monsters: monsters, items: items, start: start, textures: textures(depth, r) }
+}
+
+// a corridor from (x0, y0) to (x1, y1): across then down, or down then across
+fn corridor(map: Array<Int>, x0: Int, y0: Int, x1: Int, y1: Int, across_first: Bool) {
+    let n = tiles();
+    let (cx, cy) = if across_first { (x1, y0) } else { (x0, y1) };
+    let dig_line = |ax: Int, ay: Int, bx: Int, by: Int| {
+        let mut x = ax;
+        let mut y = ay;
+        loop {
+            if array_get(map, y * n + x) == wall() { array_set(map, y * n + x, open()) }
+            if x == bx && y == by { break; }
+            x = x + (bx - x).sign();
+            y = y + (by - y).sign();
+        }
+    };
+    dig_line(x0, y0, cx, cy);
+    dig_line(cx, cy, x1, y1);
+}
+
+// how many steps each tile is from (x, y), walking (or a lot, if it can't be
+// reached): a breadth-first search
+fn distances(map: Array<Int>, from: (Int, Int)) -> Array<Int> {
+    let n = tiles();
+    let d = array(n * n, 9999);
+    let (fx, fy) = from;
+    array_set(d, fy * n + fx, 0);
+    let mut frontier = [fy * n + fx];
+    while !frontier.is_empty() {
+        let mut next = [];
+        frontier.each(|i| {
+            let here = array_get(d, i);
+            let (x, y) = (i % n, i / n);
+            [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)].each(|p| {
+                let (px, py) = p;
+                if px >= 0 && py >= 0 && px < n && py < n {
+                    let j = py * n + px;
+                    if array_get(map, j) != wall() && array_get(d, j) > here + 1 {
+                        array_set(d, j, here + 1);
+                        next = Cons(j, next);
+                    }
+                }
+            });
+        });
+        frontier = next;
+    }
+    d
+}
+
+// whether there's nothing but floor between two tiles
+fn sees(l: Level, x0: Int, y0: Int, x1: Int, y1: Int) -> Bool {
+    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    let mut ok = true;
+    let mut k = 1;
+    while k < steps {
+        let x = x0 + ((x1 - x0) * k * 2 + steps) / (steps * 2);
+        let y = y0 + ((y1 - y0) * k * 2 + steps) / (steps * 2);
+        if tile(l, x, y) == wall() { ok = false }
+        k = k + 1;
+    }
+    ok
+}
+
+// ---- you
+
+// where you are and face (0 north, 1 east, 2 south, 3 west), and all about
+// you: your torch's fuel, your blade's and armor's quality, your potions
+struct Hero { x: Int, y: Int, dir: Int, hp: Int, max_hp: Int, atk: Int, blade: Int, armor: Int, gold: Int, fuel: Int, potions: Int, xp: Int, level: Int, kills: Int }
+
+fn blade_name(k: Int) -> String { ["DAGGER", "SHORT SWORD", "LONGSWORD", "WAR AXE", "RUNE BLADE", "EMBER BLADE"].drop(k.min(5)).head().unwrap() }
+fn armor_name(k: Int) -> String { ["RAGS", "LEATHER", "MAIL", "SCALE", "PLATE", "RUNE PLATE"].drop(k.min(5)).head().unwrap() }
+
+fn full_fuel() -> Int { 700 }
+
+fn step_of(dir: Int) -> (Int, Int) {
+    if dir == 0 { (0, -1) } else if dir == 1 { (1, 0) } else if dir == 2 { (0, 1) } else { (-1, 0) }
+}
+
+// ---- a turn
+
+// what a turn did: the hero, the level, what to say, and what to show
+// (numbers over who was hit, and whether you were)
+struct Turn { hero: Hero, level: Level, said: List<String>, pops: List<Pop>, hurt: Int }
+
+// a number floating up from where a blow landed
+struct Pop { x: Int, y: Int, text: String, color: Int, life: Int }
+
+// the hero moving by (dx, dy): fighting what's there, or stepping there
+// and picking up what's there; then the monsters' turn
+fn act(h0: Hero, l: Level, dx: Int, dy: Int, r: Array<Int>, turn: Int) -> Turn {
+    // (every turn burns the torch down)
+    let h = Hero { x: h0.x, y: h0.y, dir: h0.dir, hp: h0.hp, max_hp: h0.max_hp, atk: h0.atk, blade: h0.blade, armor: h0.armor, gold: h0.gold, fuel: (h0.fuel - 1).max(0), potions: h0.potions, xp: h0.xp, level: h0.level, kills: h0.kills };
+    let (tx, ty) = (h.x + dx, h.y + dy);
+    let target = l.monsters.filter(|m| m.x == tx && m.y == ty);
+    let still = l.monsters.map(|m| Monster { id: m.id, kind: m.kind, x: m.x, y: m.y, was_x: m.x, was_y: m.y, hp: m.hp, flash: m.flash });
+    let level = Level { depth: l.depth, map: l.map, seen: l.seen, monsters: still, items: l.items, start: l.start, textures: l.textures };
+    let t = match target.head() {
+        Some(m) => strike(h, level, m, r),
+        None => if (dx != 0 || dy != 0) && walkable(l, tx, ty) {
+            pick_up(Hero { x: tx, y: ty, dir: h.dir, hp: h.hp, max_hp: h.max_hp, atk: h.atk, blade: h.blade, armor: h.armor, gold: h.gold, fuel: h.fuel, potions: h.potions, xp: h.xp, level: h.level, kills: h.kills }, level)
+        } else {
+            Turn { hero: h, level: level, said: [], pops: [], hurt: 0 }
+        },
+    };
+    monsters_turn(t, r, turn)
+}
+
+// a blow at monster m: if it dies, its worth in experience (and maybe a
+// level)
+fn strike(h: Hero, l: Level, m: Monster, r: Array<Int>) -> Turn {
+    let k = kind(m.kind);
+    let damage = (h.atk + h.blade * 2 + random(r, 3) - defense_of(k, l.depth)).max(1);
+    let hp = m.hp - damage;
+    let pop = Pop { x: m.x * 256 + 128, y: m.y * 256 + 128, text: damage.show(), color: rgb(255, 255, 255), life: 40 };
+    if hp > 0 {
+        let monsters = l.monsters.map(|o| if o.id == m.id { Monster { id: o.id, kind: o.kind, x: o.x, y: o.y, was_x: o.was_x, was_y: o.was_y, hp: hp, flash: 8 } } else { o });
+        Turn { hero: h, level: Level { depth: l.depth, map: l.map, seen: l.seen, monsters: monsters, items: l.items, start: l.start, textures: l.textures }, said: ["YOU HIT THE " ++ k.name], pops: [pop], hurt: 0 }
+    } else {
+        let monsters = l.monsters.filter(|o| o.id != m.id);
+        let xp = h.xp + k.xp;
+        let up = xp >= h.level * 12;
+        let hero = if up {
+            Hero { x: h.x, y: h.y, dir: h.dir, hp: h.hp + 6, max_hp: h.max_hp + 6, atk: h.atk + 1, blade: h.blade, armor: h.armor, gold: h.gold, fuel: h.fuel, potions: h.potions, xp: xp - h.level * 12, level: h.level + 1, kills: h.kills + 1 }
+        } else {
+            Hero { x: h.x, y: h.y, dir: h.dir, hp: h.hp, max_hp: h.max_hp, atk: h.atk, blade: h.blade, armor: h.armor, gold: h.gold, fuel: h.fuel, potions: h.potions, xp: xp, level: h.level, kills: h.kills + 1 }
+        };
+        let said = if up { ["YOU FEEL STRONGER: LEVEL " ++ hero.level.show(), "THE " ++ k.name ++ " DIES"] } else { ["THE " ++ k.name ++ " DIES"] };
+        Turn { hero: hero, level: Level { depth: l.depth, map: l.map, seen: l.seen, monsters: monsters, items: l.items, start: l.start, textures: l.textures }, said: said, pops: [pop], hurt: 0 }
+    }
+}
+
+// whatever's on the hero's tile, picked up
+fn pick_up(h: Hero, l: Level) -> Turn {
+    let (here, rest) = l.items.partition(|i| i.x == h.x && i.y == h.y);
+    let level = Level { depth: l.depth, map: l.map, seen: l.seen, monsters: l.monsters, items: rest, start: l.start, textures: l.textures };
+    here.fold(Turn { hero: h, level: level, said: [], pops: [], hurt: 0 }, |t, i| {
+        let o = t.hero;
+        let with = |hero: Hero, said: String| Turn { hero: hero, level: t.level, said: Cons(said, t.said), pops: t.pops, hurt: 0 };
+        if i.what == gold() {
+            with(Hero { x: o.x, y: o.y, dir: o.dir, hp: o.hp, max_hp: o.max_hp, atk: o.atk, blade: o.blade, armor: o.armor, gold: o.gold + i.amount, fuel: o.fuel, potions: o.potions, xp: o.xp, level: o.level, kills: o.kills }, i.amount.show() ++ " GOLD")
+        } else if i.what == potion() {
+            with(Hero { x: o.x, y: o.y, dir: o.dir, hp: o.hp, max_hp: o.max_hp, atk: o.atk, blade: o.blade, armor: o.armor, gold: o.gold, fuel: o.fuel, potions: o.potions + 1, xp: o.xp, level: o.level, kills: o.kills }, "A HEALING POTION (P TO DRINK)")
+        } else if i.what == oil() {
+            with(Hero { x: o.x, y: o.y, dir: o.dir, hp: o.hp, max_hp: o.max_hp, atk: o.atk, blade: o.blade, armor: o.armor, gold: o.gold, fuel: (o.fuel + 350).min(full_fuel()), potions: o.potions, xp: o.xp, level: o.level, kills: o.kills }, "OIL: THE TORCH BURNS BRIGHTER")
+        } else if i.what == blade() {
+            if i.amount > o.blade {
+                with(Hero { x: o.x, y: o.y, dir: o.dir, hp: o.hp, max_hp: o.max_hp, atk: o.atk, blade: i.amount, armor: o.armor, gold: o.gold, fuel: o.fuel, potions: o.potions, xp: o.xp, level: o.level, kills: o.kills }, "A " ++ blade_name(i.amount) ++ "!")
+            } else {
+                with(o, "A " ++ blade_name(i.amount) ++ ", NO BETTER THAN YOURS")
+            }
+        } else if i.what == armor() {
+            if i.amount > o.armor {
+                with(Hero { x: o.x, y: o.y, dir: o.dir, hp: o.hp, max_hp: o.max_hp, atk: o.atk, blade: o.blade, armor: i.amount, gold: o.gold, fuel: o.fuel, potions: o.potions, xp: o.xp, level: o.level, kills: o.kills }, armor_name(i.amount) ++ " ARMOR!")
+            } else {
+                with(o, armor_name(i.amount) ++ " ARMOR, NO BETTER THAN YOURS")
+            }
+        } else {
+            with(o, "THE EMBER CROWN!")
+        }
+    })
+}
+
+// each monster's move: if it's beside the hero, a blow (harder in the dark);
+// if it can see the hero, a step toward; else, now and then, a step
+// anywhere. (A slow one only every other turn.)
+fn monsters_turn(t: Turn, r: Array<Int>, turn: Int) -> Turn {
+    let l = t.level;
+    l.monsters.fold(t, |acc, m| {
+        let h = acc.hero;
+        let k = kind(m.kind);
+        let (dx, dy) = (h.x - m.x, h.y - m.y);
+        let flash = (m.flash - 1).max(0);
+        let others = acc.level.monsters;
+        let moved = |nx: Int, ny: Int| {
+            let free = walkable(acc.level, nx, ny) && !(nx == h.x && ny == h.y) && !others.any(|o| o.id != m.id && o.x == nx && o.y == ny);
+            let (fx, fy) = if free { (nx, ny) } else { (m.x, m.y) };
+            let ms = others.map(|o| if o.id == m.id { Monster { id: o.id, kind: o.kind, x: fx, y: fy, was_x: m.x, was_y: m.y, hp: o.hp, flash: flash } } else { o });
+            Turn { hero: h, level: Level { depth: l.depth, map: l.map, seen: l.seen, monsters: ms, items: acc.level.items, start: l.start, textures: l.textures }, said: acc.said, pops: acc.pops, hurt: acc.hurt }
+        };
+        if turn % k.slow != 0 {
+            moved(m.x, m.y)
+        } else if dx.abs() + dy.abs() == 1 {
+            // (in the dark, with the torch out, they strike unseen)
+            let damage = (attack_of(k, l.depth) + random(r, 3) - h.armor + if h.fuel == 0 { 3 } else { 0 }).max(0);
+            let pop = Pop { x: h.x * 256 + 128, y: h.y * 256 + 128, text: if damage > 0 { damage.show() } else { "BLOCK" }, color: if damage > 0 { rgb(255, 80, 70) } else { rgb(160, 200, 255) }, life: 40 };
+            let hero = Hero { x: h.x, y: h.y, dir: h.dir, hp: h.hp - damage, max_hp: h.max_hp, atk: h.atk, blade: h.blade, armor: h.armor, gold: h.gold, fuel: h.fuel, potions: h.potions, xp: h.xp, level: h.level, kills: h.kills };
+            let after = moved(m.x, m.y);
+            Turn { hero: hero, level: after.level, said: Cons(if damage > 0 { "THE " ++ k.name ++ " HITS YOU" } else { "YOUR ARMOR TURNS THE " ++ k.name ++ "'S BLOW" }, acc.said), pops: Cons(pop, acc.pops), hurt: if damage > 0 { 12 } else { acc.hurt } }
+        } else if dx.abs() + dy.abs() <= 8 && sees(l, m.x, m.y, h.x, h.y) {
+            // (the way that closes the gap the most, or else the other)
+            let (sx, sy) = (dx.sign(), dy.sign());
+            let first = if dx.abs() >= dy.abs() { (m.x + sx, m.y) } else { (m.x, m.y + sy) };
+            let second = if dx.abs() >= dy.abs() { (m.x, m.y + sy) } else { (m.x + sx, m.y) };
+            let (fx, fy) = first;
+            let (gx, gy) = second;
+            let blocked = !walkable(l, fx, fy) || others.any(|o| o.x == fx && o.y == fy);
+            if blocked { moved(gx, gy) } else { moved(fx, fy) }
+        } else if random(r, 3) == 0 {
+            let (wx, wy) = step_of(random(r, 4));
+            moved(m.x + wx, m.y + wy)
+        } else {
+            moved(m.x, m.y)
+        }
+    })
+}
+
+// ---- seeing
+
+// the eye: where (256ths of a tile) and which way (1024ths of a turn), and
+// how far the torch reaches (256ths of a tile)
+struct Eye { x: Int, y: Int, angle: Int, light: Int }
+
+// how bright something this far away is (out of 256): falling off as the
+// square of the distance, to nothing at the torch's reach
+fn bright(e: Eye, d: Int, flicker: Int) -> Int {
+    let reach = e.light;
+    ((256 - d * d / (reach * reach / 256).max(1)).max(0) * flicker >> 8) + 4
+}
+
+// the view: the floor and ceiling a row at a time, then the walls a column
+// at a time (keeping each column's distance), then what's in front of them
+fn draw_view(c: Canvas, zbuf: Array<Int>, l: Level, e: Eye, pics: Array<Array<Int>>, table: Array<Int>, flicker: Int) {
+    let (w, h) = (width(), view());
+    let tx = l.textures;
+    let (dx, dy) = (cos(table, e.angle) >> 8, sin(table, e.angle) >> 8);
+    // (the camera plane: two thirds as wide as the eye's direction)
+    let (pxl, pyl) = (-dy * 170 >> 8, dx * 170 >> 8);
+    // the floor and ceiling
+    let mut y = h / 2 + 1;
+    while y < h {
+        let dist = (h / 2) * 256 / (y - h / 2);
+        let b = bright(e, dist, flicker);
+        // (the row's left end, and a column's step along it, in 65536ths)
+        let mut fx = (e.x << 8) + dist * (dx - pxl);
+        let mut fy = (e.y << 8) + dist * (dy - pyl);
+        let (sx, sy) = (dist * 2 * pxl / w, dist * 2 * pyl / w);
+        let (floor_row, roof_row) = (y * w, (h - 1 - y) * w);
+        let mut x = 0;
+        while x < w {
+            let (cx, cy) = (fx >> 16, fy >> 16);
+            let texel = ((fy >> 11) & 31) * 32 + ((fx >> 11) & 31);
+            let ground = if tile(l, cx, cy) == stairs() { tx.pit } else { tx.floor };
+            array_set(c.pixels, floor_row + x, tint(array_get(ground, texel), b));
+            array_set(c.pixels, roof_row + x, tint(array_get(tx.roof, texel), b));
+            fx = fx + sx;
+            fy = fy + sy;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    array_set(c.pixels, (h / 2) * w, 0);
+    // the walls
+    let mut col = 0;
+    while col < w {
+        let cam = col * 512 / w - 256;
+        let rx = dx + (pxl * cam >> 8);
+        let ry = dy + (pyl * cam >> 8);
+        let (mx0, my0) = (e.x >> 8, e.y >> 8);
+        let mut mx = mx0;
+        let mut my = my0;
+        let ddx = if rx == 0 { 1 << 30 } else { 65536 / rx.abs() };
+        let ddy = if ry == 0 { 1 << 30 } else { 65536 / ry.abs() };
+        let (stx, sty) = (rx.sign(), ry.sign());
+        let mut side_x = if rx < 0 { (e.x & 255) * ddx >> 8 } else { (256 - (e.x & 255)) * ddx >> 8 };
+        let mut side_y = if ry < 0 { (e.y & 255) * ddy >> 8 } else { (256 - (e.y & 255)) * ddy >> 8 };
+        let mut side = 0;
+        let mut steps = 0;
+        let mut hit = false;
+        while !hit && steps < 40 {
+            if side_x < side_y {
+                side_x = side_x + ddx;
+                mx = mx + stx;
+                side = 0;
+            } else {
+                side_y = side_y + ddy;
+                my = my + sty;
+                side = 1;
+            }
+            if tile(l, mx, my) == wall() { hit = true }
+            // (what the torch lights, you've seen)
+            let near = if side == 0 { side_x - ddx } else { side_y - ddy };
+            if near < e.light && mx >= 0 && my >= 0 && mx < tiles() && my < tiles() { array_set(l.seen, my * tiles() + mx, 1) }
+            steps = steps + 1;
+        }
+        let dist = (if side == 0 { side_x - ddx } else { side_y - ddy }).max(24);
+        array_set(zbuf, col, dist);
+        let tall = h * 256 / dist;
+        let top = h / 2 - tall / 2;
+        let along = if side == 0 { e.y + dist * ry / 256 } else { e.x + dist * rx / 256 };
+        let tex_x = ((along & 255) >> 3) & 31;
+        let b = bright(e, dist, flicker) * (if side == 0 { 256 } else { 200 }) / 256;
+        let mut yy = top.max(0);
+        let end = (top + tall).min(h);
+        while yy < end {
+            let tex_y = ((yy - top) * 32 / tall.max(1)) & 31;
+            array_set(c.pixels, yy * w + col, tint(array_get(tx.wall, tex_y * 32 + tex_x), b));
+            yy = yy + 1;
+        }
+        col = col + 1;
+    }
+}
+
+// a picture standing at (x, y) (256ths of a tile), `scale` 256ths of a
+// tile tall, `lift` 256ths of its height off the floor; white while it
+// flashes
+fn draw_sprite(c: Canvas, zbuf: Array<Int>, e: Eye, pic: Array<Int>, x: Int, y: Int, scale: Int, lift: Int, flash: Bool, table: Array<Int>, flicker: Int) {
+    let (w, h) = (width(), view());
+    let (dx, dy) = (cos(table, e.angle) >> 8, sin(table, e.angle) >> 8);
+    let (sx, sy) = (x - e.x, y - e.y);
+    let depth = (sx * dx + sy * dy) >> 8;
+    let side = (sy * dx - sx * dy) >> 8;
+    if depth > 40 {
+        let center = w / 2 + side * (w / 2) * 256 / (170 * depth);
+        let full = h * 256 / depth;
+        let size = full * scale / 256;
+        let bottom = h / 2 + full / 2 - full * lift / 256;
+        let top = bottom - size;
+        let left = center - size / 2;
+        let b = bright(e, depth, flicker);
+        if b > 10 {
+            let mut px = left.max(0);
+            while px < (left + size).min(w) {
+                if depth < array_get(zbuf, px) {
+                    let u = (px - left) * 16 / size.max(1);
+                    let mut py = top.max(0);
+                    while py < bottom.min(h) {
+                        let v = (py - top) * 16 / size.max(1);
+                        let texel = array_get(pic, (v & 15) * 16 + (u & 15));
+                        if texel >= 0 { array_set(c.pixels, py * w + px, if flash { rgb(255, 255, 255) } else { tint(texel, b) }) }
+                        py = py + 1;
+                    }
+                }
+                px = px + 1;
+            }
+        }
+    }
+}
+
+// where on the screen a point in the world floats, and how far, if in front
+fn float_at(e: Eye, x: Int, y: Int, lift: Int, table: Array<Int>) -> Option<(Int, Int, Int)> {
+    let (dx, dy) = (cos(table, e.angle) >> 8, sin(table, e.angle) >> 8);
+    let (sx, sy) = (x - e.x, y - e.y);
+    let depth = (sx * dx + sy * dy) >> 8;
+    let side = (sy * dx - sx * dy) >> 8;
+    if depth < 40 { None } else {
+        let full = view() * 256 / depth;
+        Some((width() / 2 + side * (width() / 2) * 256 / (170 * depth), view() / 2 - full * lift / 256, depth))
+    }
+}
+
+// ---- the panel and the map
+
+fn bar(c: Canvas, x: Int, y: Int, w: Int, value: Int, most: Int, color: Int) {
+    fill_rect(c, x, y, w, 5, rgb(30, 25, 25));
+    fill_rect(c, x, y, w * value.clamp(0, most) / most.max(1), 5, color);
+}
+
+fn panel(c: Canvas, h: Hero, depth: Int) {
+    let top = view();
+    fill_rect(c, 0, top, width(), height() - top, rgb(22, 18, 16));
+    fill_rect(c, 0, top, width(), 1, rgb(90, 70, 50));
+    let ink = rgb(225, 215, 195);
+    let dim = rgb(140, 130, 115);
+    text(c, "HEALTH " ++ h.hp.max(0).show() ++ "/" ++ h.max_hp.show(), 6, top + 5, 1, ink);
+    bar(c, 6, top + 12, 90, h.hp, h.max_hp, if h.hp * 3 < h.max_hp { rgb(230, 60, 50) } else { rgb(200, 50, 50) });
+    text(c, "TORCH", 6, top + 21, 1, ink);
+    bar(c, 30, top + 21, 66, h.fuel, full_fuel(), rgb(240, 160, 50));
+    text(c, "DEPTH " ++ depth.show() ++ "   LEVEL " ++ h.level.show(), 108, top + 5, 1, ink);
+    text(c, blade_name(h.blade) ++ "   " ++ armor_name(h.armor), 108, top + 13, 1, dim);
+    text(c, "POTIONS " ++ h.potions.show() ++ "   GOLD " ++ h.gold.show(), 108, top + 21, 1, dim);
+}
+
+// the floor as far as you've seen it, in the top right, with you on it
+fn minimap(c: Canvas, l: Level, h: Hero, e: Eye) {
+    let (left, top, s) = (width() - 2 * tiles() - 4, 4, 2);
+    let n = tiles();
+    let mut i = 0;
+    while i < n * n {
+        if array_get(l.seen, i) == 1 {
+            let t = array_get(l.map, i);
+            let color = if t == wall() { rgb(110, 95, 80) } else if t == stairs() { rgb(240, 200, 80) } else { rgb(45, 38, 34) };
+            fill_rect(c, left + i % n * s, top + i / n * s, s, s, color);
+        }
+        i = i + 1;
+    }
+    // (the monsters the torch shows)
+    l.monsters.each(|m| {
+        let (dx, dy) = (m.x - h.x, m.y - h.y);
+        if (dx * dx + dy * dy) * 65536 < e.light * e.light && sees(l, h.x, h.y, m.x, m.y) {
+            fill_rect(c, left + m.x * s, top + m.y * s, s, s, rgb(230, 60, 50));
+        }
+    });
+    fill_rect(c, left + h.x * s, top + h.y * s, s, s, rgb(255, 255, 255));
+}
+
+fn shadow_text(c: Canvas, s: String, x: Int, y: Int, size: Int, color: Int) {
+    text(c, s, x + 1, y + 1, size, rgb(0, 0, 0));
+    text(c, s, x, y, size, color);
+}
+
+fn centered(c: Canvas, s: String, y: Int, size: Int, color: Int) {
+    shadow_text(c, s, (width() - text_width(s, size)) / 2, y, size, color);
+}
+
+// ---- the game
+
+enum Phase { Title, Playing, Dead, Won }
+
+fn new_hero() -> Hero {
+    Hero { x: 0, y: 0, dir: 1, hp: 24, max_hp: 24, atk: 3, blade: 0, armor: 0, gold: 0, fuel: full_fuel(), potions: 1, xp: 0, level: 1, kills: 0 }
+}
+
+fn arrive(h: Hero, l: Level) -> Hero {
+    let (x, y) = l.start;
+    Hero { x: x, y: y, dir: h.dir, hp: h.hp, max_hp: h.max_hp, atk: h.atk, blade: h.blade, armor: h.armor, gold: h.gold, fuel: h.fuel, potions: h.potions, xp: h.xp, level: h.level, kills: h.kills }
+}
+
+fn main() {
+    if !screen_open(width(), height(), 3, "delve") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let zbuf = array(width(), 0);
+    let table = sines();
+    let pics = pictures();
+    let dice = rng(screen_ticks() + 3);
+    let mut seed = random(dice, 100000);
+    let mut level = dig(1, seed);
+    let mut hero = arrive(new_hero(), level);
+    let mut phase = Title;
+    let mut log = ["YOU DESCEND INTO THE DARK"];
+    let mut pops = [];
+    let mut hurt = 0;
+    let mut turn = 0;
+    // the eye moves smoothly from where it was to where you are: over
+    // `anim` frames, from (from_x, from_y, from_angle)
+    let mut anim = 0;
+    let mut from_x = hero.x * 256 + 128;
+    let mut from_y = hero.y * 256 + 128;
+    let mut from_angle = hero.dir * 256 - 256;
+    let mut bump = 0;
+    let mut beep = 0;
+    let mut frame = 0;
+    loop {
+        // where the eye is now, part way through a move
+        let to_angle = hero.dir * 256 - 256;
+        let t = 8 - anim;
+        let turn_by = ((to_angle - from_angle + 512) & 1023) - 512;
+        let ex = from_x + (hero.x * 256 + 128 - from_x) * t / 8;
+        let ey = from_y + (hero.y * 256 + 128 - from_y) * t / 8;
+        let angle = (from_angle + turn_by * t / 8) & 1023;
+        // (a lunge forward, when you strike)
+        let lunge = if bump > 0 { sin(table, bump * 64) * 60 >> 16 } else { 0 };
+        let (fx, fy) = step_of(hero.dir);
+        let reach = 400 + hero.fuel * 1300 / full_fuel();
+        let eye = Eye { x: ex + fx * lunge, y: ey + fy * lunge, angle: angle, light: reach };
+        let flicker = 232 + random(dice, 24);
+
+        match phase {
+            Title => {
+                hero = Hero { x: hero.x, y: hero.y, dir: hero.dir, hp: hero.hp, max_hp: hero.max_hp, atk: hero.atk, blade: hero.blade, armor: hero.armor, gold: hero.gold, fuel: full_fuel(), potions: hero.potions, xp: hero.xp, level: hero.level, kills: hero.kills };
+                if anim == 0 {
+                    from_angle = to_angle;
+                    hero = Hero { x: hero.x, y: hero.y, dir: (hero.dir + 1) % 4, hp: hero.hp, max_hp: hero.max_hp, atk: hero.atk, blade: hero.blade, armor: hero.armor, gold: hero.gold, fuel: hero.fuel, potions: hero.potions, xp: hero.xp, level: hero.level, kills: hero.kills };
+                    from_x = hero.x * 256 + 128;
+                    from_y = hero.y * 256 + 128;
+                    anim = 90;
+                }
+                if key_pressed(key_space()) {
+                    seed = random(dice, 100000);
+                    level = dig(1, seed);
+                    hero = arrive(new_hero(), level);
+                    from_x = hero.x * 256 + 128;
+                    from_y = hero.y * 256 + 128;
+                    from_angle = hero.dir * 256 - 256;
+                    anim = 0;
+                    log = ["YOU DESCEND INTO THE DARK. FIND THE STAIRS DOWN"];
+                    turn = 0;
+                    phase = Playing;
+                }
+            }
+            Playing => {
+                if anim == 0 {
+                    // what you do: turn (no time), or step, strike or wait (a turn)
+                    let forward = key_down(key_up()) || key_down(key("w"));
+                    let back = key_down(key_down_arrow()) || key_down(key("s"));
+                    let left = key_down(key_left());
+                    let right = key_down(key_right());
+                    let aside_l = key_down(key("a"));
+                    let aside_r = key_down(key("d"));
+                    let wait = key_pressed(key_space());
+                    let drink = key_pressed(key("p"));
+                    from_x = hero.x * 256 + 128;
+                    from_y = hero.y * 256 + 128;
+                    from_angle = hero.dir * 256 - 256;
+                    if left || right {
+                        hero = Hero { x: hero.x, y: hero.y, dir: (hero.dir + if left { 3 } else { 1 }) % 4, hp: hero.hp, max_hp: hero.max_hp, atk: hero.atk, blade: hero.blade, armor: hero.armor, gold: hero.gold, fuel: hero.fuel, potions: hero.potions, xp: hero.xp, level: hero.level, kills: hero.kills };
+                        anim = 8;
+                    } else if drink && hero.potions > 0 && hero.hp < hero.max_hp {
+                        let healed = Hero { x: hero.x, y: hero.y, dir: hero.dir, hp: (hero.hp + 10 + hero.level * 2).min(hero.max_hp), max_hp: hero.max_hp, atk: hero.atk, blade: hero.blade, armor: hero.armor, gold: hero.gold, fuel: hero.fuel, potions: hero.potions - 1, xp: hero.xp, level: hero.level, kills: hero.kills };
+                        let after = monsters_turn(Turn { hero: healed, level: level, said: ["YOU DRINK A POTION"], pops: [], hurt: 0 }, dice, turn);
+                        hero = after.hero;
+                        level = after.level;
+                        log = after.said.append(log).take(3);
+                        pops = after.pops.append(pops);
+                        hurt = hurt.max(after.hurt);
+                        turn = turn + 1;
+                        anim = 8;
+                    } else if forward || back || aside_l || aside_r || wait {
+                        let way = if forward { hero.dir } else if back { (hero.dir + 2) % 4 } else if aside_l { (hero.dir + 3) % 4 } else { (hero.dir + 1) % 4 };
+                        let (sx, sy) = if wait { (0, 0) } else { step_of(way) };
+                        let striking = level.monsters.any(|m| m.x == hero.x + sx && m.y == hero.y + sy);
+                        let after = act(hero, level, sx, sy, dice, turn);
+                        hero = after.hero;
+                        level = after.level;
+                        log = after.said.append(log).take(3);
+                        pops = after.pops.append(pops);
+                        if after.hurt > 0 { beep = 4 }
+                        hurt = hurt.max(after.hurt);
+                        if striking { bump = 16; beep = beep.max(2) }
+                        turn = turn + 1;
+                        anim = 8;
+                    }
+                    // the stairs: down a floor (or, on the last, the crown: away)
+                    if hero.hp <= 0 {
+                        phase = Dead;
+                    } else if tile(level, hero.x, hero.y) == stairs() && anim > 0 {
+                        level = dig(level.depth + 1, seed);
+                        hero = arrive(hero, level);
+                        from_x = hero.x * 256 + 128;
+                        from_y = hero.y * 256 + 128;
+                        log = ["YOU GO DOWN TO DEPTH " ++ level.depth.show()];
+                        pops = [];
+                        beep = 10;
+                    } else if level.depth == floors() && !level.items.any(|i| i.what == crown()) {
+                        phase = Won;
+                    }
+                }
+            }
+            Dead => {
+                if key_pressed(key_space()) { phase = Title }
+            }
+            Won => {
+                if key_pressed(key_space()) { phase = Title }
+            }
+        }
+        anim = (anim - 1).max(0);
+        bump = (bump - 1).max(0);
+        hurt = (hurt - 1).max(0);
+        beep = (beep - 1).max(0);
+        screen_beep(beep > 0);
+        pops = pops.filter(|p| p.life > 1).map(|p| Pop { x: p.x, y: p.y, text: p.text, color: p.color, life: p.life - 1 });
+
+        // the picture
+        draw_view(c, zbuf, level, eye, pics, table, flicker);
+        // (the things on the floor, then the monsters, the farthest first)
+        let far_first = |x: Int, y: Int| -((x - eye.x) * (x - eye.x) + (y - eye.y) * (y - eye.y));
+        level.items.sort_on(|i| far_first(i.x * 256 + 128, i.y * 256 + 128)).each(|i| {
+            draw_sprite(c, zbuf, eye, array_get(pics, item_picture(i)), i.x * 256 + 128, i.y * 256 + 128, 110, 0, false, table, flicker);
+        });
+        level.monsters.sort_on(|m| far_first(m.x * 256 + 128, m.y * 256 + 128)).each(|m| {
+            let mx = m.was_x * 256 + 128 + (m.x - m.was_x) * 256 * t / 8;
+            let my = m.was_y * 256 + 128 + (m.y - m.was_y) * 256 * t / 8;
+            let k = kind(m.kind);
+            let bob = if k.picture == 1 || k.picture == 6 { 40 + sin(table, frame * 24 + m.id * 100) * 20 / 65536 } else { 0 };
+            let scale = if k.picture == 8 { 300 } else if k.picture == 0 || k.picture == 3 || k.picture == 5 { 170 } else { 230 };
+            draw_sprite(c, zbuf, eye, array_get(pics, k.picture), mx, my, scale, bob, m.flash > 0 && frame % 4 < 2, table, flicker);
+        });
+        // (rising from halfway up whoever was hit)
+        pops.each(|p| match float_at(eye, p.x, p.y, 50 + (40 - p.life) * 3, table) {
+            Some((sx, sy, _)) => shadow_text(c, p.text, sx - text_width(p.text, 1) / 2, sy, 1, p.color),
+            None => {}
+        });
+        // (a red edge, when you're hit)
+        if hurt > 0 {
+            let red = rgb(200, 20, 20);
+            fill_rect(c, 0, 0, width(), 3, red);
+            fill_rect(c, 0, view() - 3, width(), 3, red);
+            fill_rect(c, 0, 0, 3, view(), red);
+            fill_rect(c, width() - 3, 0, 3, view(), red);
+        }
+        panel(c, hero, level.depth);
+        match phase {
+            Title => {
+                centered(c, "DELVE", 30, 6, rgb(255, 190, 90));
+                centered(c, "EIGHT FLOORS DOWN LIES THE EMBER CROWN.", 80, 1, rgb(230, 220, 200));
+                centered(c, "YOUR TORCH IS ALL THAT HOLDS THE DARK BACK.", 90, 1, rgb(230, 220, 200));
+                centered(c, "ARROWS MOVE AND TURN  A D STEP ASIDE", 112, 1, rgb(200, 180, 140));
+                centered(c, "WALK INTO A MONSTER TO FIGHT  P POTION  SPACE WAIT", 122, 1, rgb(200, 180, 140));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 142, 2, rgb(255, 255, 255)) }
+            }
+            Playing => {
+                minimap(c, level, hero, eye);
+                let mut k = 0;
+                log.each(|line| {
+                    shadow_text(c, line, 6, 6 + k * 9, 1, if k == 0 { rgb(245, 235, 210) } else { rgb(150, 140, 120) });
+                    k = k + 1;
+                });
+            }
+            Dead => {
+                centered(c, "YOU DIED", 40, 4, rgb(220, 50, 40));
+                centered(c, "ON DEPTH " ++ level.depth.show() ++ ", WITH " ++ hero.gold.show() ++ " GOLD AND " ++ hero.kills.show() ++ " KILLS", 80, 1, rgb(230, 220, 200));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 130, 2, rgb(255, 255, 255)) }
+            }
+            Won => {
+                centered(c, "THE EMBER CROWN IS YOURS", 40, 2, rgb(255, 210, 90));
+                centered(c, hero.gold.show() ++ " GOLD   " ++ hero.kills.show() ++ " KILLS   LEVEL " ++ hero.level.show(), 70, 1, rgb(230, 220, 200));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 130, 2, rgb(255, 255, 255)) }
+            }
+        }
+        frame = frame + 1;
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}

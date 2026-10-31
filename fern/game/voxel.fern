@@ -1,0 +1,239 @@
+// Drawing a landscape in 3D: a heightmap (see terrain.fern) a column of the
+// screen at a time, marching out from the eye over the map. Each step, the
+// land there is drawn from its height up to the highest drawn in that
+// column yet (so nearer hills hide farther ones), faded into the haze with
+// distance, and dimmed as the day ends (but a cell whose color has bit 24
+// set glows: a flame, a lit window). Then the sky above it, and the sun.
+// What's drawn after can be in front of the land or behind it: each
+// pixel's distance is kept.
+//
+// Also: where a point in the world is on the screen, and the light at each
+// height of the sun.
+
+use crate::draw::Canvas;
+use crate::math::{sin, cos};
+use crate::screen::rgb;
+use crate::terrain::Terrain;
+
+// half the view's width at distance 1, in 256ths: the field of view
+pub fn spread() -> Int { 154 }
+// how many pixels tall a unit of height is at distance 1 (a unit of height
+// is a seventh of a cell across)
+pub fn tall() -> Int { 40 }
+// how far the land is drawn (256ths of a cell)
+pub fn far() -> Int { 230 * 256 }
+// how far the sky is
+pub fn sky_far() -> Int { 1 << 30 }
+
+// the eye: where (x, y in 256ths of a cell, alt in 256ths of a unit of
+// height) and which way it looks (in 1024ths of a turn)
+pub struct Eye { x: Int, y: Int, alt: Int, yaw: Int, pitch: Int, bank: Int }
+
+// the light: the sky's color at each height above the horizon (in pixels),
+// the haze's (the horizon's), how bright the land is (256 full), and the
+// sun's height (1024ths of a turn) and color
+pub struct Light { sky: Array<Int>, haze: Int, day: Int, sun: Int, sun_color: Int }
+
+// the picture: the canvas, how far away what's at each pixel is, and each
+// column's highest land drawn yet
+pub struct Frame { c: Canvas, depth: Array<Int>, top: Array<Int> }
+
+pub fn tan(table: Array<Int>, a: Int) -> Int { sin(table, a) * 256 / cos(table, a).max(1) }
+
+// the horizon's row at the middle column, and how much higher it is a
+// column further right, in 256ths of a pixel (it tilts with the bank)
+pub fn horizon(f: Frame, e: Eye, table: Array<Int>) -> (Int, Int) {
+    (f.c.height / 2 + tan(table, e.pitch) * tall() / 256, tan(table, e.bank))
+}
+
+// a distance between two coordinates on the map, the short way round
+pub fn wrap(d: Int) -> Int { ((d + 32768) & 65535) - 32768 }
+
+// the land, nearest first, a line across the view at a time
+pub fn draw_land(f: Frame, t: Terrain, e: Eye, l: Light, table: Array<Int>) {
+    let (w, h) = (f.c.width, f.c.height);
+    let mut i = 0;
+    while i < w {
+        array_set(f.top, i, h);
+        i = i + 1;
+    }
+    let (co, si) = (cos(table, e.yaw), sin(table, e.yaw));
+    let (mid, slope) = horizon(f, e, table);
+    let first_row = mid * 256 + slope * w / 2;
+    let (hr, hg, hb) = (l.haze >> 16 & 255, l.haze >> 8 & 255, l.haze & 255);
+    let mut z = 256;
+    while z < far() {
+        // (in 65536ths of a cell: the line's left end, and a column's step)
+        let lat = spread() * z >> 8;
+        let (sx, sy) = (-si * lat >> 8, co * lat >> 8);
+        let mut px = (e.x << 8) + (co * z >> 8) - sx;
+        let mut py = (e.y << 8) + (si * z >> 8) - sy;
+        let (dx, dy) = (2 * sx / w, 2 * sy / w);
+        let scale = (tall() << 16) / z;
+        // (clear nearby, thickening further off)
+        let haze = (z >> 8) * (z >> 8) * 256 / ((far() >> 8) * (far() >> 8));
+        let clear = (256 - haze) * l.day >> 8;
+        let (fr, fg, fb) = (hr * haze, hg * haze, hb * haze);
+        // (near the eye, heights blended between cells, so the ground there
+        // is smooth, not steps)
+        let smooth = z < 32 * 256;
+        let mut row = first_row;
+        let mut col = 0;
+        while col < w {
+            let (cx, cy) = ((px >> 16) & 255, (py >> 16) & 255);
+            let cell = cy * 256 + cx;
+            let ground_at = if smooth {
+                let (fx, fy) = ((px >> 8) & 255, (py >> 8) & 255);
+                let (below, right) = (((cy + 1) & 255) * 256, (cx + 1) & 255);
+                let (a, b) = (array_get(t.height, cell), array_get(t.height, cy * 256 + right));
+                let (c, d) = (array_get(t.height, below + cx), array_get(t.height, below + right));
+                let top = a * 256 + (b - a) * fx;
+                top + (c * 256 + (d - c) * fx - top) * fy / 256
+            } else {
+                array_get(t.height, cell) << 8
+            };
+            let y0 = (row >> 8) + ((e.alt - ground_at) * scale >> 16);
+            let top = array_get(f.top, col);
+            if y0 < top {
+                let land = array_get(t.color, cell);
+                // (a glowing cell isn't dimmed by the dark, only the haze)
+                let lit = if land >> 24 == 0 { clear } else { 256 - haze };
+                let color = (((land >> 16 & 255) * lit + fr) >> 8 << 16) + (((land >> 8 & 255) * lit + fg) >> 8 << 8) + (((land & 255) * lit + fb) >> 8);
+                let mut y = y0.max(0);
+                while y < top {
+                    let p = y * w + col;
+                    array_set(f.c.pixels, p, color);
+                    array_set(f.depth, p, z);
+                    y = y + 1;
+                }
+                array_set(f.top, col, y0);
+            }
+            px = px + dx;
+            py = py + dy;
+            row = row - slope;
+            col = col + 1;
+        }
+        z = z + 48 + z / 80;
+    }
+}
+
+// the sky above the land: darker higher up, and the sun
+pub fn draw_sky(f: Frame, e: Eye, l: Light, table: Array<Int>) {
+    let w = f.c.width;
+    let (mid, slope) = horizon(f, e, table);
+    let mut col = 0;
+    while col < w {
+        let horizon_row = mid + (w / 2 - col) * slope / 256;
+        let top = array_get(f.top, col).min(f.c.height);
+        let mut y = 0;
+        while y < top {
+            let p = y * w + col;
+            array_set(f.c.pixels, p, array_get(l.sky, (horizon_row - y).clamp(0, 255)));
+            array_set(f.depth, p, sky_far());
+            y = y + 1;
+        }
+        col = col + 1;
+    }
+    // the sun, low in the west (yaw 512), wherever there's sky in front of it
+    let off = ((512 - e.yaw + 512) & 1023) - 512;
+    if off > -120 && off < 120 && l.sun > -20 {
+        let x = w / 2 + tan(table, off) * (w / 2) / spread();
+        let y = mid + (w / 2 - x) * slope / 256 - tan(table, l.sun) * tall() / 256;
+        let (r, g, b) = (l.sun_color >> 16 & 255, l.sun_color >> 8 & 255, l.sun_color & 255);
+        let mut dy = -14;
+        while dy <= 14 {
+            let mut dx = -14;
+            while dx <= 14 {
+                let d2 = dx * dx + dy * dy;
+                let amount = if d2 <= 25 { 256 } else { (196 - d2).max(0) * 80 / 196 };
+                if amount > 0 { shine_sky(f, x + dx, y + dy, r, g, b, amount) }
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+    }
+}
+
+// light added to a pixel of sky (not land)
+fn shine_sky(f: Frame, x: Int, y: Int, r: Int, g: Int, b: Int, amount: Int) {
+    if x >= 0 && y >= 0 && x < f.c.width && y < f.c.height {
+        let p = y * f.c.width + x;
+        if array_get(f.depth, p) == sky_far() {
+            add_light(f.c, p, r, g, b, amount);
+        }
+    }
+}
+
+pub fn add_light(c: Canvas, p: Int, r: Int, g: Int, b: Int, amount: Int) {
+    let old = array_get(c.pixels, p);
+    let nr = ((old >> 16 & 255) + r * amount / 256).min(255);
+    let ng = ((old >> 8 & 255) + g * amount / 256).min(255);
+    let nb = ((old & 255) + b * amount / 256).min(255);
+    array_set(c.pixels, p, nr * 65536 + ng * 256 + nb);
+}
+
+// where a point (x, y in 256ths of a cell, alt in 256ths of a unit) is on
+// the screen, and how far, if it's in front
+pub fn to_screen(f: Frame, e: Eye, table: Array<Int>, x: Int, y: Int, alt: Int) -> Option<(Int, Int, Int)> {
+    let (dx, dy) = (wrap(x - e.x), wrap(y - e.y));
+    let (co, si) = (cos(table, e.yaw), sin(table, e.yaw));
+    let forward = (dx * co + dy * si) >> 16;
+    let side = (dy * co - dx * si) >> 16;
+    if forward < 192 {
+        None
+    } else {
+        let w = f.c.width;
+        let sx = w / 2 + side * (w / 2) / (spread() * forward >> 8);
+        let (mid, slope) = horizon(f, e, table);
+        let row = mid + (w / 2 - sx) * slope / 256;
+        Some((sx, row + (e.alt - alt) * tall() / forward, forward))
+    }
+}
+
+// a pixel of something at distance z, if nothing nearer is in front of it
+pub fn dot(f: Frame, x: Int, y: Int, z: Int, color: Int) {
+    if x >= 0 && y >= 0 && x < f.c.width && y < f.c.height {
+        let p = y * f.c.width + x;
+        if array_get(f.depth, p) > z { array_set(f.c.pixels, p, color) }
+    }
+}
+
+pub fn glow(f: Frame, x: Int, y: Int, z: Int, r: Int, g: Int, b: Int, amount: Int) {
+    if x >= 0 && y >= 0 && x < f.c.width && y < f.c.height {
+        let p = y * f.c.width + x;
+        if array_get(f.depth, p) > z { add_light(f.c, p, r, g, b, amount) }
+    }
+}
+
+// ---- the time of day
+
+pub fn mix(a: Int, b: Int, t: Int) -> Int {
+    let ch = |shift: Int| {
+        let (x, y) = (a >> shift & 255, b >> shift & 255);
+        x + (y - x) * t / 256
+    };
+    ch(16) * 65536 + ch(8) * 256 + ch(0)
+}
+
+// the light with the sun this high: from day (above 60) through sunset (0)
+// to night (-40)
+pub fn light(sun: Int) -> Light {
+    let (zenith, low, day) = if sun >= 60 {
+        (rgb(70, 125, 215), rgb(185, 210, 235), 256)
+    } else if sun >= 0 {
+        let t = (60 - sun) * 256 / 60;
+        (mix(rgb(70, 125, 215), rgb(55, 60, 140), t), mix(rgb(185, 210, 235), rgb(250, 150, 95), t), 256 - 100 * t / 256)
+    } else {
+        let t = (-sun).min(40) * 256 / 40;
+        (mix(rgb(55, 60, 140), rgb(8, 12, 35), t), mix(rgb(250, 150, 95), rgb(20, 25, 55), t), 156 - 96 * t / 256)
+    };
+    let sky = array(256, 0);
+    let mut i = 0;
+    while i < 256 {
+        array_set(sky, i, mix(low, zenith, (i * 3).min(256)));
+        i = i + 1;
+    }
+    let sun_color = if sun > 40 { rgb(255, 250, 225) } else { mix(rgb(255, 250, 225), rgb(255, 160, 70), (40 - sun).min(40) * 256 / 40) };
+    Light { sky: sky, haze: low, day: day, sun: sun, sun_color: sun_color }
+}
+

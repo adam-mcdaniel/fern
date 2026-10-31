@@ -1,0 +1,215 @@
+// A ray tracer. For each pixel, a ray goes from the eye through it to the
+// nearest thing it hits. From there, a ray to the light says whether the
+// point is in shadow, and how directly the light falls on it; a shiny
+// sphere sends a ray bounced off it to see what it reflects. All of it in
+// integers: fixed point (see math.fern), square roots by Newton's method.
+//
+// Left and right walk the camera around, up and down raise and lower it.
+// It draws a little each frame, roughly first, then sharper.
+
+mod screen;
+mod draw;
+mod math;
+
+use screen::*;
+use draw::{Canvas, canvas, fill_rect, show, text, text_width};
+use math::{one, mul, div, sqrt, sines, sin, cos, clamp};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+// (rays start this far off a surface, so they don't hit it again)
+fn eps() -> Int { one() / 128 }
+
+// a point or a direction, in fixed point; or a color, 0 to 255 a channel
+struct V { x: Int, y: Int, z: Int }
+
+fn v(x: Int, y: Int, z: Int) -> V { V { x: x, y: y, z: z } }
+fn add(a: V, b: V) -> V { V { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z } }
+fn sub(a: V, b: V) -> V { V { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } }
+fn scale(a: V, k: Int) -> V { V { x: mul(a.x, k), y: mul(a.y, k), z: mul(a.z, k) } }
+fn dot(a: V, b: V) -> Int { mul(a.x, b.x) + mul(a.y, b.y) + mul(a.z, b.z) }
+fn cross(a: V, b: V) -> V { V { x: mul(a.y, b.z) - mul(a.z, b.y), y: mul(a.z, b.x) - mul(a.x, b.z), z: mul(a.x, b.y) - mul(a.y, b.x) } }
+fn len(a: V) -> Int { sqrt(dot(a, a)) }
+fn norm(a: V) -> V { scale(a, div(one(), len(a).max(1))) }
+// d bounced off a surface facing n
+fn reflect(d: V, n: V) -> V { sub(d, scale(n, 2 * dot(d, n))) }
+
+// ---- the scene
+
+struct Ball { center: V, radius: Int, color: V, shine: Int }
+
+fn f(n: Int) -> Int { n * one() / 100 }
+
+fn scene() -> List<Ball> {
+    [Ball { center: v(f(-130), f(90), f(30)), radius: f(90), color: v(220, 60, 50), shine: 0 },
+     Ball { center: v(f(60), f(110), f(80)), radius: f(110), color: v(230, 230, 240), shine: 190 },
+     Ball { center: v(f(-20), f(45), f(-120)), radius: f(45), color: v(60, 110, 230), shine: 40 },
+     Ball { center: v(f(190), f(50), f(-90)), radius: f(50), color: v(240, 190, 60), shine: 70 }]
+}
+
+fn light() -> V { v(f(500), f(550), f(100)) }
+
+enum Thing { Nothing, Floor, Sphere(Ball) }
+
+struct Hit { t: Int, thing: Thing }
+
+// how far along ray (o, d) it meets the ball, or -1
+fn meet(o: V, d: V, b: Ball) -> Int {
+    let oc = sub(o, b.center);
+    let half = dot(oc, d);
+    let c = dot(oc, oc) - mul(b.radius, b.radius);
+    let disc = mul(half, half) - c;
+    if disc < 0 {
+        -1
+    } else {
+        let root = sqrt(disc);
+        if -half - root > eps() { -half - root } else if -half + root > eps() { -half + root } else { -1 }
+    }
+}
+
+// the nearest thing along ray (o, d): the floor (y = 0) or a ball
+fn nearest(o: V, d: V, balls: List<Ball>) -> Hit {
+    let floor = if d.y < -16 { div(-o.y, d.y) } else { -1 };
+    let start = if floor > eps() && floor < 60 * one() { Hit { t: floor, thing: Floor } } else { Hit { t: -1, thing: Nothing } };
+    closest(o, d, balls, start)
+}
+
+fn closest(o: V, d: V, balls: List<Ball>, best: Hit) -> Hit {
+    match balls {
+        Nil => best,
+        Cons(b, rest) => {
+            let t = meet(o, d, b);
+            let better = t > 0 && (best.t < 0 || t < best.t);
+            closest(o, d, rest, if better { Hit { t: t, thing: Sphere(b) } } else { best })
+        }
+    }
+}
+
+// ---- light
+
+// the color seen along ray (o, d), bouncing at most `bounces` more times
+fn trace(o: V, d: V, balls: List<Ball>, bounces: Int) -> V {
+    let h = nearest(o, d, balls);
+    match h.thing {
+        Nothing => sky(d),
+        Floor => {
+            let p = add(o, scale(d, h.t));
+            let n = v(0, one(), 0);
+            // a checkerboard (>> rounds down, so squares don't double up at 0)
+            let base = if (p.x >> 16) + (p.z >> 16) & 1 == 0 { v(235, 235, 230) } else { v(45, 50, 70) };
+            let local = lit(base, p, n, d, balls, 0);
+            let seen = if bounces > 0 { mix(local, trace(add(p, scale(n, eps())), reflect(d, n), balls, bounces - 1), 50) } else { local };
+            // far away fades into the sky
+            mix(seen, sky(d), clamp(h.t * 256 / (40 * one()), 0, 256))
+        }
+        Sphere(b) => {
+            let p = add(o, scale(d, h.t));
+            let n = scale(sub(p, b.center), div(one(), b.radius));
+            let local = lit(b.color, p, n, d, balls, 32);
+            if b.shine > 0 && bounces > 0 {
+                mix(local, trace(add(p, scale(n, eps())), reflect(d, n), balls, bounces - 1), b.shine)
+            } else {
+                local
+            }
+        }
+    }
+}
+
+// a surface's color at p (facing n, seen along d): a little light from
+// everywhere, more as it faces the light, none where something's in the
+// way; and a highlight, if it's shiny
+fn lit(base: V, p: V, n: V, d: V, balls: List<Ball>, highlight: Int) -> V {
+    let to = sub(light(), p);
+    let dist = len(to);
+    let l = scale(to, div(one(), dist));
+    let facing = dot(n, l).max(0);
+    let blocker = nearest(add(p, scale(n, eps())), l, balls);
+    let shadowed = match blocker.thing { Sphere(_) => blocker.t < dist, _ => false };
+    let amount = one() / 8 + (if shadowed { 0 } else { facing * 7 / 8 });
+    let color = V { x: mul(base.x, amount), y: mul(base.y, amount), z: mul(base.z, amount) };
+    if highlight > 0 && !shadowed {
+        // (Phong: how nearly the light bounces straight to the eye, to the 32nd)
+        let s = dot(reflect(d, n), l).max(0);
+        let s32 = power(s, 5);
+        let glint = mul(255, s32);
+        V { x: (color.x + glint).min(255), y: (color.y + glint).min(255), z: (color.z + glint).min(255) }
+    } else {
+        color
+    }
+}
+
+// x squared k times over
+fn power(x: Int, k: Int) -> Int {
+    if k == 0 { x } else { power(mul(x, x), k - 1) }
+}
+
+fn sky(d: V) -> V {
+    mix(v(210, 225, 255), v(70, 110, 200), clamp(d.y * 256 / one(), 0, 256))
+}
+
+// from a (0) to b (256)
+fn mix(a: V, b: V, t: Int) -> V {
+    V { x: (a.x * (256 - t) + b.x * t) / 256, y: (a.y * (256 - t) + b.y * t) / 256, z: (a.z * (256 - t) + b.z * t) / 256 }
+}
+
+// ---- the camera, and drawing
+
+struct Camera { angle: Int, height: Int }
+
+// where the drawing is: the block size it's on (8, 4, 2, 1, then 0 for
+// done), and the row
+struct Progress { block: Int, row: Int }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern raytracer") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let table = sines();
+    let balls = scene();
+    let mut cam = Camera { angle: 40, height: f(170) };
+    let mut progress = Progress { block: 8, row: 0 };
+    loop {
+        let turn = if key_down(key_left()) { -6 } else if key_down(key_right()) { 6 } else { 0 };
+        let rise = if key_down(key_up()) { f(4) } else if key_down(key_down_arrow()) { -f(4) } else { 0 };
+        if turn != 0 || rise != 0 {
+            cam = Camera { angle: cam.angle + turn & 1023, height: clamp(cam.height + rise, f(30), f(600)) };
+            progress = Progress { block: 8, row: 0 };
+        }
+        let until = screen_ticks() + 12;
+        while progress.block > 0 && screen_ticks() < until {
+            progress = draw_row(c, table, balls, cam, progress);
+        }
+        if progress.block > 0 {
+            fill_rect(c, 0, height() - 7, 32, 7, rgb(0, 0, 0));
+            text(c, "RAYS..", 2, height() - 6, 1, rgb(200, 200, 200));
+        }
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+}
+
+// one row of blocks, each the color of the ray through its top left
+// (skipping pixels a bigger block already traced)
+fn draw_row(c: Canvas, table: Array<Int>, balls: List<Ball>, cam: Camera, pr: Progress) -> Progress {
+    let eye = v(sin(table, cam.angle) * 6, cam.height, -cos(table, cam.angle) * 6);
+    let forward = norm(sub(v(0, f(70), 0), eye));
+    let right = norm(cross(v(0, one(), 0), forward));
+    let up = cross(forward, right);
+    let b = pr.block;
+    let mut x = 0;
+    while x < width() {
+        let done = b < 8 && x % (b * 2) == 0 && pr.row % (b * 2) == 0;
+        if !done {
+            // (a view about 60 degrees across)
+            let u = (x - width() / 2) * one() / 100;
+            let w = (pr.row - height() / 2) * one() / 100;
+            let d = norm(add(forward, sub(scale(right, u), scale(up, w))));
+            let color = trace(eye, d, balls, 2);
+            fill_rect(c, x, pr.row, b, b, rgb(color.x, color.y, color.z));
+        }
+        x = x + b;
+    }
+    if pr.row + b < height() { Progress { block: b, row: pr.row + b } } else { Progress { block: b / 2, row: 0 } }
+}

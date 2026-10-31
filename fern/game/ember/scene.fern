@@ -1,0 +1,653 @@
+// Drawing the night: the light first (what stays, then everything that
+// gives light this frame, the ember's with shadows), the land in it, then
+// what's on the land, lit by the light where it stands, then what glows,
+// and the HUD over it all.
+
+use crate::math::{sin, cos, isqrt};
+use super::gfx::*;
+use super::art::{Art};
+use super::run::*;
+use super::arms::*;
+use super::play::{light_radius, lit_count};
+use super::foes::{boss_name};
+use super::light::{bake, cast, brazier_reach, half};
+use super::world::{size, brazier_count, hash};
+use super::icons::{icon};
+
+// where the camera is: its top left in whole pixels (where the land's drawn
+// from), and in 16ths of a pixel, which everything on the land is drawn
+// relative to, so that the ember and what moves round it keep their places
+// against each other however the camera's pixels round
+pub struct View { x: Int, y: Int, x16: Int, y16: Int }
+
+pub fn camera(r: Run) -> View {
+    let s = get(r, k_shake());
+    let (ox, oy) = if s > 0 { (roll(r, s * 2 + 1) - s, roll(r, s * 2 + 1) - s) } else { (0, 0) };
+    let x16 = ((get(r, k_camx()) + ox) * 16 + get(r, k_camfx())).clamp(0, (size() - sw()) * 16);
+    let y16 = ((get(r, k_camy()) + oy) * 16 + get(r, k_camfy())).clamp(0, (size() - sh()) * 16);
+    View { x: x16 >> 4, y: y16 >> 4, x16: x16, y16: y16 }
+}
+
+// how bright the sky is: night, until dawn comes up
+pub fn sky(r: Run) -> Int { (get(r, k_dawn()) * 256 / 420).min(256) }
+
+pub fn draw_night(g: Gfx, a: Art, r: Run, show_numbers: Bool) {
+    // the braziers lit or put out since the light that stays was worked out
+    let mut b = 0;
+    while b < brazier_count(r.w) {
+        if array_get(r.lit, b) != array_get(r.baked, b) {
+            let (bx, by) = (array_get(r.w.braziers, b * 2), array_get(r.w.braziers, b * 2 + 1));
+            let reach = brazier_reach() + 4;
+            if array_get(r.baked, b) < 0 { () } else { bake(r.still, g, r.w, r.lit, bx - reach, by - reach, bx + reach, by + reach, r.table) }
+            array_set(r.baked, b, array_get(r.lit, b));
+        }
+        b = b + 1;
+    }
+    let v = camera(r);
+    let frame = get(r, k_frame());
+    lights(g, r, v, frame);
+    let dawn = sky(r);
+    render(g, r.w.idx, size(), r.still.warm, r.still.cool, half(), v.x, v.y, dawn * 3 / 4, 46 + dawn / 3);
+    draw_things(g, a, r, v, frame, show_numbers);
+}
+
+// ---- the light
+
+fn lights(g: Gfx, r: Run, v: View, frame: Int) {
+    let (px, py) = ((get(r, k_x()) >> 4), (get(r, k_y()) >> 4));
+    let t = r.table;
+    // the ember's own: flickering a little
+    let flicker = (sin(t, frame * 37) >> 14) + (sin(t, frame * 91 + 300) >> 15);
+    let radius = light_radius(r) + flicker;
+    if get(r, k_dead()) == 0 { cast(g, r.still, r.w, px, py - 4, radius, frame & 7, 1024, 190, 215 + flicker * 3, 20, v.x, v.y, t) }
+    // the sunbeams
+    let beams = if array_get(r.lv, sunbeam()) > 0 { beam_count(r) } else { 0 };
+    let mut bm = 0;
+    while bm < beams {
+        let a = get(r, k_beam()) + bm * 1024 / beams;
+        let wdt = beam_width(r);
+        cast(g, r.still, r.w, px, py - 4, beam_length(r), a - wdt / 2, wdt, 12, 255, 140, v.x, v.y, t);
+        bm = bm + 1;
+    }
+    // the halo's embers
+    if array_get(r.lv, halo()) > 0 {
+        let n = halo_count(r);
+        let rad = halo_radius(r);
+        let mut k = 0;
+        while k < n {
+            let a = get(r, k_halo()) + k * 1024 / n;
+            light_add(g, px + ((cos(t, a) * rad) >> 16) - v.x, py + ((sin(t, a) * rad) >> 16) - v.y, 34, 120, 10);
+            k = k + 1;
+        }
+    }
+    // shots
+    let s = r.shots;
+    let mut i = 0;
+    while i < count(s) {
+        let (x, y) = (((array_get(col(s, sh_x()), i) - v.x16) >> 4), ((array_get(col(s, sh_y()), i) - v.y16) >> 4));
+        let k = array_get(col(s, sh_kind()), i);
+        if x > -40 && y > -40 && x < sw() + 40 && y < sh() + 40 {
+            if k == 0 { light_add(g, x, y, 30, 130, 10) }
+            else if k == 1 { light_add(g, x, y, 34, 10, 210) }
+            else { light_add(g, x, y, 20 + (40 - array_get(col(s, sh_t()), i)), 50, 40) }
+        }
+        i = i + 1;
+    }
+    // fires on the ground
+    let fi = r.fires;
+    i = 0;
+    while i < count(fi) {
+        let life = array_get(col(fi, fi_life()), i);
+        let fade = (life * 256 / 40).min(256);
+        light_add(g, ((array_get(col(fi, fi_x()), i) - v.x16) >> 4), ((array_get(col(fi, fi_y()), i) - v.y16) >> 4), array_get(col(fi, fi_r()), i) * 3, (120 + (frame * 13 + i * 50) % 40) * fade / 256, 0);
+        i = i + 1;
+    }
+    // bursts of light
+    let fl = r.flashes;
+    i = 0;
+    while i < count(fl) {
+        let k = array_get(col(fl, fl_life()), i) * 256 / array_get(col(fl, fl_max()), i).max(1);
+        light_add(g, array_get(col(fl, fl_x()), i) - v.x, array_get(col(fl, fl_y()), i) - v.y, array_get(col(fl, fl_r()), i), array_get(col(fl, fl_warm()), i) * k / 256, array_get(col(fl, fl_cool()), i) * k / 256);
+        i = i + 1;
+    }
+    // the creatures' bolts: a cold violet light
+    let bo = r.bolts;
+    i = 0;
+    while i < count(bo) {
+        let (x, y) = (((array_get(col(bo, bo_x()), i) - v.x16) >> 4), ((array_get(col(bo, bo_y()), i) - v.y16) >> 4));
+        if x > -20 && y > -20 && x < sw() + 20 && y < sh() + 20 { light_add(g, x, y, 22, 30, 150) }
+        i = i + 1;
+    }
+    // embers on the ground, faintly (the bigger, the brighter)
+    let d = r.drops;
+    i = 0;
+    let mut shown = 0;
+    while i < count(d) && shown < 70 {
+        let (x, y) = (((array_get(col(d, dr_x()), i) - v.x16) >> 4), ((array_get(col(d, dr_y()), i) - v.y16) >> 4));
+        if x > 0 && y > 0 && x < sw() && y < sh() {
+            let v = array_get(col(d, dr_value()), i);
+            let k = array_get(col(d, dr_kind()), i);
+            if k == 0 { if v >= 5 { light_add(g, x, y, 16, 20, 90) } else { light_add(g, x, y, 10, 50, 0) } }
+            else if k == 3 { light_add(g, x, y, 40, 140, 30) }
+            else { light_add(g, x, y, 14, 60, 30) }
+            shown = shown + 1;
+        }
+        i = i + 1;
+    }
+    // the zaps
+    let z = r.zaps;
+    i = 0;
+    while i < count(z) {
+        light_add(g, array_get(col(z, za_x1()), i) - v.x, array_get(col(z, za_y1()), i) - v.y, 30, 20, 160);
+        i = i + 1;
+    }
+}
+
+// ---- what's on the land
+
+fn draw_things(g: Gfx, a: Art, r: Run, v: View, frame: Int, show_numbers: Bool) {
+    let t = r.table;
+    // the braziers
+    let mut b = 0;
+    while b < brazier_count(r.w) {
+        let (x, y) = (array_get(r.w.braziers, b * 2) - v.x, array_get(r.w.braziers, b * 2 + 1) - v.y);
+        if x > -20 && y > -30 && x < sw() + 20 && y < sh() + 20 {
+            shadow(g, x + 1, y + 4, 7, 2);
+            draw_sprite(g, a.brazier, x, y, false, lit_at(g, x, y), false);
+            if array_get(r.lit, b) > 0 {
+                // the fire in it
+                let mut k = 0;
+                while k < 7 {
+                    let fx = x - 4 + k + (sin(t, frame * 30 + k * 150) >> 15);
+                    let h = 4 + ((sin(t, frame * 41 + k * 211) + 65536) >> 14) + (if k == 3 { 3 } else { 0 });
+                    let mut j = 0;
+                    while j < h {
+                        let c = if j < 2 { 0xfff0c0 } else if j < h / 2 { 0xffb040 } else { 0xe05018 };
+                        put(g, fx, y - 4 - j, c);
+                        j = j + 1;
+                    }
+                    k = k + 1;
+                }
+                glow(g, x, y - 7, 14, 0x502008);
+            } else {
+                let heat = array_get(r.heat, b);
+                if heat > 0 {
+                    // (catching: a ring filling up round it)
+                    let mut k = 0;
+                    while k < heat * 64 / 80 {
+                        let an = k * 16 - 256;
+                        put(g, x + ((cos(t, an) * 14) >> 16), y - 2 + ((sin(t, an) * 14) >> 16), 0xffc060);
+                        k = k + 1;
+                    }
+                    glow(g, x, y - 4, 6 + heat / 10, 0x401808);
+                }
+                // (unlit and near: a hint)
+                let (dx, dy) = (((get(r, k_x()) - v.x16) >> 4) - x, ((get(r, k_y()) - v.y16) >> 4) - y);
+                if dx * dx + dy * dy < 70 * 70 && heat == 0 && frame / 20 % 2 == 0 { say_at(g, "STAND HERE TO LIGHT", x, y - 24, 1, 0xffd890) }
+            }
+        }
+        b = b + 1;
+    }
+    draw_drops(g, a, r, v, frame);
+    draw_foes(g, a, r, v, frame);
+    draw_ember(g, r, v, frame);
+    draw_shots(g, r, v, frame);
+    // sparks, added to what's under them
+    let s = r.sparks;
+    let (xs, ys, life, max, colors, kinds) = (col(s, sp_x()), col(s, sp_y()), col(s, sp_life()), col(s, sp_max()), col(s, sp_color()), col(s, sp_kind()));
+    let mut i = 0;
+    while i < count(s) {
+        let (x, y) = (((array_get(xs, i) - v.x16) >> 4), ((array_get(ys, i) - v.y16) >> 4));
+        let k = array_get(life, i) * 256 / array_get(max, i).max(1);
+        let c = scale(array_get(colors, i), k.min(256));
+        add(g, x, y, c);
+        if array_get(kinds, i) == 0 && k > 128 { add(g, x + 1, y, scale(c, 128)) }
+        i = i + 1;
+    }
+    if show_numbers {
+        let nu = r.nums;
+        i = 0;
+        while i < count(nu) {
+            let (x, y) = (((array_get(col(nu, nu_x()), i) - v.x16) >> 4), ((array_get(col(nu, nu_y()), i) - v.y16) >> 4));
+            if x > 0 && y > 0 && x < sw() && y < sh() {
+                say_at(g, array_get(col(nu, nu_value()), i).show(), x, y, 1, array_get(col(nu, nu_color()), i));
+            }
+            i = i + 1;
+        }
+    }
+}
+
+fn draw_drops(g: Gfx, a: Art, r: Run, v: View, frame: Int) {
+    let d = r.drops;
+    let t = r.table;
+    let mut i = 0;
+    while i < count(d) {
+        let (x, y) = (((array_get(col(d, dr_x()), i) - v.x16) >> 4), ((array_get(col(d, dr_y()), i) - v.y16) >> 4));
+        if x > -10 && y > -10 && x < sw() + 10 && y < sh() + 10 {
+            let k = array_get(col(d, dr_kind()), i);
+            let v = array_get(col(d, dr_value()), i);
+            let tt = array_get(col(d, dr_t()), i);
+            let bob = (sin(t, tt * 12) >> 15);
+            if k == 0 {
+                // an ember: a little gem of light, orange, blue or white by its worth
+                let (c1, c2) = if v >= 20 { (0xffffff, 0xffe080) } else if v >= 5 { (0xd0f4ff, 0x40a0ff) } else { (0xffe0a0, 0xff7820) };
+                let yy = y + bob;
+                put(g, x, yy - 1, c2);
+                put(g, x - 1, yy, c2);
+                put(g, x + 1, yy, c2);
+                put(g, x, yy + 1, c2);
+                put(g, x, yy, c1);
+                if v >= 5 {
+                    put(g, x, yy - 2, c2);
+                    put(g, x, yy + 2, c2);
+                }
+            } else if k == 1 {
+                disc(g, x, y + bob, 2, 0xff5030);
+                put(g, x - 1, y + bob - 1, 0xffd0a0);
+            } else if k == 2 {
+                let tw = if tt / 6 % 2 == 0 { 0xe0ffff } else { 0x60e0ff };
+                put(g, x, y - 2 + bob, tw);
+                put(g, x, y + 2 + bob, tw);
+                put(g, x - 2, y + bob, tw);
+                put(g, x + 2, y + bob, tw);
+                put(g, x, y + bob, 0xffffff);
+                glow(g, x, y + bob, 7, 0x104050);
+            } else if k == 3 {
+                shadow(g, x, y + 5, 7, 2);
+                draw_sprite(g, a.chest, x, y + bob / 2, false, lit_at(g, x, y), false);
+                glow(g, x, y, 12 + ((sin(t, tt * 8) + 65536) >> 14), 0x302008);
+            } else {
+                disc(g, x, y + bob, 1, 0xc08040);
+                put(g, x, y + bob, 0xffd090);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn draw_foes(g: Gfx, a: Art, r: Run, v: View, frame: Int) {
+    let f = r.foes;
+    let (px, py) = (((get(r, k_x()) - v.x16) >> 4), ((get(r, k_y()) - v.y16) >> 4));
+    let mut i = 0;
+    while i < count(f.p) {
+        let (x, y) = (((array_get(f.x, i) - v.x16) >> 4), ((array_get(f.y, i) - v.y16) >> 4));
+        if x > -40 && y > -40 && x < sw() + 40 && y < sh() + 40 {
+            let kind = array_get(f.kind, i);
+            let t = array_get(f.t, i);
+            let flip = px < x;
+            let flash = array_get(f.flash, i) > 0;
+            let level = lit_at(g, x, y);
+            let elite = array_get(f.elite, i) > 0;
+            if kind == boss() {
+                draw_boss(g, r, i, x, y, frame);
+            } else {
+                let sprite = if kind == gloom() { if t / 12 % 2 == 0 { a.gloom } else { a.gloom2 } }
+                    else if kind == shade() { a.shade } else if kind == husk() { a.husk }
+                    else if kind == bat() { if t / 5 % 2 == 0 { a.bat } else { a.bat2 } }
+                    else if kind == spitter() { a.spitter } else if kind == snuffer() { a.snuffer } else { a.wraith };
+                // (walkers bob as they go; the flying float)
+                let bob = if kind == bat() || kind == wraith() || kind == shade() { sin(r.table, t * 9 + i * 50) >> 15 } else { (t / 8) % 2 };
+                if kind != bat() && kind != wraith() && kind != shade() { shadow(g, x, y + sprite.h / 2 * (if elite { 2 } else { 1 }) - 1, sprite.w / 3 * (if elite { 2 } else { 1 }), 2) }
+                if kind == shade() && brightness(level) < 40 && !flash {
+                    // (a shade in the dark: only its eyes)
+                    put(g, x - 2, y - 2 + bob, 0x80f0ff);
+                    put(g, x + 1, y - 2 + bob, 0x80f0ff);
+                } else if elite {
+                    glow(g, x, y + bob, 22, 0x401808);
+                    draw_big(g, sprite, x, y + bob, flip, level, flash, 2);
+                } else {
+                    draw_sprite(g, sprite, x, y + bob, flip, level, flash);
+                }
+                if kind == snuffer() && array_get(f.state, i) > 0 {
+                    // (snuffing: a ring of cold closing)
+                    let s = array_get(f.state, i);
+                    ring(g, x, y, 18 - s * 14 / 120, 1, 0x305070);
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// the boss: a great dark body that heaves, crowned with eyes, its limbs
+// reaching
+fn draw_boss(g: Gfx, r: Run, i: Int, x: Int, y: Int, frame: Int) {
+    let t = r.table;
+    let f = r.foes;
+    let region = get(r, k_region());
+    let flash = array_get(f.flash, i) > 0;
+    let state = array_get(f.state, i);
+    let st = array_get(f.t, i);
+    shadow(g, x, y + 20, 22, 5);
+    // the limbs: curving lines, swaying
+    let limbs = 7 + region;
+    let mut k = 0;
+    while k < limbs {
+        let a = k * 1024 / limbs + (sin(t, frame * 6 + k * 90) >> 11);
+        let mut s = 0;
+        let mut lx = x;
+        let mut ly = y;
+        while s < 8 {
+            let bend = a + (sin(t, frame * 11 + k * 70 + s * 60) >> 10);
+            let nx = lx + ((cos(t, bend) * 5) >> 16);
+            let ny = ly + ((sin(t, bend) * 5) >> 16);
+            let c = if flash { 0xffffff } else if s < 6 { 0x1a0c22 } else { 0x2c1438 };
+            disc(g, nx, ny, (4 - s / 2).max(1), c);
+            lx = nx;
+            ly = ny;
+            s = s + 1;
+        }
+        k = k + 1;
+    }
+    // the body
+    let heave = sin(t, frame * 8) >> 14;
+    let level = lit_at(g, x, y);
+    let mut dy = -22;
+    while dy <= 22 {
+        let mut dx = -24;
+        while dx <= 24 {
+            let rr = 20 + heave + as_noise(hash(dx / 3, dy / 3, frame / 6) & 3);
+            if dx * dx + dy * dy * 5 / 4 < rr * rr {
+                let shade_i = 124 + ((3 - (dx + dy + 30) / 18).clamp(0, 3));
+                let c = if flash { 0xfff0e0 } else { array_get(g.shade, (level << 7) + shade_i) };
+                put(g, x + dx, y + dy, c);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    // the eyes: a crown of them, red, gold in the middle; wide when it attacks
+    let eyes = 5 + region * 2;
+    let open = if state == 0 { 1 } else { 2 };
+    let mut e = 0;
+    while e < eyes {
+        // (spread over the top of it)
+        let a = 600 + e * 330 / (eyes - 1).max(1);
+        let ex = x + ((cos(t, a) * 13) >> 16);
+        let ey = y - 2 + ((sin(t, a) * 9) >> 16);
+        let c = if e == eyes / 2 { 0xffe070 } else { 0xff3828 };
+        rect(g, ex - 1, ey - open / 2, 2, open, c);
+        glow(g, ex, ey, 5, 0x401008);
+        e = e + 1;
+    }
+    if state == 3 && st < 45 {
+        // (gathering itself to charge: glowing red)
+        glow(g, x, y, 30 + st / 2, 0x300804);
+    }
+}
+
+// (a hash's lowest bits as a little wobble, -1 to 2)
+fn as_noise(h: Int) -> Int { h - 1 }
+
+// the ember: a flame, swaying, with eyes; white when hurt
+fn draw_ember(g: Gfx, r: Run, v: View, frame: Int) {
+    if get(r, k_dead()) == 0 {
+        let t = r.table;
+        let (x, y) = (((get(r, k_x()) - v.x16) >> 4), ((get(r, k_y()) - v.y16) >> 4));
+        let (core, mid, edge) = char_colors(get(r, k_char()));
+        let hurt = get(r, k_hurt()) > 0;
+        let blink = get(r, k_iframes()) > 0 && frame / 3 % 2 == 0;
+        shadow(g, x, y + 6, 5, 2);
+        glow(g, x, y - 3, 18, scale(edge, 70));
+        if !blink {
+            // the flame, a row at a time from the bottom: round below, a
+            // tongue above, swaying
+            let tall = 13 + (sin(t, frame * 23) >> 15);
+            let mut row = 0;
+            while row < tall {
+                let yy = y + 5 - row;
+                let half = if row < 5 { isqrt(25 - (5 - row) * (5 - row)) } else { (tall - row) * 5 / (tall - 4) };
+                let sway = (sin(t, frame * 19 - row * 40) * row) >> 19;
+                let mut dx = -half;
+                while dx <= half {
+                    let d = dx.abs() * 256 / (half + 1);
+                    let c = if hurt { 0xffffff } else if d < 100 && row < tall * 2 / 3 { core } else if d < 190 { mid } else { edge };
+                    put(g, x + dx + sway, yy, c);
+                    dx = dx + 1;
+                }
+                row = row + 1;
+            }
+            // eyes, looking where it's going
+            let look = get(r, k_mvx()) / 128;
+            put(g, x - 2 + look, y, 0x301008);
+            put(g, x + 1 + look, y, 0x301008);
+        }
+        // its flame left, as a bar beneath it
+        let max = stat(r, st_maxhp()) * 16;
+        let hp = get(r, k_hp()).max(0);
+        rect(g, x - 10, y + 10, 20, 3, 0x1a0c0c);
+        rect(g, x - 9, y + 11, 18 * hp / max.max(1), 1, if hp * 3 < max { 0xff4030 } else { 0xffa040 });
+    }
+}
+
+fn draw_shots(g: Gfx, r: Run, v: View, frame: Int) {
+    let t = r.table;
+    let (px, py) = (((get(r, k_x()) - v.x16) >> 4), ((get(r, k_y()) - v.y16) >> 4));
+    // the sunbeams: light from the ember, out to what stops them
+    if array_get(r.lv, sunbeam()) > 0 {
+        let n = beam_count(r);
+        let len = beam_length(r);
+        let mut b = 0;
+        while b < n {
+            let a = get(r, k_beam()) + b * 1024 / n;
+            let far = super::light::reach(r.w, px + v.x, py + v.y - 4, a, len, t);
+            let (ex, ey) = (px + ((cos(t, a) * far) >> 16), py - 4 + ((sin(t, a) * far) >> 16));
+            ray(g, px, py - 4, ex, ey, 0x806040);
+            ray(g, px + 1, py - 4, ex + 1, ey, 0x403020);
+            ray(g, px, py - 3, ex, ey + 1, 0x403020);
+            glow(g, ex, ey, 8, 0x604020);
+            b = b + 1;
+        }
+    }
+    // the halo
+    if array_get(r.lv, halo()) > 0 {
+        let n = halo_count(r);
+        let rad = halo_radius(r);
+        let evo = array_get(r.evo, halo()) > 0;
+        let mut k = 0;
+        while k < n {
+            let a = get(r, k_halo()) + k * 1024 / n;
+            let (x, y) = (px + ((cos(t, a) * rad) >> 16), py - 3 + ((sin(t, a) * rad) >> 16));
+            glow(g, x, y, if evo { 11 } else { 8 }, 0x804010);
+            disc(g, x, y, if evo { 3 } else { 2 }, if evo { 0xfffff0 } else { 0xffd070 });
+            put(g, x, y, 0xffffff);
+            k = k + 1;
+        }
+    }
+    let s = r.shots;
+    let mut i = 0;
+    while i < count(s) {
+        let (x, y) = (((array_get(col(s, sh_x()), i) - v.x16) >> 4), ((array_get(col(s, sh_y()), i) - v.y16) >> 4));
+        let k = array_get(col(s, sh_kind()), i);
+        if k == 0 {
+            let (vx, vy) = (array_get(col(s, sh_vx()), i), array_get(col(s, sh_vy()), i));
+            let big = array_get(col(s, sh_r()), i) > 4;
+            ray(g, x, y, x - vx / 6, y - vy / 6, 0xa05010);
+            ray(g, x, y, x - vx / 12, y - vy / 12, 0xc08040);
+            glow(g, x, y, if big { 8 } else { 5 }, 0x804010);
+            put(g, x, y, 0xffffff);
+        } else if k == 1 {
+            glow(g, x, y, 7, 0x104070);
+            disc(g, x, y, 1, 0xc0f0ff);
+            put(g, x, y, 0xffffff);
+        } else {
+            // a comet falling: where it'll land marked, and the star coming down
+            let left = array_get(col(s, sh_t()), i);
+            let radius = array_get(col(s, sh_r()), i);
+            ring(g, x, y, radius * left / 40 + 2, 1, 0x602010);
+            let (sx, sy) = (x + left * 3, y - left * 7);
+            ray(g, sx, sy, sx + 9, sy - 21, 0x604020);
+            glow(g, sx, sy, 7, 0xa06020);
+            disc(g, sx, sy, 1, 0xfffff0);
+        }
+        i = i + 1;
+    }
+    // novas
+    let rg = r.rings;
+    i = 0;
+    while i < count(rg) {
+        let radius = array_get(col(rg, ri_r()), i);
+        if radius > 0 {
+            let (x, y) = ((array_get(col(rg, ri_x()), i) - v.x16) >> 4, (array_get(col(rg, ri_y()), i) - v.y16) >> 4);
+            let k = 256 - radius * 256 / array_get(col(rg, ri_max()), i).max(1);
+            ring(g, x, y, radius, 3, scale(0xffa040, k));
+            ring(g, x, y, (radius - 6).max(0), 4, scale(0x602008, k));
+        }
+        i = i + 1;
+    }
+    // lightning: jagged strokes
+    let z = r.zaps;
+    i = 0;
+    while i < count(z) {
+        let (x0, y0, x1, y1) = (array_get(col(z, za_x0()), i) - v.x, array_get(col(z, za_y0()), i) - v.y, array_get(col(z, za_x1()), i) - v.x, array_get(col(z, za_y1()), i) - v.y);
+        let seed = array_get(col(z, za_seed()), i) + array_get(col(z, za_life()), i) / 3;
+        let life = array_get(col(z, za_life()), i);
+        let mut lx = x0;
+        let mut ly = y0;
+        let mut k = 1;
+        while k <= 6 {
+            let (tx, ty) = (x0 + (x1 - x0) * k / 6, y0 + (y1 - y0) * k / 6);
+            let j = if k == 6 { 0 } else { (hash(k, seed, 7) % 11) - 5 };
+            let (nx, ny) = (tx + j, ty + (hash(k, seed, 9) % 11) - 5);
+            ray(g, lx, ly, nx, ny, scale(0xe0f8ff, life * 21));
+            ray(g, lx + 1, ly, nx + 1, ny, scale(0x3070c0, life * 21));
+            lx = nx;
+            ly = ny;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    // the creatures' bolts
+    let bo = r.bolts;
+    i = 0;
+    while i < count(bo) {
+        let (x, y) = (((array_get(col(bo, bo_x()), i) - v.x16) >> 4), ((array_get(col(bo, bo_y()), i) - v.y16) >> 4));
+        if x > -10 && y > -10 && x < sw() + 10 && y < sh() + 10 {
+            glow(g, x, y, 6, 0x401060);
+            disc(g, x, y, 2, 0x200830);
+            put(g, x, y, 0xe0a0ff);
+        }
+        i = i + 1;
+    }
+}
+
+// ---- the HUD
+
+pub fn draw_hud(g: Gfx, r: Run, frame: Int) {
+    let w = sw();
+    // experience: a bar right across the top
+    let need = needed(get(r, k_level()));
+    rect(g, 0, 0, w, 5, 0x100808);
+    let fill = (w - 2) * get(r, k_xp()) / need.max(1);
+    let mut x = 0;
+    while x < fill {
+        let c = mix(0xb04010, 0xffd060, x * 256 / w);
+        rect(g, 1 + x, 1, 1, 3, c);
+        x = x + 1;
+    }
+    rect(g, 1, 1, fill, 1, 0xfff0c0);
+    say(g, "LV " ++ get(r, k_level()).show(), w - text_w(g, "LV " ++ get(r, k_level()).show(), 1) - 4, 8, 1, 0xfff0d0);
+    // the time
+    let secs = get(r, k_time()) / 60;
+    let clock = (secs / 60).show().pad_left(2, "0") ++ ":" ++ (secs % 60).show().pad_left(2, "0");
+    say_mid(g, clock, 9, 2, if get(r, k_boss()) >= 0 { 0xff8070 } else { 0xfff4e0 });
+    // kills, cinders, braziers
+    say(g, get(r, k_kills()).show() ++ " SLAIN", w - text_w(g, get(r, k_kills()).show() ++ " SLAIN", 1) - 4, 18, 1, 0xd0c8c0);
+    say(g, get(r, k_cinders()).show() ++ " CINDERS", w - text_w(g, get(r, k_cinders()).show() ++ " CINDERS", 1) - 4, 28, 1, 0xffb070);
+    let lit = lit_count(r);
+    say(g, lit.show() ++ "/" ++ brazier_count(r.w).show() ++ " BRAZIERS", w - text_w(g, lit.show() ++ "/" ++ brazier_count(r.w).show() ++ " BRAZIERS", 1) - 4, 38, 1, 0xffd890);
+    // what the ember has: weapons on one row, gifts beneath
+    let mut wn = 0;
+    let mut gn = 0;
+    let mut u = 0;
+    while u < 14 {
+        let lv = array_get(r.lv, u);
+        if lv > 0 {
+            let (ix, iy) = if is_weapon(u) { (4 + wn * 19, 8) } else { (4 + gn * 19, 28) };
+            // (only weapons evolve: there are eight of those)
+            let evolved = is_weapon(u) && array_get(r.evo, u) > 0;
+            rect(g, ix - 1, iy - 1, 18, 18, 0x140c10);
+            outline(g, ix - 1, iy - 1, 18, 18, if evolved { 0xffd060 } else { 0x4a3830 });
+            icon(g, u, ix, iy, 1, frame, r.table);
+            // its level, as pips
+            let mut p = 0;
+            while p < lv {
+                put(g, ix + 1 + p * 3, iy + 17, if evolved { 0xffe070 } else { 0xffa040 });
+                put(g, ix + 2 + p * 3, iy + 17, if evolved { 0xffe070 } else { 0xffa040 });
+                p = p + 1;
+            }
+            if is_weapon(u) { wn = wn + 1 } else { gn = gn + 1 }
+        }
+        u = u + 1;
+    }
+    // the nearest unlit brazier, if it's off the screen: an arrow at the edge toward it
+    brazier_arrow(g, r, frame);
+    // the boss's life
+    let bid = get(r, k_boss());
+    if bid >= 0 {
+        let f = r.foes;
+        let mut i = 0;
+        while i < count(f.p) {
+            if array_get(f.kind, i) == boss() {
+                let bw = 240;
+                let bx = (w - bw) / 2;
+                rect(g, bx - 2, sh() - 16, bw + 4, 8, 0x100608);
+                rect(g, bx, sh() - 14, bw * array_get(f.hp, i).max(0) / array_get(f.max, i).max(1), 4, 0xc02030);
+                rect(g, bx, sh() - 14, bw * array_get(f.hp, i).max(0) / array_get(f.max, i).max(1), 1, 0xff8080);
+                say_mid(g, boss_name(get(r, k_region())), sh() - 27, 1, 0xffc0b0);
+            }
+            i = i + 1;
+        }
+    }
+    // the banner
+    let bt = get(r, k_banner_t());
+    if bt > 0 {
+        let s = array_get(r.banner, 0);
+        let k = if bt > 190 { (210 - bt) * 12 } else if bt < 40 { bt * 6 } else { 240 };
+        let c = mix(0x000000, 0xfff0d0, k.min(256));
+        say_mid(g, s, 62, 2, c);
+    }
+}
+
+fn brazier_arrow(g: Gfx, r: Run, frame: Int) {
+    let (px, py) = (get(r, k_x()) >> 4, get(r, k_y()) >> 4);
+    let mut best = -1;
+    let mut best_d = 1 << 40;
+    let mut b = 0;
+    while b < brazier_count(r.w) {
+        if array_get(r.lit, b) == 0 {
+            let dx = array_get(r.w.braziers, b * 2) - px;
+            let dy = array_get(r.w.braziers, b * 2 + 1) - py;
+            if dx * dx + dy * dy < best_d {
+                best_d = dx * dx + dy * dy;
+                best = b;
+            }
+        }
+        b = b + 1;
+    }
+    if best >= 0 {
+        let dx = array_get(r.w.braziers, best * 2) - px;
+        let dy = array_get(r.w.braziers, best * 2 + 1) - py;
+        if dx.abs() > 230 || dy.abs() > 125 {
+            // (on the edge of a box inside the screen, in its direction)
+            let k = (dx.abs() * 256 / 215).max(dy.abs() * 256 / 112).max(1);
+            let (ax, ay) = (sw() / 2 + dx * 256 / k, sh() / 2 + dy * 256 / k);
+            let d = isqrt(best_d).max(1);
+            let (ux, uy) = (dx * 256 / d, dy * 256 / d);
+            let pulse = if frame / 15 % 2 == 0 { 0xffc060 } else { 0xff8030 };
+            let mut s = 0;
+            while s < 7 {
+                let w = (7 - s) / 2;
+                let cx = ax - ux * s / 256;
+                let cy = ay - uy * s / 256;
+                let mut q = -w;
+                while q <= w {
+                    put(g, cx - uy * q / 256, cy + ux * q / 256, pulse);
+                    q = q + 1;
+                }
+                s = s + 1;
+            }
+            glow(g, ax, ay, 8, 0x402008);
+        }
+    }
+}

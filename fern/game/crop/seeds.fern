@@ -1,0 +1,117 @@
+// The seeds: what can grow in a plot. Each kind of plant has a name, what
+// sort of plant it is (its tags: roots, flowers, fruit, grain and so on,
+// which tools care about), how many hits it takes to ripen, what it
+// yields when it's harvested, what it costs at the market, and what's
+// special about it (worked out in play.fern, by its number).
+
+pub fn seed_count() -> Int { 18 }
+
+pub fn turnip() -> Int { 0 }
+pub fn carrot() -> Int { 1 }
+pub fn potato() -> Int { 2 }
+pub fn sunflower() -> Int { 3 }
+pub fn tulip() -> Int { 4 }
+pub fn rose() -> Int { 5 }
+pub fn pumpkin() -> Int { 6 }
+pub fn strawberry() -> Int { 7 }
+pub fn watermelon() -> Int { 8 }
+pub fn corn() -> Int { 9 }
+pub fn wheat() -> Int { 10 }
+pub fn mushroom() -> Int { 11 }
+pub fn chili() -> Int { 12 }
+pub fn cactus() -> Int { 13 }
+pub fn clover() -> Int { 14 }
+pub fn cabbage() -> Int { 15 }
+pub fn apple() -> Int { 16 }
+pub fn blueberry() -> Int { 17 }
+
+// tags, a bit each
+pub fn tg_root() -> Int { 1 }
+pub fn tg_flower() -> Int { 2 }
+pub fn tg_fruit() -> Int { 4 }
+pub fn tg_grain() -> Int { 8 }
+pub fn tg_fungus() -> Int { 16 }
+pub fn tg_leaf() -> Int { 32 }
+
+pub fn seed_name(s: Int) -> String {
+    if s == 0 { "Turnip" } else if s == 1 { "Carrot" } else if s == 2 { "Potato" } else if s == 3 { "Sunflower" }
+    else if s == 4 { "Tulip" } else if s == 5 { "Rose" } else if s == 6 { "Pumpkin" } else if s == 7 { "Strawberry" }
+    else if s == 8 { "Watermelon" } else if s == 9 { "Corn" } else if s == 10 { "Wheat" } else if s == 11 { "Mushroom" }
+    else if s == 12 { "Chili" } else if s == 13 { "Cactus" } else if s == 14 { "Clover" } else if s == 15 { "Cabbage" }
+    else if s == 16 { "Apple Tree" } else { "Blueberry" }
+}
+
+pub fn seed_tags(s: Int) -> Int {
+    if s <= 2 { tg_root() } else if s <= 5 { tg_flower() } else if s <= 8 { tg_fruit() }
+    else if s <= 10 { tg_grain() } else if s == 11 { tg_fungus() } else if s == 12 { tg_fruit() }
+    else if s == 13 { 0 } else if s == 14 { tg_flower() } else if s == 15 { tg_leaf() }
+    else { tg_fruit() }
+}
+
+pub fn has_tag(s: Int, t: Int) -> Bool { s >= 0 && (seed_tags(s) & t) != 0 }
+
+pub fn tag_name(s: Int) -> String {
+    let t = seed_tags(s);
+    if t == tg_root() { "Root" } else if t == tg_flower() { "Flower" } else if t == tg_fruit() { "Fruit" }
+    else if t == tg_grain() { "Grain" } else if t == tg_fungus() { "Fungus" } else if t == tg_leaf() { "Leaf" } else { "Succulent" }
+}
+
+// hits to ripen (0: it never ripens)
+pub fn seed_hits(s: Int) -> Int {
+    if s == 0 { 3 } else if s == 1 { 2 } else if s == 2 { 5 } else if s == 3 { 4 } else if s == 4 { 3 }
+    else if s == 5 { 6 } else if s == 6 { 8 } else if s == 7 { 2 } else if s == 8 { 6 } else if s == 9 { 3 }
+    else if s == 10 { 1 } else if s == 11 { 3 } else if s == 12 { 4 } else if s == 13 { 0 } else if s == 14 { 2 }
+    else if s == 15 { 4 } else if s == 16 { 10 } else { 3 }
+}
+
+// what a harvest puts in the basket, at level 1
+pub fn seed_yield(s: Int) -> Int {
+    if s == 0 { 120 } else if s == 1 { 60 } else if s == 2 { 200 } else if s == 3 { 60 } else if s == 4 { 50 }
+    else if s == 5 { 100 } else if s == 6 { 700 } else if s == 7 { 50 } else if s == 8 { 240 } else if s == 9 { 40 }
+    else if s == 10 { 20 } else if s == 11 { 100 } else if s == 12 { 90 } else if s == 13 { 0 } else if s == 14 { 40 }
+    else if s == 15 { 360 } else if s == 16 { 500 } else { 70 }
+}
+
+pub fn seed_price(s: Int) -> Int {
+    if s == 0 { 2 } else if s == 1 { 2 } else if s == 2 { 3 } else if s == 3 { 4 } else if s == 4 { 3 }
+    else if s == 5 { 6 } else if s == 6 { 5 } else if s == 7 { 3 } else if s == 8 { 6 } else if s == 9 { 3 }
+    else if s == 10 { 2 } else if s == 11 { 3 } else if s == 12 { 4 } else if s == 13 { 5 } else if s == 14 { 3 }
+    else if s == 15 { 4 } else if s == 16 { 7 } else { 4 }
+}
+
+// how rare a seed is at the market: 0 common, 1 uncommon, 2 rare
+pub fn seed_rarity(s: Int) -> Int {
+    if s == 5 || s == 8 || s == 13 || s == 16 { 2 } else if s == 2 || s == 3 || s == 6 || s == 11 || s == 12 || s == 14 || s == 17 { 1 } else { 0 }
+}
+
+// whether it kicks the ball away like a bumper (it's springy), or soaks
+// the ball up (it's heavy)
+pub fn seed_kicks(s: Int) -> Bool { s == 3 || s == 5 || s == 13 }
+pub fn seed_heavy(s: Int) -> Bool { s == 6 || s == 15 }
+
+// what's special, in a line or two
+pub fn seed_text(s: Int) -> String {
+    if s == 0 { "Dependable. Ripens in 3 hits." }
+    else if s == 1 { "Harvest: neighbouring roots grow." }
+    else if s == 2 { "Each harvest this week adds +50 to every potato's yield." }
+    else if s == 3 { "Springy. Harvest: +1 mult." }
+    else if s == 4 { "Harvest: every other flower grows." }
+    else if s == 5 { "Springy. Harvest: the basket x1.5." }
+    else if s == 6 { "Heavy: the ball thuds into it. Huge yield." }
+    else if s == 7 { "Harvest: sends a runner to an empty plot (this week)." }
+    else if s == 8 { "Harvest: a second ball!" }
+    else if s == 9 { "Yields 40 for each corn planted." }
+    else if s == 10 { "Ripe at every hit. Yield grows each harvest this ball." }
+    else if s == 11 { "Grows on its own. Harvest: neighbours grow." }
+    else if s == 12 { "Harvest: the ball's hot for 8 seconds; harvests x2." }
+    else if s == 13 { "Springy. Never ripens: every 3rd hit, +1 mult." }
+    else if s == 14 { "Each clover: +6% chance a harvest is golden." }
+    else if s == 15 { "Grows only from hard hits." }
+    else if s == 16 { "Every hit drops an apple: +30." }
+    else { "Harvest: earns 1 coin." }
+}
+
+// how big it grows: the radius of the plant when ripe (pixels)
+pub fn seed_size(s: Int) -> Int {
+    if s == 6 || s == 16 { 10 } else if s == 10 || s == 14 || s == 7 { 7 } else { 8 }
+}

@@ -1,0 +1,143 @@
+// The acts: each a run across the big top from one platform to another,
+// over the safety net, by way of what Stella can grab (hooks: a ring on
+// a rope, a trapeze bar, or one that moves) and what's there for style
+// (hoops of ribbon to fly through, balloons to pop, trampolines).
+//
+// Thirty acts in three tours, each made from its number by trying it
+// (see maker.fern): the first few teach one thing each; after them, more
+// hooks, wider gaps, narrower windows to let go in; hoops and balloons
+// turn up a few acts in. The Encore is the same maker, run on and on.
+//
+// Units are pixels of the world; the floor (the net) is at y 256.
+
+pub fn net_y() -> Int { 252 }
+pub fn act_count() -> Int { 30 }
+pub fn tour_of(n: Int) -> Int { n / 10 }
+
+pub fn max_hooks() -> Int { 40 }
+pub fn max_plats() -> Int { 8 }
+pub fn max_bits() -> Int { 40 }
+
+// hook kinds
+pub fn h_ring() -> Int { 0 }
+pub fn h_bar() -> Int { 1 }
+pub fn h_mover() -> Int { 2 }
+
+// bit kinds: things for style
+pub fn b_hoop() -> Int { 0 }
+pub fn b_balloon() -> Int { 1 }
+pub fn b_tramp() -> Int { 2 }
+
+pub struct Act {
+    n: Int,
+    // hooks: where, what kind; a mover's swing (amplitude in x and y,
+    // speed, phase)
+    hx: Array<Int>,
+    hy: Array<Int>,
+    hk: Array<Int>,
+    hax: Array<Int>,
+    hay: Array<Int>,
+    hsp: Array<Int>,
+    hph: Array<Int>,
+    n_hooks: Int,
+    // platforms: left, right, top; the first is the start, the last the end
+    // (which, while the act's being made, there isn't yet: -1), and between
+    // them places to rest, where she starts again after a fall
+    px0: Array<Int>,
+    px1: Array<Int>,
+    py: Array<Int>,
+    n_plats: Int,
+    end: Int,
+    // bits: kind, where (a trampoline's x is its middle), and whether taken
+    bk: Array<Int>,
+    bx: Array<Int>,
+    by: Array<Int>,
+    n_bits: Int,
+    // how long the act is, and the time to beat for a star (frames), and
+    // the style to beat for another
+    len: Int,
+    par: Int,
+    style_goal: Int,
+    seed: Int,
+}
+
+// an act with just its start platform (the maker adds the rest)
+pub fn new_act(n: Int) -> Act {
+    let a = Act {
+        n: n,
+        hx: array(max_hooks(), 0), hy: array(max_hooks(), 0), hk: array(max_hooks(), 0),
+        hax: array(max_hooks(), 0), hay: array(max_hooks(), 0), hsp: array(max_hooks(), 0), hph: array(max_hooks(), 0), n_hooks: 0,
+        px0: array(max_plats(), 0), px1: array(max_plats(), 0), py: array(max_plats(), 0), n_plats: 0, end: -1,
+        bk: array(max_bits(), 0), bx: array(max_bits(), 0), by: array(max_bits(), 0), n_bits: 0,
+        len: 0, par: 0, style_goal: 0, seed: n * 7919 + 13,
+    };
+    plat(a, 0, 70, 150);
+    a
+}
+
+pub fn aroll(a: Act, n: Int) -> Int {
+    a.seed = (a.seed * 1103515245 + 12345) & 0x7fffffff;
+    (a.seed >> 16) % n.max(1)
+}
+
+pub fn hook(a: Act, x: Int, y: Int, k: Int) -> Int {
+    let i = a.n_hooks;
+    if i < max_hooks() {
+        a.hx.set(i, x);
+        a.hy.set(i, y);
+        a.hk.set(i, k);
+        a.hax.set(i, 0);
+        a.hay.set(i, 0);
+        a.hsp.set(i, 0);
+        a.hph.set(i, 0);
+        a.n_hooks = i + 1;
+    }
+    i
+}
+
+pub fn plat(a: Act, x0: Int, x1: Int, y: Int) {
+    let i = a.n_plats;
+    if i < max_plats() {
+        a.px0.set(i, x0);
+        a.px1.set(i, x1);
+        a.py.set(i, y);
+        a.n_plats = i + 1;
+    }
+}
+
+pub fn bit(a: Act, k: Int, x: Int, y: Int) {
+    let i = a.n_bits;
+    if i < max_bits() {
+        a.bk.set(i, k);
+        a.bx.set(i, x);
+        a.by.set(i, y);
+        a.n_bits = i + 1;
+    }
+}
+
+// where a hook is now (movers move)
+pub fn hook_x(a: Act, i: Int, t: Int, sines: Array<Int>) -> Int {
+    if a.hk.get(i) == h_mover() { a.hx.get(i) + (sines.get((t * a.hsp.get(i) / 16 + a.hph.get(i)) & 1023) * a.hax.get(i) >> 16) } else { a.hx.get(i) }
+}
+pub fn hook_y(a: Act, i: Int, t: Int, sines: Array<Int>) -> Int {
+    if a.hk.get(i) == h_mover() { a.hy.get(i) + (sines.get((t * a.hsp.get(i) / 16 + a.hph.get(i) + 256) & 1023) * a.hay.get(i) >> 16) } else { a.hy.get(i) }
+}
+
+pub fn act_name(n: Int) -> String {
+    let names = [
+        "First Swing", "Letting Go", "Two in a Row", "The Long Arc", "Flip for Them", "Up and Over", "Hoop-la", "Pop Goes", "Low Rider", "The Big Gap",
+        "Pier Pressure", "Gull Wings", "Salt Spray", "Bounce", "Spring Tide", "High Tide", "Ferris Wheel", "Candy Floss", "Rollercoaster", "Last Ride",
+        "Snowfall", "Icicles", "Sleigh Bells", "Frost Flip", "Snow Globe", "Northern Lights", "Avalanche", "Blizzard", "Ice Palace", "The Grand Finale",
+    ];
+    names.get(n.clamp(0, 29)).unwrap_or("Encore")
+}
+
+pub fn tour_name(t: Int) -> String {
+    if t == 0 { "The Big Top" } else if t == 1 { "The Seaside Pier" } else if t == 2 { "The Winter Carnival" } else { "Encore" }
+}
+
+// the act finished: its end platform where the act ends
+pub fn finish_act(a: Act) {
+    plat(a, a.len, a.len + 90, 160);
+    a.end = a.n_plats - 1;
+}

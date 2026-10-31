@@ -1,0 +1,1264 @@
+// A week on the farm: the pinball itself, and everything that scores.
+//
+// Each plant grows a stage every time the ball hits it; hit it ripe and
+// it's harvested, its yield going into the basket. Hay bales, slingshots
+// and the spinner add a little to the basket too. The multiplier (mult)
+// starts at x1 with each ball, and goes up for spelling H-A-Y in the top
+// lanes, for orbits, for sunflowers, and with tools. Shoot the ball into
+// the barn and the basket is banked, times the mult, toward the rent; then
+// both start again. Lose the ball before you bank and the basket's lost.
+//
+// Crows come for ripe plants: hit the plant before the crow's done
+// pecking, or it's eaten. The fence's three drop targets light the
+// kickback in the left outlane, which saves a ball once.
+//
+// Everything here is pure: it changes the week, and asks fx for sounds and
+// flourishes, but draws and plays nothing itself.
+
+use crate::math::{sin, cos, isqrt};
+use super::physics::*;
+use super::table::*;
+use super::run::*;
+use super::seeds::*;
+use super::tools::*;
+use super::fx::*;
+
+// what the player's doing: the flippers held, the plunger held, the
+// table nudged (this frame)
+pub struct Controls { left: Bool, right: Bool, launch: Bool, nudge: Bool }
+
+// where the basket is on the screen (produce flies to it)
+pub fn basket_sx() -> Int { 56 }
+pub fn basket_sy() -> Int { 132 }
+
+// the week's phases
+pub fn ph_intro() -> Int { 0 }
+pub fn ph_serve() -> Int { 1 }
+pub fn ph_play() -> Int { 2 }
+pub fn ph_choice() -> Int { 3 }
+pub fn ph_over() -> Int { 4 }
+
+pub fn max_crows() -> Int { 3 }
+
+pub struct Week {
+    run: Run,
+    t: Table,
+    fx: Fx,
+    sines: Array<Int>,
+    phase: Int,
+    phase_t: Int,
+    frame: Int,
+    rent: Int,
+    banked: Int,
+    basket: Int,
+    mult: Int,
+    // what the panel shows, rolling toward the truth
+    shown_basket: Int,
+    shown_banked: Int,
+    balls_left: Int,
+    ball_no: Int,
+    paid: Bool,
+    // the plants: each plot's seed this week (runners and wild wheat
+    // included), growth, whether ripe, frozen, and how it's moving
+    seed: Array<Int>,
+    level: Array<Int>,
+    growth: Array<Int>,
+    ripe: Array<Bool>,
+    frozen: Array<Bool>,
+    bump: Array<Int>,
+    last_hit: Array<Int>,
+    near: Array<Bool>,
+    // the hay bales lit (frames)
+    hay_lit: Array<Int>,
+    sling_lit: Array<Int>,
+    // the lanes lit, the fence's targets down, the kickback lit
+    lanes: Array<Bool>,
+    lanes_flash: Int,
+    down: Array<Bool>,
+    fence_reset: Int,
+    last_target: Int,
+    last_target_n: Int,
+    kick_lit: Bool,
+    // the skill shot: the lane lit while the ball's on the plunger, and
+    // whether it's still to be made
+    skill_lane: Int,
+    skill_live: Bool,
+    // the plunger: how far it's pulled (256 full), and whether it was held
+    pull: Int,
+    was_held: Bool,
+    auto_launch: Int,
+    // the ball save (frames left), more of it if the player asked, and the barn cat's
+    save: Int,
+    bonus_save: Int,
+    cat_used: Bool,
+    // each ball held in the barn: frames left
+    barn_hold: Array<Int>,
+    barn_door: Int,
+    // the orbit: frames since the ball went up the left lane
+    orbit_up: Int,
+    spin: Int,
+    spin_speed: Int,
+    // this ball: frames since launch, harvests, wheat's run, hits (for
+    // the wind chime), cactus hits
+    ball_t: Int,
+    harvests: Int,
+    wheat_run: Int,
+    chime: Int,
+    cactus: Int,
+    potato_bonus: Int,
+    // the ball's hot (frames left), from a chili
+    hot: Int,
+    // the drought: frames left that plants may grow, and growths missed
+    rain: Int,
+    dry: Int,
+    // the judged crop, at the judge's fair
+    judged: Int,
+    // the nudging: how close to a tilt, and tilted
+    tilt: Int,
+    tilted: Bool,
+    // crows: where (256ths of a table pixel), what each's doing (0 none,
+    // 1 coming, 2 pecking, 3 leaving), at which plot, for how long
+    crow_x: Array<Int>,
+    crow_y: Array<Int>,
+    crow_vx: Array<Int>,
+    crow_vy: Array<Int>,
+    crow_state: Array<Int>,
+    crow_plot: Array<Int>,
+    crow_t: Array<Int>,
+    crow_timer: Int,
+    // when each tool last did something (frames, for the panel to jiggle)
+    tool_fire: Array<Int>,
+    // the flippers as the player last held them (for lane changes)
+    held_l: Bool,
+    held_r: Bool,
+    // tips for a new player: whether to give them, and which have been
+    // given (a bit each)
+    teach: Bool,
+    taught: Int,
+    // how the week went
+    best_bank: Int,
+    banks: Int,
+    spilled: Int,
+    week_harvests: Int,
+    crows_eaten: Int,
+    seed_rng: Int,
+}
+
+pub fn start_week(r: Run, t: Table, sines: Array<Int>, f: Fx) -> Week {
+    let n = max_plots();
+    let w = Week {
+        run: r, t: t, fx: f, sines: sines,
+        phase: ph_intro(), phase_t: 0, frame: 0,
+        rent: rent(r), banked: 0, basket: 0, mult: 1,
+        shown_basket: 0, shown_banked: 0,
+        balls_left: r.balls - (if is_fair(r) && r.fair == f_short() { 1 } else { 0 }),
+        ball_no: 0, paid: false,
+        seed: array(n, -1), level: array(n, 1), growth: array(n, 0), ripe: array(n, false),
+        frozen: array(n, false), bump: array(n, 0), last_hit: array(n, -100), near: array(n * n, false),
+        hay_lit: array(4, 0), sling_lit: array(2, 0),
+        lanes: array(3, false), lanes_flash: 0, down: array(4, false), fence_reset: 0, last_target: -100, last_target_n: 0, kick_lit: false,
+        skill_lane: 1, skill_live: false,
+        pull: 0, was_held: false, auto_launch: 0,
+        save: 0, bonus_save: 0, cat_used: false,
+        barn_hold: array(max_balls(), 0), barn_door: 0,
+        orbit_up: -1, spin: 0, spin_speed: 0,
+        ball_t: 0, harvests: 0, wheat_run: 0, chime: 0, cactus: 0, potato_bonus: 0,
+        hot: 0, rain: 0, dry: 0, judged: -1,
+        tilt: 0, tilted: false,
+        crow_x: array(max_crows(), 0), crow_y: array(max_crows(), 0), crow_vx: array(max_crows(), 0), crow_vy: array(max_crows(), 0),
+        crow_state: array(max_crows(), 0), crow_plot: array(max_crows(), -1), crow_t: array(max_crows(), 0),
+        crow_timer: 600,
+        tool_fire: array(max_tools(), -1000),
+        held_l: false, held_r: false,
+        teach: false, taught: 0, best_bank: 0, banks: 0, spilled: 0, week_harvests: 0, crows_eaten: 0, seed_rng: r.seed + 77,
+    };
+    // the plots: what's planted, and the wild wheat from the seed bag
+    let mut i = 0;
+    while i < t.n_plots {
+        let s = if i < r.plots_open { r.plot_seed.get(i) } else { -1 };
+        let wild = s < 0 && i < r.plots_open && has_tool(r, seed_bag());
+        w.seed.set(i, if wild { wheat() } else { s });
+        w.level.set(i, if s >= 0 { r.plot_level.get(i) } else { 1 });
+        if has_tool(r, greenhouse()) && w.seed.get(i) >= 0 { w.growth.set(i, need(w, i) / 2) }
+        if fair_is(w, f_frost()) && w.seed.get(i) >= 0 { w.frozen.set(i, true) }
+        i = i + 1;
+    }
+    // which plots are beside which
+    i = 0;
+    while i < t.n_plots {
+        let mut j = 0;
+        while j < t.n_plots {
+            let dx = t.plot_x.get(i) - t.plot_x.get(j);
+            let dy = t.plot_y.get(i) - t.plot_y.get(j);
+            w.near.set(i * n + j, i != j && dx * dx + dy * dy < 50 * 50);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    if fair_is(w, f_judge()) {
+        // (the judge picks one of the crops planted)
+        let mut tries = 0;
+        while w.judged < 0 && tries < 50 {
+            let k = wroll(w, t.n_plots);
+            if w.seed.get(k) >= 0 { w.judged = w.seed.get(k) }
+            tries = tries + 1;
+        }
+    }
+    // the flippers, longer with the tractor
+    let len = if has_tool(r, tractor()) { px(35) } else { px(32) };
+    let fl = t.p.flips;
+    let mut k = 0;
+    while k < fl.len() {
+        fl.get(k).len = len;
+        fl.get(k).ang = fl.get(k).rest;
+        k = k + 1;
+    }
+    // every ball off the table, the targets up
+    let mut b = 0;
+    while b < max_balls() {
+        t.p.balls.get(b).live = false;
+        b = b + 1;
+    }
+    k = 0;
+    while k < t.n_targets {
+        t.p.on.set(t.targets.get(k), true);
+        k = k + 1;
+    }
+    t.p.gx = 0;
+    // (the pond, frozen in winter, is slick rather than slow)
+    t.p.zone_drag = if r.season == 3 { 65530 } else { 61500 };
+    sync_plants(w);
+    w
+}
+
+// every plant a hit from ripe (the title screen's farm, in full swing)
+pub fn nearly_ripe(w: Week) {
+    let mut i = 0;
+    while i < w.t.n_plots {
+        let n = need(w, i);
+        if w.seed.get(i) >= 0 && n > 0 { w.growth.set(i, n - 1) }
+        i = i + 1;
+    }
+    sync_plants(w);
+}
+
+fn wroll(w: Week, n: Int) -> Int {
+    w.seed_rng = (w.seed_rng * 1103515245 + 12345) & 0x7fffffff;
+    (w.seed_rng >> 16) % n.max(1)
+}
+
+pub fn fair_is(w: Week, f: Int) -> Bool {
+    is_fair(w.run) && (w.run.fair == f || (w.run.fair == f_goose() && (f == f_taxman() || f == f_murder())))
+}
+
+fn has(w: Week, tool: Int) -> Bool { has_tool(w.run, tool) }
+
+// a tip, the first time something happens, for a new player
+fn teach(w: Week, k: Int, s: String) {
+    if w.teach && (w.taught >> k) & 1 == 0 {
+        w.taught = w.taught | (1 << k);
+        tip(w.fx, s);
+    }
+}
+
+// a tool did something: its slot jiggles on the panel
+fn fire(w: Week, tool: Int) {
+    let s = tool_slot(w.run, tool);
+    if s >= 0 { w.tool_fire.set(s, w.frame) }
+}
+
+// ---- the plants
+
+// hits for plot i's plant to ripen
+pub fn need(w: Week, i: Int) -> Int {
+    let s = w.seed.get(i);
+    if s < 0 { 0 } else {
+        let base = seed_hits(s);
+        if base == 0 { 0 } else if has(w, watering_can()) { (base - 1).max(1) } else { base }
+    }
+}
+
+// how big plot i's plant is now (pixels)
+pub fn plant_r(w: Week, i: Int) -> Int {
+    let s = w.seed.get(i);
+    if s < 0 { 0 } else {
+        let full = seed_size(s);
+        let n = need(w, i);
+        if w.ripe.get(i) || n == 0 { full } else { 4 + (full - 5) * w.growth.get(i) / n.max(1) }
+    }
+}
+
+// the plants' circles in the physics, as big as they've grown
+pub fn sync_plants(w: Week) {
+    let t = w.t;
+    let mut i = 0;
+    while i < t.n_plots {
+        let s = t.plot_shape.get(i);
+        let seed = w.seed.get(i);
+        if seed < 0 {
+            t.p.on.set(s, false);
+        } else {
+            t.p.on.set(s, true);
+            set_shape_r(t.p, s, px(plant_r(w, i)) - 1024);
+            set_shape_mat(t.p, s, if seed_kicks(seed) { m_kicker() } else if seed_heavy(seed) { m_dead() } else { m_plant() });
+        }
+        i = i + 1;
+    }
+}
+
+// plot i grows by n stages (if it can)
+fn grow(w: Week, i: Int, n: Int) {
+    let s = w.seed.get(i);
+    if s >= 0 && !w.ripe.get(i) && need(w, i) > 0 && s != wheat() {
+        w.growth.set(i, w.growth.get(i) + n);
+        w.bump.set(i, 10);
+        if w.growth.get(i) >= need(w, i) {
+            w.growth.set(i, need(w, i));
+            w.ripe.set(i, true);
+            let x = w.t.plot_x.get(i);
+            let y = w.t.plot_y.get(i);
+            burst(w.fx, p_star(), x + table_x(), y, 8, 300, 26, 0xfff8c0);
+            sound(w.fx, sn_ripe(), i, pan_at(x));
+            teach(w, 0, "Ripe! Hit it again to harvest it.");
+        }
+    }
+}
+
+// whether plants may grow (in the drought, without rain, only every
+// other time)
+fn can_grow(w: Week) -> Bool {
+    if !fair_is(w, f_drought()) || w.rain > 0 { true } else {
+        w.dry = w.dry + 1;
+        w.dry % 2 == 0
+    }
+}
+
+// the ball struck plot i's plant, this hard
+fn hit_plant(w: Week, i: Int, speed: Int) {
+    let s = w.seed.get(i);
+    if s >= 0 && w.frame - w.last_hit.get(i) > 6 {
+        w.last_hit.set(i, w.frame);
+        w.bump.set(i, 12);
+        let x = w.t.plot_x.get(i);
+        let y = w.t.plot_y.get(i);
+        // a crow on it takes fright
+        scare_crow_at(w, i);
+        if w.frozen.get(i) {
+            w.frozen.set(i, false);
+            burst(w.fx, p_spark(), x + table_x(), y, 10, 400, 20, 0xd8f0ff);
+            sound(w.fx, sn_thaw(), 0, pan_at(x));
+        } else if s == wheat() {
+            harvest(w, i, 0);
+        } else if s == cactus() {
+            w.cactus = w.cactus + 1;
+            add_basket(w, 10, x, y);
+            if w.cactus % 3 == 0 { add_mult(w, 1, x, y) }
+            sound(w.fx, sn_bumper(), 2, pan_at(x));
+        } else if w.ripe.get(i) {
+            harvest(w, i, 0);
+        } else {
+            let hard = speed > px(5);
+            if s == apple() { add_basket(w, 30, x, y) } else { add_basket(w, 5 * w.level.get(i), x, y) }
+            if (s != cabbage() || hard) && can_grow(w) {
+                grow(w, i, 1);
+                if !w.ripe.get(i) { sound(w.fx, sn_grow(), w.growth.get(i) * 8 / need(w, i).max(1), pan_at(x)) }
+            } else {
+                sound(w.fx, sn_bumper(), 0, pan_at(x));
+            }
+            burst(w.fx, p_dot(), x + table_x(), y, 4, 200, 20, 0x5aa040);
+        }
+        sync_plants(w);
+    }
+}
+
+// what plot i's harvest is worth
+fn harvest_value(w: Week, i: Int, golden: Bool) -> Int {
+    let s = w.seed.get(i);
+    let lv = w.level.get(i);
+    let r = w.run;
+    let mut v = seed_yield(s) * lv;
+    if s == potato() { v = v + w.potato_bonus * lv }
+    if s == corn() { v = 40 * lv * count_planted(r, corn()).max(1) }
+    if s == wheat() { v = (20 + w.wheat_run * 10) * lv }
+    // tools
+    let slot = tool_slot(r, recipe());
+    if slot >= 0 {
+        v = v + r.tool_val.get(slot);
+        fire(w, recipe());
+    }
+    if has_tag(s, tg_root()) && has(w, root_cellar()) { v = v * 2; fire(w, root_cellar()); }
+    if has_tag(s, tg_fruit()) && has(w, fruit_basket()) { v = v * 2; fire(w, fruit_basket()); }
+    if w.harvests == 0 && has(w, rooster()) { v = v * 3; fire(w, rooster()); }
+    if w.ball_t < 20 * 60 && has(w, sundial()) { v = v * 2; fire(w, sundial()); }
+    if w.hot > 0 { v = v * 2 }
+    if golden { v = v * 5 }
+    if fair_is(w, f_judge()) && s != w.judged { v = 0 }
+    v
+}
+
+// plot i's plant harvested (depth: how deep in a chain of scythe
+// harvests this is)
+fn harvest(w: Week, i: Int, depth: Int) {
+    let s = w.seed.get(i);
+    let t = w.t;
+    let x = t.plot_x.get(i);
+    let y = t.plot_y.get(i);
+    let r = w.run;
+    // golden? a horseshoe, and each clover, make it likelier
+    let mut luck = 0;
+    if has(w, horseshoe()) { luck = luck + 43 }
+    luck = luck + 15 * count_planted(r, clover());
+    let golden = luck > 0 && wroll(w, 256) < luck;
+    let v = harvest_value(w, i, golden);
+    w.harvests = w.harvests + 1;
+    w.week_harvests = w.week_harvests + 1;
+    r.harvests = r.harvests + 1;
+    // the produce flies to the basket
+    let pieces = (v / 80).clamp(1, 6);
+    let mut k = 0;
+    while k < pieces {
+        let share = if k == pieces - 1 { v - (v / pieces) * (pieces - 1) } else { v / pieces };
+        fly(w.fx, x + table_x() + rand(w.fx, 9) - 4, y + rand(w.fx, 9) - 4, basket_sx(), basket_sy(), share, seed_color(s), k * 3);
+        k = k + 1;
+    }
+    w.basket = w.basket + v;
+    if w.basket >= 300 && w.banks == 0 { teach(w, 2, "Now shoot the ball into the BARN to bank it, times your mult!") }
+    else { teach(w, 1, "Harvested: it's in your basket. Keep going!") }
+    pop(w.fx, "+" ++ v.show(), x + table_x(), y - 10, if golden { 0xffe04a } else if v == 0 { 0x909090 } else { 0xffffff }, if v >= 1000 || golden { 2 } else { 1 });
+    burst(w.fx, p_dot(), x + table_x(), y, 14, 420, 30, seed_color(s));
+    burst(w.fx, p_spark(), x + table_x(), y, 8, 500, 16, 0xfff4c0);
+    part(w.fx, p_ring(), x + table_x(), y, 0, 0, 16, 0xffffff);
+    stop(w.fx, if golden { 8 } else { 3 });
+    shake(w.fx, if v >= 1000 { 4 } else { 2 });
+    sound(w.fx, sn_harvest(), w.harvests, pan_at(x));
+    if golden {
+        r.money = r.money + 1;
+        fire(w, horseshoe());
+        sound(w.fx, sn_golden(), 0, pan_at(x));
+        pop(w.fx, "GOLDEN!", x + table_x(), y - 22, 0xffe04a, 1);
+    }
+    if fair_is(w, f_judge()) && s != w.judged { pop(w.fx, "not judged", x + table_x(), y - 20, 0xb0b0b0, 1) }
+    // what's special
+    if s == wheat() {
+        w.wheat_run = w.wheat_run + 1;
+    } else {
+        w.growth.set(i, 0);
+        w.ripe.set(i, false);
+    }
+    if s == potato() { w.potato_bonus = w.potato_bonus + 50 }
+    if s == carrot() { grow_near(w, i, tg_root()) }
+    if s == mushroom() { grow_near(w, i, -1) }
+    if s == sunflower() { add_mult(w, 1, x, y) }
+    if s == tulip() { grow_all(w, tg_flower(), i) }
+    if s == rose() {
+        w.basket = w.basket * 3 / 2;
+        pop(w.fx, "BASKET x1.5", x + table_x(), y - 22, 0xff7090, 1);
+    }
+    if s == strawberry() { runner(w) }
+    if s == watermelon() { multiball(w) }
+    if s == chili() {
+        w.hot = 8 * 60;
+        sound(w.fx, sn_hot(), 0, pan_at(x));
+        pop(w.fx, "HOT BALL!", x + table_x(), y - 22, 0xff6030, 1);
+    }
+    if s == blueberry() {
+        r.money = r.money + 1;
+        sound(w.fx, sn_coin(), 0, pan_at(x));
+    }
+    if has_tag(s, tg_flower()) && has(w, flower_crown()) {
+        fire(w, flower_crown());
+        add_mult(w, 1, x, y);
+    }
+    if has_tag(s, tg_flower()) && has(w, beehive()) {
+        fire(w, beehive());
+        grow_all(w, -1, i);
+    }
+    // the scythe: the ripe plants beside it, too
+    if has(w, scythe()) && depth < 6 {
+        let mut j = 0;
+        while j < t.n_plots {
+            if w.near.get(i * max_plots() + j) && w.ripe.get(j) {
+                fire(w, scythe());
+                harvest(w, j, depth + 1);
+            }
+            j = j + 1;
+        }
+    }
+    sync_plants(w);
+}
+
+// every plant beside plot i (of a tag, or any if tag < 0) grows
+fn grow_near(w: Week, i: Int, tag: Int) {
+    let mut j = 0;
+    while j < w.t.n_plots {
+        if w.near.get(i * max_plots() + j) && (tag < 0 || has_tag(w.seed.get(j), tag)) && can_grow(w) { grow(w, j, 1) }
+        j = j + 1;
+    }
+}
+
+// every plant (of a tag, or all) but plot `but` grows
+fn grow_all(w: Week, tag: Int, but: Int) {
+    let mut j = 0;
+    while j < w.t.n_plots {
+        if j != but && (tag < 0 || has_tag(w.seed.get(j), tag)) && can_grow(w) { grow(w, j, 1) }
+        j = j + 1;
+    }
+}
+
+// a strawberry's runner: a strawberry in an empty plot, for the week
+fn runner(w: Week) {
+    let mut tries = 0;
+    let mut done = false;
+    while !done && tries < 30 {
+        let j = wroll(w, w.t.n_plots);
+        if w.seed.get(j) < 0 && j < w.run.plots_open {
+            w.seed.set(j, strawberry());
+            w.level.set(j, 1);
+            w.growth.set(j, 0);
+            w.ripe.set(j, false);
+            w.bump.set(j, 16);
+            burst(w.fx, p_dot(), w.t.plot_x.get(j) + table_x(), w.t.plot_y.get(j), 10, 300, 24, 0x7a5030);
+            done = true;
+        }
+        tries = tries + 1;
+    }
+}
+
+// a color for each seed's produce
+pub fn seed_color(s: Int) -> Int {
+    if s == 0 { 0xe8d0f0 } else if s == 1 { 0xff8a2a } else if s == 2 { 0xd8b070 } else if s == 3 { 0xffd23a }
+    else if s == 4 { 0xff5a7a } else if s == 5 { 0xe02a4a } else if s == 6 { 0xff8a1a } else if s == 7 { 0xff3a4a }
+    else if s == 8 { 0x4ac04a } else if s == 9 { 0xffe050 } else if s == 10 { 0xe8c060 } else if s == 11 { 0xe84a3a }
+    else if s == 12 { 0xff3a1a } else if s == 13 { 0x6ac050 } else if s == 14 { 0x5ae05a } else if s == 15 { 0xa0e070 }
+    else if s == 16 { 0xe83a3a } else { 0x5a6aff }
+}
+
+// ---- scoring
+
+fn add_basket(w: Week, n: Int, x: Int, y: Int) {
+    if n > 0 {
+        w.basket = w.basket + n;
+        w.shown_basket = w.shown_basket + n;
+    }
+}
+
+fn add_mult(w: Week, n: Int, x: Int, y: Int) {
+    w.mult = w.mult + n;
+    pop(w.fx, "MULT +" ++ n.show(), x + table_x(), y - 16, 0x7ae0ff, 1);
+    sound(w.fx, sn_mult(), w.mult, pan_at(x));
+}
+
+// the basket banked (the ball's in the barn)
+fn bank(w: Week) {
+    let r = w.run;
+    let x = w.t.barn_x;
+    let y = w.t.barn_y;
+    if w.basket == 0 {
+        pop(w.fx, "Empty basket", x + table_x(), y + 18, 0xd0d0d0, 1);
+        sound(w.fx, sn_barn_in(), 0, pan_at(x));
+    } else {
+        let mut v = w.basket * w.mult;
+        if has(w, harvest_moon()) { v = v * 2; fire(w, harvest_moon()); }
+        let taxed = fair_is(w, f_taxman());
+        if taxed { v = v - v / 4 }
+        w.banked = w.banked + v;
+        w.banks = w.banks + 1;
+        r.total = r.total + v;
+        if v > r.best_bank { r.best_bank = v }
+        if v > w.best_bank { w.best_bank = v }
+        // (a big bank gets a banner; a small one, a word)
+        if v * 8 >= w.rent || v >= 5000 {
+            banner(w.fx, "+" ++ v.show(), w.basket.show() ++ " @ " ++ w.mult.show() ++ (if taxed { "   (taxed)" } else { "" }), 0xfff0a0);
+            shake(w.fx, 6);
+            stop(w.fx, 10);
+            flash(w.fx, 6, 0xfff8d0);
+            burst(w.fx, p_confetti(), x + table_x(), y + 10, 30, 700, 60, 0xffd040);
+        } else {
+            pop(w.fx, "+" ++ v.show(), x + table_x(), y + 20, 0xfff0a0, 2);
+            shake(w.fx, 2);
+            stop(w.fx, 4);
+        }
+        burst(w.fx, p_spark(), x + table_x(), y + 10, 20, 800, 24, 0xffffff);
+        sound(w.fx, sn_bank(), (v * 20 / w.rent.max(1)).min(20), pan_at(x));
+        if w.mult >= 4 && has(w, milk_pail()) {
+            r.money = r.money + 1;
+            fire(w, milk_pail());
+            sound(w.fx, sn_coin(), 0, pan_at(x));
+        }
+        if has(w, spreader()) {
+            fire(w, spreader());
+            grow_all(w, -1, -1);
+            sync_plants(w);
+        }
+        w.basket = 0;
+        w.shown_basket = 0;
+        w.mult = if has(w, thermos()) { fire(w, thermos()); (w.mult / 2).max(1) } else { 1 };
+        if !w.paid && w.banked >= w.rent { rent_paid(w) }
+    }
+}
+
+// the rent's been banked: a fanfare, and the rest of the week is profit
+fn rent_paid(w: Week) {
+    w.paid = true;
+    sound(w.fx, sn_rent(), 0, 0);
+    burst(w.fx, p_confetti(), 240, 60, 90, 900, 100, 0xff6a5a);
+    burst(w.fx, p_confetti(), 180, 80, 40, 700, 90, 0x5ad0ff);
+    burst(w.fx, p_confetti(), 300, 80, 40, 700, 90, 0xffd040);
+    pop(w.fx, "RENT PAID!", 240, 160, 0x9aff7a, 2);
+}
+
+// ---- the ball's life
+
+// a new ball on the plunger
+fn serve(w: Week) {
+    let t = w.t;
+    let b = 0;
+    place(t.p, b, px(t.plunger_x), px(t.plunger_y) - ball_r() - px(1), 0, 0);
+    t.p.balls.get(b).held = true;
+    w.phase = ph_serve();
+    w.phase_t = 0;
+    w.pull = 0;
+    w.skill_live = true;
+    w.ball_no = w.ball_no + 1;
+    w.ball_t = 0;
+    w.harvests = 0;
+    w.wheat_run = 0;
+    w.mult = 1 + (if has(w, almanac()) { fire(w, almanac()); kinds_planted(w.run) } else { 0 });
+    w.save = if fair_is(w, f_flood()) { 0 } else { w.run.save_secs * 60 + w.bonus_save };
+    w.kick_lit = has(w, spring()) && !fair_is(w, f_flood());
+    w.tilted = false;
+    w.tilt = 0;
+    if has(w, rain_barrel()) && w.ball_no > 0 {
+        fire(w, rain_barrel());
+        grow_all(w, -1, -1);
+        sync_plants(w);
+    }
+}
+
+// the ball (b) on the plunger, launched (pull out of 256)
+fn launch(w: Week, b: Int, pull: Int) {
+    let ball = w.t.p.balls.get(b);
+    ball.held = false;
+    ball.vy = -(px(7) + pull * px(6) / 256);
+    ball.vx = 0;
+    w.phase = ph_play();
+    sound(w.fx, sn_launch(), pull, 100);
+}
+
+// a ball's gone down the drain
+fn drained(w: Week, b: Int) {
+    let p = w.t.p;
+    let ball = p.balls.get(b);
+    ball.live = false;
+    forget(p, b);
+    let others = live_count(p);
+    let x = ball.x / 4096;
+    if others > 0 {
+        // (one of several: nothing lost)
+        sound(w.fx, sn_drain(), 0, pan_at(x));
+    } else if w.save > 0 && !w.tilted {
+        banner(w.fx, "BALL SAVED", "", 0x7ae0ff);
+        sound(w.fx, sn_save(), 0, 0);
+        w.save = 0;
+        reserve(w);
+    } else if has(w, barn_cat()) && !w.cat_used && !w.tilted {
+        w.cat_used = true;
+        fire(w, barn_cat());
+        banner(w.fx, "SAVED BY THE CAT", "", 0xffc070);
+        sound(w.fx, sn_save(), 1, 0);
+        reserve(w);
+    } else {
+        // the ball's lost: half the basket spills, and the other half's
+        // banked, without the mult (the compost heap keeps it all)
+        let lost = w.basket;
+        let kept = if has(w, compost()) { lost } else { lost / 2 };
+        if kept > 0 {
+            w.banked = w.banked + kept;
+            w.run.total = w.run.total + kept;
+            if has(w, compost()) { fire(w, compost()) }
+            if !w.paid && w.banked >= w.rent { rent_paid(w) }
+        }
+        if lost > 0 {
+            if kept == lost { banner(w.fx, "COMPOSTED", "+" ++ kept.show() ++ " banked", 0xc8e08a) }
+            else {
+                banner(w.fx, "BASKET SPILLED", "half saved: +" ++ kept.show(), 0xff8a7a);
+                teach(w, 5, "Half the basket spills when a ball drains. Bank it first!");
+            }
+        }
+        w.spilled = w.spilled + (lost - kept) + lost * (w.mult - 1);
+        w.basket = 0;
+        w.shown_basket = 0;
+        w.mult = 1;
+        w.hot = 0;
+        w.balls_left = w.balls_left - 1;
+        sound(w.fx, sn_drain(), 1, pan_at(x));
+        shake(w.fx, 5);
+        if w.balls_left <= 0 {
+            w.phase = ph_over();
+            w.phase_t = 0;
+        } else if w.paid {
+            w.phase = ph_choice();
+            w.phase_t = 0;
+        } else {
+            serve(w);
+        }
+    }
+}
+
+// the ball put back on the plunger and launched on its own
+fn reserve(w: Week) {
+    let t = w.t;
+    place(t.p, 0, px(t.plunger_x), px(t.plunger_y) - ball_r() - px(1), 0, 0);
+    t.p.balls.get(0).held = true;
+    w.phase = ph_serve();
+    w.auto_launch = 40;
+}
+
+// a second ball, out of the barn
+fn multiball(w: Week) {
+    let p = w.t.p;
+    let b = free_ball(p);
+    if b >= 0 {
+        place(p, b, px(197), px(122), -px(2), px(2));
+        banner(w.fx, "MULTIBALL!", "", 0x7aff7a);
+        sound(w.fx, sn_multi(), 0, 0);
+    }
+}
+
+// ---- the week's step
+
+pub fn step(w: Week, c: Controls) {
+    let f = w.fx;
+    w.fx.n_sounds = 0;
+    tick_fx(f);
+    // what's flown into the basket shows
+    if f.arrived > 0 {
+        w.shown_basket = (w.shown_basket + f.arrived).min(w.basket);
+        sound(f, sn_tick(), 0, -80);
+    }
+    if w.shown_basket > w.basket { w.shown_basket = w.basket }
+    if w.shown_banked < w.banked { w.shown_banked = w.shown_banked + ((w.banked - w.shown_banked) / 8).max(1) }
+    w.phase_t = w.phase_t + 1;
+    let mut b = 0;
+    while b < max_plots() {
+        if w.bump.get(b) > 0 { w.bump.set(b, w.bump.get(b) - 1) }
+        b = b + 1;
+    }
+    b = 0;
+    while b < 4 {
+        if w.hay_lit.get(b) > 0 { w.hay_lit.set(b, w.hay_lit.get(b) - 1) }
+        b = b + 1;
+    }
+    if w.sling_lit.get(0) > 0 { w.sling_lit.set(0, w.sling_lit.get(0) - 1) }
+    if w.sling_lit.get(1) > 0 { w.sling_lit.set(1, w.sling_lit.get(1) - 1) }
+    if w.spin_speed > 0 { w.spin_speed = w.spin_speed * 15 / 16 }
+    w.spin = w.spin + w.spin_speed / 8;
+    if w.barn_door > 0 { w.barn_door = w.barn_door - 1 }
+    if f.hitstop > 0 {
+        f.hitstop = f.hitstop - 1;
+    } else {
+        w.frame = w.frame + 1;
+        if w.phase == ph_intro() {
+            if w.phase_t > 90 { serve(w) }
+        } else if w.phase == ph_serve() {
+            serving(w, c);
+            flippers(w, c);
+            physics_frame(w);
+        } else if w.phase == ph_play() {
+            flippers(w, c);
+            nudging(w, c);
+            physics_frame(w);
+        } else if w.phase == ph_choice() {
+            // (waiting for the player: see choose)
+            flippers(w, Controls { left: false, right: false, launch: false, nudge: false });
+            physics_frame(w);
+        } else {
+            flippers(w, Controls { left: false, right: false, launch: false, nudge: false });
+            physics_frame(w);
+        }
+    }
+}
+
+// rent paid and a ball lost: play on for more, or go to market
+pub fn choose(w: Week, play_on: Bool) {
+    if w.phase == ph_choice() {
+        if play_on { serve(w) } else {
+            w.phase = ph_over();
+            w.phase_t = 0;
+        }
+    }
+}
+
+fn serving(w: Week, c: Controls) {
+    // the skill shot's lane goes round while the ball waits
+    if w.frame % 20 == 0 { w.skill_lane = (w.skill_lane + 1) % 3 }
+    if w.auto_launch > 0 {
+        w.auto_launch = w.auto_launch - 1;
+        w.pull = (w.pull + 6).min(200);
+        if w.auto_launch == 0 { launch(w, 0, w.pull); w.pull = 0; w.skill_live = false; }
+    } else if c.launch {
+        if w.pull == 0 { sound(w.fx, sn_plunge(), 0, 100) }
+        w.pull = (w.pull + 7).min(256);
+        w.was_held = true;
+    } else if w.was_held {
+        w.was_held = false;
+        launch(w, 0, w.pull);
+        w.pull = 0;
+    }
+}
+
+fn flippers(w: Week, c: Controls) {
+    let fl = w.t.p.flips;
+    let dead = w.tilted;
+    let l = c.left && !dead;
+    let r = c.right && !dead;
+    if l && !w.held_l {
+        sound(w.fx, sn_flip(), 0, -60);
+        // (the lit lanes move left with the left flipper)
+        let a = w.lanes.get(0);
+        w.lanes.set(0, w.lanes.get(1));
+        w.lanes.set(1, w.lanes.get(2));
+        w.lanes.set(2, a);
+    }
+    if r && !w.held_r {
+        sound(w.fx, sn_flip(), 0, 60);
+        let a = w.lanes.get(2);
+        w.lanes.set(2, w.lanes.get(1));
+        w.lanes.set(1, w.lanes.get(0));
+        w.lanes.set(0, a);
+    }
+    w.held_l = l;
+    w.held_r = r;
+    fl.get(0).held = l;
+    fl.get(1).held = r;
+}
+
+fn nudging(w: Week, c: Controls) {
+    if w.tilt > 0 { w.tilt = w.tilt - 1 }
+    if c.nudge && !w.tilted {
+        let dx = (wroll(w, 3) - 1) * px(1);
+        nudge(w.t.p, dx, -px(2) - 2048);
+        w.tilt = w.tilt + 70;
+        shake(w.fx, 3);
+        if w.tilt > 150 {
+            w.tilted = true;
+            banner(w.fx, "TILT", "the flippers are dead", 0xff4a3a);
+            sound(w.fx, sn_tilt(), 0, 0);
+        } else if w.tilt > 80 {
+            pop(w.fx, "Careful!", 240, 200, 0xffb050, 1);
+            sound(w.fx, sn_warn(), 0, 0);
+        }
+    }
+}
+
+fn physics_frame(w: Week) {
+    let t = w.t;
+    let p = t.p;
+    // the gale blows
+    p.gx = if fair_is(w, f_gale()) {
+        let gust = sin(w.sines, w.frame * 2) + sin(w.sines, w.frame * 5 + 300) / 2;
+        (gust * 220) >> 16
+    } else { 0 };
+    // the barn holds its balls a moment, then lets them go
+    let mut b = 0;
+    while b < max_balls() {
+        let h = w.barn_hold.get(b);
+        if h > 0 {
+            w.barn_hold.set(b, h - 1);
+            if h == 1 {
+                place(p, b, px(198), px(120), -px(1) - 2700, px(2));
+                w.barn_door = 20;
+                sound(w.fx, sn_kick(), 0, pan_at(t.barn_x));
+            }
+        }
+        b = b + 1;
+    }
+    simulate(p);
+    events(w);
+    // the timers
+    if w.save > 0 && w.phase == ph_play() && w.ball_t > 60 { w.save = w.save - 1 }
+    w.ball_t = w.ball_t + 1;
+    if w.hot > 0 { w.hot = w.hot - 1 }
+    if w.rain > 0 { w.rain = w.rain - 1 }
+    if w.lanes_flash > 0 {
+        w.lanes_flash = w.lanes_flash - 1;
+        if w.lanes_flash == 0 {
+            w.lanes.set(0, false);
+            w.lanes.set(1, false);
+            w.lanes.set(2, false);
+        }
+    }
+    if w.fence_reset > 0 {
+        w.fence_reset = w.fence_reset - 1;
+        if w.fence_reset == 0 { raise_fence(w) }
+    }
+    if w.orbit_up >= 0 {
+        w.orbit_up = w.orbit_up + 1;
+        if w.orbit_up > 150 { w.orbit_up = -1 }
+    }
+    // mushrooms grow on their own
+    if w.frame % 480 == 0 {
+        let mut i = 0;
+        while i < t.n_plots {
+            if w.seed.get(i) == mushroom() && can_grow(w) { grow(w, i, 1) }
+            i = i + 1;
+        }
+        sync_plants(w);
+    }
+    crows(w);
+    // ripples where a ball crosses the pond
+    if t.pond_rx > 0 && w.frame % 5 == 0 {
+        let mut k = 0;
+        while k < max_balls() {
+            let ball = p.balls.get(k);
+            if ball.live && !ball.held && in_zone(p, ball) && speed(ball) > px(1) {
+                part(w.fx, p_ring(), (ball.x >> 12) + table_x(), ball.y >> 12, 0, 0, 14, if w.run.season == 3 { 0xe8f4ff } else { 0xc8f0ff });
+                if w.frame % 20 == 0 && w.run.season != 3 { sound(w.fx, sn_wall(), 0, pan_at(ball.x >> 12)) }
+            }
+            k = k + 1;
+        }
+    }
+    // balls lost, or stuck
+    b = 0;
+    while b < max_balls() {
+        let ball = p.balls.get(b);
+        if ball.live && !ball.held {
+            if ball.y > px(280) || ball.x < -px(10) || ball.x > px(266) {
+                drained(w, b);
+            } else if ball.quiet > 600 && !w.held_l && !w.held_r && speed(ball) < px(1) {
+                // (stuck somewhere: a nudge from below)
+                ball.vy = -px(3);
+                ball.vx = (wroll(w, 3) - 1) * px(2);
+                ball.quiet = 0;
+            }
+        }
+        b = b + 1;
+    }
+}
+
+fn events(w: Week) {
+    let t = w.t;
+    let p = t.p;
+    let mut e = 0;
+    while e < p.n_events {
+        let k = ev_kind(p, e);
+        if k == ev_hit() {
+            let s = ev_a(p, e);
+            let speed = ev_c(p, e);
+            let tg = shape_tag(p, s);
+            let tk = tag_kind(tg);
+            let n = tag_n(tg);
+            let x = shape_ax(p, s) / 4096;
+            let y = shape_ay(p, s) / 4096;
+            w.chime = w.chime + 1;
+            if w.chime % 12 == 0 && has(w, wind_chime()) {
+                fire(w, wind_chime());
+                add_mult(w, 1, p.balls.get(ev_b(p, e)).x / 4096, p.balls.get(ev_b(p, e)).y / 4096);
+            }
+            if tk == t_plot() {
+                hit_plant(w, n, speed);
+            } else if tk == t_tree() {
+                // an apple tree: it shakes, and drops an apple
+                w.hay_lit.set(n, 12);
+                add_basket(w, if has(w, pitchfork()) { fire(w, pitchfork()); 70 } else { 30 }, x, y);
+                sound(w.fx, sn_hay(), n + 2, pan_at(x));
+                burst(w.fx, p_dot(), x + table_x(), y + 4, 4, 300, 24, 0xe83a3a);
+                burst(w.fx, p_dot(), x + table_x(), y, 4, 260, 20, 0x3e9a3e);
+                shake(w.fx, 1);
+            } else if tk == t_hay() {
+                w.hay_lit.set(n, 10);
+                add_basket(w, if has(w, pitchfork()) { fire(w, pitchfork()); 50 } else { 10 }, x, y);
+                sound(w.fx, sn_hay(), n, pan_at(x));
+                burst(w.fx, p_dot(), x + table_x(), y, 5, 260, 18, 0xe8c45a);
+                shake(w.fx, 1);
+            } else if tk == t_sling() {
+                if shape_mat(p, s) == m_sling() {
+                    w.sling_lit.set(n, 8);
+                    add_basket(w, if has(w, pitchfork()) { fire(w, pitchfork()); 50 } else { 10 }, x, y);
+                    sound(w.fx, sn_sling(), 0, pan_at(x));
+                    let ball = p.balls.get(ev_b(p, e));
+                    burst(w.fx, p_dot(), ball.x / 4096 + table_x(), ball.y / 4096, 4, 200, 16, 0xe8c45a);
+                } else {
+                    sound(w.fx, sn_wall(), speed >> 10, pan_at(x));
+                }
+            } else if tk == t_target() {
+                if !w.down.get(n) {
+                    w.down.set(n, true);
+                    w.last_target = w.frame;
+                    w.last_target_n = n;
+                    p.on.set(s, false);
+                    add_basket(w, 50, x, y);
+                    sound(w.fx, sn_target(), n, pan_at(x));
+                    burst(w.fx, p_dot(), x + table_x(), y + 4, 6, 200, 20, 0xb08050);
+                    if w.down.get(0) && w.down.get(1) && w.down.get(2) {
+                        if !fair_is(w, f_flood()) {
+                            w.kick_lit = true;
+                            pop(w.fx, "KICKBACK LIT", x + table_x() - 30, y, 0xff7ad0, 1);
+                        }
+                        add_basket(w, 150, x, y);
+                        w.fence_reset = 90;
+                    }
+                }
+            } else {
+                sound(w.fx, sn_wall(), speed >> 10, pan_at(x));
+            }
+        } else if k == ev_clack() {
+            sound(w.fx, sn_clack(), 0, 0);
+        } else if k == ev_enter() {
+            sensor(w, ev_a(p, e), ev_b(p, e), ev_c(p, e));
+        }
+        e = e + 1;
+    }
+}
+
+fn sensor(w: Week, s: Int, b: Int, vy: Int) {
+    let t = w.t;
+    let p = t.p;
+    let ball = p.balls.get(b);
+    if s == t.s_barn {
+        // into the barn: held, and banked
+        ball.held = true;
+        ball.x = px(t.barn_x);
+        ball.y = px(t.barn_y);
+        ball.vx = 0;
+        ball.vy = 0;
+        forget(p, b);
+        w.barn_hold.set(b, 70);
+        w.barn_door = 20;
+        sound(w.fx, sn_barn_in(), 1, pan_at(t.barn_x));
+        bank(w);
+    } else if s == t.s_spinner {
+        let sp = speed(ball);
+        w.spin_speed = w.spin_speed + sp / 64;
+        let spins = (sp / px(2)).max(1);
+        add_basket(w, spins * 10, t.spin_x, t.spin_y);
+        sound(w.fx, sn_spin(), spins, pan_at(t.spin_x));
+    } else if s == t.s_orbit_in {
+        if vy < 0 { w.orbit_up = 0 }
+    } else if s == t.s_orbit_top {
+        if w.orbit_up >= 0 {
+            w.orbit_up = -1;
+            let n = if has(w, weathervane()) { fire(w, weathervane()); 2 } else { 1 };
+            add_mult(w, n, 120, 30);
+            pop(w.fx, "ORBIT!", 128 + table_x(), 40, 0x9aff7a, 1);
+            sound(w.fx, sn_orbit(), 0, 0);
+        }
+    } else if s == t.s_out_l {
+        if w.kick_lit {
+            w.kick_lit = false;
+            ball.vy = -px(13);
+            ball.vx = px(1) / 2;
+            sound(w.fx, sn_kick(), 1, -90);
+            pop(w.fx, "KICKBACK!", 30 + table_x(), 200, 0xff7ad0, 1);
+            shake(w.fx, 3);
+        }
+    } else if s == t.s_in_l || s == t.s_in_r {
+        add_basket(w, 20, 0, 0);
+    } else {
+        // the top lanes
+        let mut i = 0;
+        while i < 3 {
+            if s == t.lanes.get(i) { lane(w, i) }
+            i = i + 1;
+        }
+    }
+}
+
+fn lane(w: Week, i: Int) {
+    let x = w.t.lane_x.get(i);
+    if w.skill_live {
+        w.skill_live = false;
+        if i == w.skill_lane {
+            pop(w.fx, "SKILL SHOT!", x + table_x(), 60, 0xffe04a, 2);
+            add_mult(w, 1, x, 40);
+            add_basket(w, 100, x, 40);
+            sound(w.fx, sn_skill(), 0, pan_at(x));
+            shake(w.fx, 3);
+        }
+    }
+    if w.lanes_flash == 0 && !w.lanes.get(i) {
+        w.lanes.set(i, true);
+        sound(w.fx, sn_lane(), i, pan_at(x));
+        teach(w, 3, "Light all three of H-A-Y for more mult. Flippers move the lights.");
+        add_basket(w, 30, x, 40);
+        if w.lanes.get(0) && w.lanes.get(1) && w.lanes.get(2) {
+            let n = if has(w, bell()) { fire(w, bell()); 2 } else { 1 };
+            add_mult(w, n, 122, 40);
+            pop(w.fx, "H-A-Y!", 122 + table_x(), 56, 0xffe04a, 2);
+            w.lanes_flash = 60;
+            w.rain = 20 * 60;
+            if fair_is(w, f_drought()) { pop(w.fx, "Rain!", 122 + table_x(), 70, 0x7ac0ff, 1) }
+        }
+    }
+}
+
+fn raise_fence(w: Week) {
+    let t = w.t;
+    let mut i = 0;
+    while i < t.n_targets {
+        w.down.set(i, false);
+        t.p.on.set(t.targets.get(i), true);
+        i = i + 1;
+    }
+    sound(w.fx, sn_target(), 9, pan_at(229));
+}
+
+// ---- the crows
+
+fn crows(w: Week) {
+    let t = w.t;
+    let scared_off = has(w, scarecrow());
+    if !scared_off && w.phase == ph_play() {
+        let rate = if fair_is(w, f_murder()) { 3 } else { 1 };
+        w.crow_timer = w.crow_timer - rate * (if w.run.season == 2 { 3 } else { 2 });
+        if w.crow_timer <= 0 {
+            w.crow_timer = (1500 - week_index(w.run) * 60).max(700) + wroll(w, 400);
+            spawn_crow(w);
+        }
+    }
+    let mut c = 0;
+    while c < max_crows() {
+        let st = w.crow_state.get(c);
+        if st == 1 {
+            // flying in to its plot
+            let i = w.crow_plot.get(c);
+            let tx = t.plot_x.get(i) * 256;
+            let ty = (t.plot_y.get(i) - 3) * 256;
+            let dx = tx - w.crow_x.get(c);
+            let dy = ty - w.crow_y.get(c);
+            let d = isqrt(dx * dx + dy * dy);
+            if d < 300 || !w.ripe.get(i) {
+                if w.ripe.get(i) {
+                    w.crow_state.set(c, 2);
+                    w.crow_t.set(c, if fair_is(w, f_murder()) { 200 } else { 360 });
+                    sound(w.fx, sn_crow(), 0, pan_at(t.plot_x.get(i)));
+                    teach(w, 4, "A crow! Hit that plant before it's eaten.");
+                } else {
+                    leave(w, c);
+                }
+            } else {
+                let sp = 300;
+                w.crow_vx.set(c, dx * sp / d.max(1));
+                w.crow_vy.set(c, dy * sp / d.max(1));
+                w.crow_x.set(c, w.crow_x.get(c) + w.crow_vx.get(c));
+                w.crow_y.set(c, w.crow_y.get(c) + w.crow_vy.get(c));
+            }
+        } else if st == 2 {
+            let i = w.crow_plot.get(c);
+            w.crow_t.set(c, w.crow_t.get(c) - 1);
+            if !w.ripe.get(i) {
+                leave(w, c);
+            } else if w.crow_t.get(c) <= 0 {
+                // eaten
+                w.ripe.set(i, false);
+                w.growth.set(i, 0);
+                w.crows_eaten = w.crows_eaten + 1;
+                pop(w.fx, "Eaten!", t.plot_x.get(i) + table_x(), t.plot_y.get(i) - 12, 0x404040, 1);
+                burst(w.fx, p_dot(), t.plot_x.get(i) + table_x(), t.plot_y.get(i), 10, 300, 24, seed_color(w.seed.get(i)));
+                sound(w.fx, sn_eaten(), 0, pan_at(t.plot_x.get(i)));
+                sync_plants(w);
+                leave(w, c);
+            }
+        } else if st == 3 {
+            w.crow_x.set(c, w.crow_x.get(c) + w.crow_vx.get(c));
+            w.crow_y.set(c, w.crow_y.get(c) + w.crow_vy.get(c));
+            w.crow_vy.set(c, w.crow_vy.get(c) - 6);
+            if w.crow_y.get(c) < -20 * 256 || w.crow_x.get(c) < -30 * 256 || w.crow_x.get(c) > 290 * 256 { w.crow_state.set(c, 0) }
+        }
+        c = c + 1;
+    }
+}
+
+fn spawn_crow(w: Week) {
+    let t = w.t;
+    // a ripe plant no crow's after
+    let mut target = -1;
+    let mut tries = 0;
+    while target < 0 && tries < 20 {
+        let i = wroll(w, t.n_plots);
+        if w.ripe.get(i) && crow_on(w, i) < 0 { target = i }
+        tries = tries + 1;
+    }
+    let mut c = 0;
+    let mut slot = -1;
+    while c < max_crows() {
+        if w.crow_state.get(c) == 0 && slot < 0 { slot = c }
+        c = c + 1;
+    }
+    if target >= 0 && slot >= 0 {
+        let from_left = wroll(w, 2) == 0;
+        w.crow_x.set(slot, if from_left { -16 * 256 } else { 272 * 256 });
+        w.crow_y.set(slot, (20 + wroll(w, 80)) * 256);
+        w.crow_state.set(slot, 1);
+        w.crow_plot.set(slot, target);
+        sound(w.fx, sn_crow(), 1, if from_left { -90 } else { 90 });
+    }
+}
+
+pub fn crow_on(w: Week, i: Int) -> Int {
+    let mut found = -1;
+    let mut c = 0;
+    while c < max_crows() {
+        let st = w.crow_state.get(c);
+        if (st == 1 || st == 2) && w.crow_plot.get(c) == i { found = c }
+        c = c + 1;
+    }
+    found
+}
+
+fn leave(w: Week, c: Int) {
+    w.crow_state.set(c, 3);
+    w.crow_vx.set(c, if w.crow_x.get(c) < 128 * 256 { -380 } else { 380 });
+    w.crow_vy.set(c, -200);
+}
+
+fn scare_crow_at(w: Week, i: Int) {
+    let c = crow_on(w, i);
+    if c >= 0 && w.crow_state.get(c) == 2 {
+        leave(w, c);
+        let x = w.t.plot_x.get(i);
+        let y = w.t.plot_y.get(i);
+        sound(w.fx, sn_scare(), 0, pan_at(x));
+        burst(w.fx, p_dot(), x + table_x(), y - 4, 8, 360, 30, 0x202028);
+        if has(w, feather()) {
+            fire(w, feather());
+            w.run.money = w.run.money + 1;
+            add_basket(w, 200, x, y);
+            pop(w.fx, "+$1", x + table_x(), y - 14, 0xffe04a, 1);
+            sound(w.fx, sn_coin(), 0, pan_at(x));
+        } else {
+            pop(w.fx, "Shoo!", x + table_x(), y - 14, 0xffffff, 1);
+        }
+    }
+}
+
+// ---- the end of the week: what it pays
+
+// the week's pay, item by item: (what, coins) as parallel arrays filled
+// in; how many items
+pub fn payout(w: Week, names: Array<String>, coins: Array<Int>) -> Int {
+    let r = w.run;
+    let mut n = 0;
+    names.set(n, if is_fair(r) { "Fair prize" } else { "Rent paid" });
+    coins.set(n, if is_fair(r) { 5 } else { 3 });
+    n = n + 1;
+    if w.balls_left > 0 {
+        names.set(n, "Balls to spare");
+        coins.set(n, w.balls_left * 2);
+        n = n + 1;
+    }
+    let over = if w.rent > 0 { (w.banked - w.rent) * 2 / w.rent } else { 0 };
+    if over > 0 {
+        names.set(n, "Surplus");
+        coins.set(n, over.min(4));
+        n = n + 1;
+    }
+    let cap = if has_tool(r, piggy_bank()) { 10 } else { 5 };
+    let interest = (r.money / 5).min(cap);
+    if interest > 0 {
+        names.set(n, "Interest");
+        coins.set(n, interest);
+        n = n + 1;
+    }
+    n
+}

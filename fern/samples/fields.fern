@@ -1,0 +1,70 @@
+// Setting a struct's fields: `p.x = 1`, or `self.x = 1` in a method. A
+// struct is shared, not copied, so whatever else holds it sees the change.
+// (That's not what `=` on a name does: `p = q`, for a `let mut p`, makes p
+// another struct, without changing the one it was.)
+
+struct Point { x: Int, y: Int }
+
+impl Point {
+    pub fn move_by(self, dx: Int, dy: Int) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+}
+
+// a struct of one field is just that field, at no cost, unless the field
+// is ever set: then it has a block of its own, to be set in
+struct Counter { n: Int }
+
+impl Counter {
+    pub fn bump(self) -> Int {
+        self.n = self.n + 1;
+        self.n
+    }
+}
+
+struct Slot<T> { item: T, label: String }
+
+struct Line { from: Point, to: Point }
+
+fn main() {
+    let p = Point { x: 1, y: 2 };
+    let q = p;
+    p.move_by(10, 20);
+    p.x = p.x * 2;
+    println(p.x.show() ++ " " ++ p.y.show() ++ " " ++ q.x.show());
+    let c = Counter { n: 0 };
+    c.bump();
+    c.bump();
+    println(c.bump().show());
+    let s = Slot { item: "a", label: "first" };
+    s.item = "b";
+    println(s.item ++ " " ++ s.label);
+    // through another struct: the line's end is p itself
+    let l = Line { from: Point { x: 0, y: 0 }, to: p };
+    l.to.y = 0;
+    println(p.y.show());
+    // in closures, and in code that performs effects (which is in CPS)
+    let counters = [Counter { n: 5 }, Counter { n: 7 }];
+    counters.each(|k| { k.n = k.n * 10; });
+    println(counters.map(|k| k.n).show());
+    let tried = attempt(|| {
+        c.n = 100;
+        need(None, "gave up");
+        c.n = 0;
+    });
+    println(tried.is_ok().show() ++ " " ++ c.n.show());
+    // a name made to stand for another struct: the first is as it was
+    let mut a = Point { x: 1, y: 1 };
+    let b = a;
+    a = Point { x: 7, y: 7 };
+    a.x = 8;
+    println(a.x.show() ++ " " ++ b.x.show());
+}
+// expect: 22 22 22
+// expect: 3
+// expect: b first
+// expect: 0
+// expect: [50, 70]
+// expect: false 100
+// expect: 8 1

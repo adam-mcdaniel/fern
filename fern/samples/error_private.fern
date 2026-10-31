@@ -1,0 +1,6 @@
+// Only pub items are visible from outside their module.
+mod secrets {
+    fn hidden() -> Int { 42 }
+}
+fn main() { println(secrets::hidden().show()); }
+// error: can't find hidden in secrets

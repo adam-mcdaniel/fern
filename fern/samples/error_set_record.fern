@@ -1,0 +1,6 @@
+// A record's fields are fixed; a struct's can be set.
+fn main() {
+    let r = { x: 1, y: 2 };
+    r.x = 5;
+}
+// error: a record's fields can't be set (a struct's can): x

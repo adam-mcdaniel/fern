@@ -1,0 +1,241 @@
+// The pictures: the font, the creatures (pixel art written as text), and
+// the colors, the land's for each region and the creatures' everywhere.
+
+use super::gfx::{Gfx, Font, Sprite, font, sprite, rgb, set_color, mix};
+
+// ---- the font
+
+pub fn letters() -> Font {
+    font([
+        ("A", ".###. #...# #...# ##### #...# #...# #...#"),
+        ("B", "####. #...# #...# ####. #...# #...# ####."),
+        ("C", ".###. #...# #.... #.... #.... #...# .###."),
+        ("D", "####. #...# #...# #...# #...# #...# ####."),
+        ("E", "##### #.... #.... ####. #.... #.... #####"),
+        ("F", "##### #.... #.... ####. #.... #.... #...."),
+        ("G", ".###. #...# #.... #.### #...# #...# .####"),
+        ("H", "#...# #...# #...# ##### #...# #...# #...#"),
+        ("I", "### .#. .#. .#. .#. .#. ###"),
+        ("J", "..### ...#. ...#. ...#. #..#. #..#. .##.."),
+        ("K", "#...# #..#. #.#.. ##... #.#.. #..#. #...#"),
+        ("L", "#.... #.... #.... #.... #.... #.... #####"),
+        ("M", "#...# ##.## #.#.# #.#.# #...# #...# #...#"),
+        ("N", "#...# ##..# #.#.# #..## #...# #...# #...#"),
+        ("O", ".###. #...# #...# #...# #...# #...# .###."),
+        ("P", "####. #...# #...# ####. #.... #.... #...."),
+        ("Q", ".###. #...# #...# #...# #.#.# #..#. .##.#"),
+        ("R", "####. #...# #...# ####. #.#.. #..#. #...#"),
+        ("S", ".#### #.... #.... .###. ....# ....# ####."),
+        ("T", "##### ..#.. ..#.. ..#.. ..#.. ..#.. ..#.."),
+        ("U", "#...# #...# #...# #...# #...# #...# .###."),
+        ("V", "#...# #...# #...# #...# #...# .#.#. ..#.."),
+        ("W", "#...# #...# #...# #.#.# #.#.# #.#.# .#.#."),
+        ("X", "#...# #...# .#.#. ..#.. .#.#. #...# #...#"),
+        ("Y", "#...# #...# .#.#. ..#.. ..#.. ..#.. ..#.."),
+        ("Z", "##### ....# ...#. ..#.. .#... #.... #####"),
+        ("0", ".###. #...# #..## #.#.# ##..# #...# .###."),
+        ("1", ".#. ##. .#. .#. .#. .#. ###"),
+        ("2", ".###. #...# ....# ...#. ..#.. .#... #####"),
+        ("3", "####. ....# ....# .###. ....# ....# ####."),
+        ("4", "...#. ..##. .#.#. #..#. ##### ...#. ...#."),
+        ("5", "##### #.... ####. ....# ....# #...# .###."),
+        ("6", ".###. #.... #.... ####. #...# #...# .###."),
+        ("7", "##### ....# ...#. ..#.. .#... .#... .#..."),
+        ("8", ".###. #...# #...# .###. #...# #...# .###."),
+        ("9", ".###. #...# #...# .#### ....# ....# .###."),
+        (".", ". . . . . . #"),
+        (",", ".. .. .. .. .. .# #."),
+        (":", ". . # . . # ."),
+        (";", ".. .. .# .. .. .# #."),
+        ("!", "# # # # # . #"),
+        ("?", ".###. #...# ....# ...#. ..#.. ..... ..#.."),
+        ("'", "# # . . . . ."),
+        ("-", ".... .... .... #### .... .... ...."),
+        ("+", "..... ..#.. ..#.. ##### ..#.. ..#.. ....."),
+        ("/", "....# ...#. ...#. ..#.. .#... .#... #...."),
+        ("%", "##..# ##..# ...#. ..#.. .#... #..## #..##"),
+        ("(", ".# #. #. #. #. #. .#"),
+        (")", "#. .# .# .# .# .# #."),
+        (">", "#... .#.. ..#. ...# ..#. .#.. #..."),
+        ("<", "...# ..#. .#.. #... .#.. ..#. ...#"),
+        ("=", ".... .... #### .... #### .... ...."),
+        ("*", "..... #.#.# .###. ##### .###. #.#.# ....."),
+        ("#", ".#.#. ##### .#.#. .#.#. .#.#. ##### .#.#."),
+        ("_", "..... ..... ..... ..... ..... ..... #####"),
+        ("[", "## #. #. #. #. #. ##"),
+        ("]", "## .# .# .# .# .# ##"),
+        ("^", "..#.. .#.#. #...# ..... ..... ..... ....."),
+        ("@", ".#.#. ##### ##### ##### .###. ..#.. ....."),
+    ])
+}
+
+// ---- the creatures' colors (64 to 127) and the emissive ones
+
+pub fn creature_colors(g: Gfx) {
+    let ramps = [
+        // 64 the gloom: deep violet
+        (rgb(34, 16, 52), rgb(165, 115, 210)),
+        // 68 the shade: smoke
+        (rgb(36, 42, 66), rgb(175, 185, 225)),
+        // 72 the husk: bark
+        (rgb(42, 28, 20), rgb(170, 128, 88)),
+        // 76 the nightwing
+        (rgb(28, 22, 34), rgb(150, 128, 162)),
+        // 80 the spitter: bog green
+        (rgb(22, 38, 28), rgb(140, 182, 100)),
+        // 84 the snuffer: ash
+        (rgb(58, 56, 62), rgb(222, 216, 206)),
+        // 88 the wraith: dried blood
+        (rgb(40, 12, 26), rgb(212, 118, 148)),
+        // 92 bone
+        (rgb(118, 112, 98), rgb(250, 247, 234)),
+        // 96 iron
+        (rgb(36, 34, 38), rgb(162, 152, 142)),
+        // 100 gold
+        (rgb(118, 78, 18), rgb(255, 236, 140)),
+        // 104 wood
+        (rgb(58, 38, 24), rgb(182, 136, 90)),
+        // 108 stone
+        (rgb(58, 58, 64), rgb(188, 188, 192)),
+        // 112 red
+        (rgb(88, 20, 20), rgb(250, 122, 92)),
+        // 116 cyan
+        (rgb(18, 58, 78), rgb(172, 232, 250)),
+        // 120 black to white
+        (rgb(8, 6, 10), rgb(255, 255, 255)),
+        // 124 the boss's flesh
+        (rgb(14, 6, 20), rgb(96, 50, 120)),
+    ];
+    let mut i = 64;
+    ramps.each(|r| {
+        let (dark, light) = r;
+        let mut k = 0;
+        while k < 4 {
+            set_color(g, i + k, mix(dark, light, k * 256 / 3));
+            k = k + 1;
+        }
+        i = i + 4;
+    });
+    let emit = [
+        rgb(255, 250, 232),  // 128 white-hot
+        rgb(255, 240, 170),  // 129 eyes, pale gold
+        rgb(255, 64, 40),    // 130 eyes, red
+        rgb(130, 240, 255),  // 131 eyes, cyan
+        rgb(255, 150, 40),   // 132 embers
+        rgb(255, 214, 90),   // 133 flame
+        rgb(200, 96, 255),   // 134 violet glow
+        rgb(150, 255, 120),  // 135 green glow
+        rgb(255, 210, 70),   // 136 gold glow
+        rgb(120, 60, 20),    // 137 dull coals
+    ];
+    let mut j = 0;
+    emit.each(|c| {
+        array_set(g.emit, j, c);
+        j = j + 1;
+    });
+}
+
+// ---- the land's colors (0 to 63), by region: eight ramps of eight, dark
+// to light (see world.fern for what each is)
+
+pub fn land_colors(g: Gfx, region: Int) {
+    let ramps = if region == 0 {
+        // Whisperwood: grass, moss, earth, leaves, rock, flowers, stone, water
+        [(rgb(12, 26, 18), rgb(74, 122, 62)), (rgb(14, 30, 30), rgb(70, 132, 96)), (rgb(30, 24, 20), rgb(122, 100, 78)),
+         (rgb(6, 18, 12), rgb(70, 128, 58)), (rgb(30, 30, 36), rgb(150, 150, 156)), (rgb(0, 0, 0), rgb(0, 0, 0)),
+         (rgb(40, 38, 44), rgb(172, 166, 160)), (rgb(8, 22, 40), rgb(70, 130, 168))]
+    } else if region == 1 {
+        // the Drowned Fen: sedge, bog, mud, dead wood, stone, reeds, stone, water
+        [(rgb(18, 24, 14), rgb(100, 112, 62)), (rgb(14, 22, 18), rgb(70, 96, 70)), (rgb(22, 18, 14), rgb(104, 86, 62)),
+         (rgb(20, 16, 14), rgb(110, 96, 82)), (rgb(28, 30, 32), rgb(136, 140, 140)), (rgb(0, 0, 0), rgb(0, 0, 0)),
+         (rgb(40, 38, 44), rgb(160, 156, 150)), (rgb(10, 26, 30), rgb(70, 140, 130))]
+    } else {
+        // the Ashen Ruins: ash, flagstones, scorched earth, walls, rubble, embers, stone, black pools
+        [(rgb(22, 20, 22), rgb(112, 104, 100)), (rgb(26, 24, 28), rgb(120, 114, 118)), (rgb(24, 16, 12), rgb(96, 70, 52)),
+         (rgb(30, 26, 30), rgb(150, 138, 132)), (rgb(34, 30, 30), rgb(144, 132, 124)), (rgb(0, 0, 0), rgb(0, 0, 0)),
+         (rgb(44, 40, 44), rgb(176, 164, 156)), (rgb(10, 8, 16), rgb(60, 50, 86))]
+    };
+    let mut i = 0;
+    ramps.each(|r| {
+        let (dark, light) = r;
+        let mut k = 0;
+        while k < 8 {
+            set_color(g, i + k, mix(dark, light, k * 256 / 7));
+            k = k + 1;
+        }
+        i = i + 8;
+    });
+    // (40 to 47 are spots of color, not a ramp)
+    let spots = if region == 0 {
+        [rgb(200, 58, 78), rgb(232, 202, 82), rgb(176, 118, 222), rgb(238, 238, 248), rgb(60, 130, 200), rgb(150, 232, 255), rgb(170, 92, 30), rgb(126, 40, 30)]
+    } else if region == 1 {
+        [rgb(150, 140, 70), rgb(190, 180, 100), rgb(90, 80, 40), rgb(210, 200, 170), rgb(60, 150, 120), rgb(150, 255, 210), rgb(120, 70, 110), rgb(60, 70, 40)]
+    } else {
+        [rgb(255, 110, 30), rgb(255, 190, 70), rgb(150, 30, 20), rgb(90, 20, 14), rgb(130, 40, 40), rgb(200, 170, 120), rgb(60, 60, 64), rgb(120, 100, 80)]
+    };
+    let mut j = 40;
+    spots.each(|c| {
+        set_color(g, j, c);
+        j = j + 1;
+    });
+}
+
+// ---- the creatures
+
+pub struct Art {
+    gloom: Sprite, gloom2: Sprite, shade: Sprite, husk: Sprite, bat: Sprite, bat2: Sprite,
+    spitter: Sprite, snuffer: Sprite, wraith: Sprite, brazier: Sprite, chest: Sprite,
+}
+
+pub fn art() -> Art {
+    let gloom = [64, 65, 66, 67, 129];
+    let bat = [76, 77, 78, 79, 130];
+    Art {
+        gloom: sprite([
+            "....bbbb....", "..bbccccbb..", ".bccddccccb.", ".bcdccccccb.", "bccceccecccb",
+            "bccccccccccb", "bbccccccccbb", "abbccccccbba", ".abbbbbbbba.", "..aa.aa.aa.."], "abcde", gloom),
+        gloom2: sprite([
+            "............", "...bbbbbb...", ".bbccccccbb.", "bccddccccccb", "bcdceccecccb",
+            "bccccccccccb", "bbccccccccbb", "abbbccccbbba", "aabbbbbbbbaa", ".aa.aa.aa.a."], "abcde", gloom),
+        shade: sprite([
+            "....tttt....", "..ttuuuutt..", ".tuuvvvvuut.", ".tuveuuevut.", "tuuuuuuuuuut", "tuuvuuuuvuut",
+            ".tuuuuuuuut.", ".ttuuuuuutt.", "..tuuttuut..", "..t.tu.ut.t.", "...t.t..t...", "....t....t.."],
+            "tuve", [68, 69, 70, 131]),
+        husk: sprite([
+            ".....kkkkkk.....", "...kkllllllkk...", "..kllmmmmmmllk..", "..klmnnmmmmmlk..",
+            ".kllmmmmmmmmllk.", ".klmeemmmmeemlk.", ".kllmmmmmmmmllk.", "..klllmmmmlllk..",
+            ".kkkllllllllkkk.", "kllkkllllllkkllk", "kl.kllllllllk.lk", "k..kllkkkkllk..k",
+            "...kllk..kllk...", "...kll....llk...", "..kkll....llkk..", "..kkk......kkk.."],
+            "klmne", [72, 73, 74, 75, 130]),
+        bat: sprite([
+            "o............o", "oo..........oo", "opo...pp...opo", ".ppo.pqqp.opp.",
+            "..pppqeeqppp..", "...pppqqppp...", "....p.pp.p....", ".......p......"], "opqe", bat),
+        bat2: sprite([
+            "..............", "......pp......", ".....pqqp.....", "..ppppeepppp..",
+            ".pppppqqppppp.", "opo.pppppp.opo", "oo...p..p...oo", "o............o"], "opqe", bat),
+        spitter: sprite([
+            "....gggggg....", "..gghhhhhhgg..", ".ghhiiiiiihhg.", ".ghiijjiiiihg.",
+            "ghhieiiiieihhg", "ghiiiiiiiiiihg", "ghiimmmmmmiihg", "ghhimmmmmmihhg",
+            ".ghhiiiiiihhg.", "..gghhhhhhgg..", "...g.g..g.g...", "..g..g..g..g.."],
+            "ghijme", [80, 81, 82, 83, 135, 129]),
+        snuffer: sprite([
+            "....aaaa....", "...abbbba...", "..abbccbba..", "..abkeekba..", "..abkkkkba..",
+            "...abbbba...", "..aabbbbaa..", ".abbbccbbba.", ".abbcccbbba.", "abbbcccbbbba",
+            "abbbbbbbbbba", ".abbbbbbbba.", ".aabbbbbbaa.", "..a.a..a.a.."],
+            "abcke", [84, 85, 86, 120, 131]),
+        wraith: sprite([
+            ".....wwww.....", "....wxxxxw....", "...wxyyyyxw...", "...wxeyyexw...",
+            "...wxyyyyxw...", "....wxyyxw....", "..wwxxyyxxww..", ".wxxyyzzyyxxw.",
+            "wxx.wyzzyw.xxw", "wx..wyyyyw..xw", "w...wxyyxw...w", "....wxyyxw....",
+            "...wxxyyxxw...", "...wx.xx.xw...", "..w.w.x.w.w...", "..w...w...w..."],
+            "wxyze", [88, 89, 90, 91, 130]),
+        brazier: sprite([
+            "vuuuuuuuuuuv", ".tuuuuuuuut.", "..tttttttt..", "...ssttss...",
+            "....ssss....", "...qrrrrq...", "..qrrrrrrq..", "..qqqqqqqq.."],
+            "stuvqr", [96, 97, 98, 99, 108, 109]),
+        chest: sprite([
+            "..llllllll..", ".lmmmmmmmml.", "lmmmmmmmmmml", "gggggyyggggg",
+            "lmmmmyymmmml", "lmmmmmmmmmml", "lmmmmmmmmmml", "llllllllllll"],
+            "lmgy", [104, 106, 101, 136]),
+    }
+}

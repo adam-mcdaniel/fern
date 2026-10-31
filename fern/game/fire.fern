@@ -1,0 +1,99 @@
+// The fire from the PlayStation port of Doom: every pixel is a heat, 0 to
+// 36, and each frame every pixel takes the heat of the one below it, now
+// and then a little cooler, and a pixel to one side or the other. The
+// bottom row and the letters burn at full heat.
+//
+// The wind follows the mouse (left of the middle blows left); click to put
+// the fire out or light it again.
+
+mod screen;
+mod draw;
+
+use screen::*;
+use draw::{Canvas, canvas, show, text, text_width};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 120 }
+fn hottest() -> Int { 36 }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern fire") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    // the heats, and a canvas over them, to write the letters in heat
+    let heat = Canvas { pixels: array(width() * height(), 0), width: width(), height: height(), font: c.font };
+    let colors = palette();
+    let rng = array(1, screen_ticks());
+    let mut burning = true;
+    loop {
+        if mouse_clicked() { burning = !burning }
+        let source = if burning { hottest() } else { 0 };
+        let mut x = 0;
+        while x < width() {
+            array_set(heat.pixels, (height() - 1) * width() + x, source);
+            x = x + 1;
+        }
+        if burning {
+            text(heat, "FERN", (width() - text_width("FERN", 6)) / 2, 50, 6, hottest());
+        }
+        // the wind: -1, 0 or 1, as the mouse is left, middle or right
+        let wind = (mouse_x() * 3 / width()) - 1;
+        spread(heat, rng, wind);
+        let mut i = 0;
+        while i < width() * height() {
+            array_set(c.pixels, i, array_get(colors, array_get(heat.pixels, i)));
+            i = i + 1;
+        }
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+}
+
+// each pixel's heat to the one above, cooled now and then, blown aside
+fn spread(heat: Canvas, rng: Array<Int>, wind: Int) {
+    let mut y = 1;
+    while y < height() {
+        let mut x = 0;
+        while x < width() {
+            let r = random(rng);
+            let h = array_get(heat.pixels, y * width() + x);
+            let to = x + r % 3 - 1 + wind;
+            // cooling by 0, 1 or 2 (a little faster than Doom, for a shorter screen)
+            let cool = (r >> 2 & 1) + (if r >> 3 & 3 == 0 { 1 } else { 0 });
+            if to >= 0 && to < width() {
+                array_set(heat.pixels, (y - 1) * width() + to, (h - cool).max(0));
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+fn random(rng: Array<Int>) -> Int {
+    let s = array_get(rng, 0) * 1103515245 + 12345 & 0x7fffffff;
+    array_set(rng, 0, s);
+    s >> 16
+}
+
+// Doom's 37 colors, from black through red and yellow to white
+fn palette() -> Array<Int> {
+    let colors = array(37, 0);
+    store(colors, 0, [0x070707, 0x1f0707, 0x2f0f07, 0x470f07, 0x571707, 0x671f07, 0x771f07, 0x8f2707, 0x9f2f07,
+                      0xaf3f07, 0xbf4707, 0xc74707, 0xdf4f07, 0xdf5707, 0xdf5707, 0xd75f07, 0xd7670f, 0xcf6f0f,
+                      0xcf770f, 0xcf7f0f, 0xcf8717, 0xc78717, 0xc78f17, 0xc7971f, 0xbf9f1f, 0xbf9f1f, 0xbfa727,
+                      0xbfa727, 0xbfaf2f, 0xb7af2f, 0xb7b72f, 0xb7b737, 0xcfcf6f, 0xdfdf9f, 0xefefc7, 0xffffff,
+                      0xffffff]);
+    colors
+}
+
+fn store(a: Array<Int>, at: Int, xs: List<Int>) {
+    match xs {
+        Nil => (),
+        Cons(x, rest) => {
+            array_set(a, at, x);
+            store(a, at + 1, rest);
+        }
+    }
+}

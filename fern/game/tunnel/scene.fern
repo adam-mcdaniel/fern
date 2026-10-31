@@ -1,0 +1,479 @@
+// Drawing the ant farm each frame: the baked background, then what lives
+// in it. At the surface, where food turns up: a flower dropping seeds, a
+// clover giving leaves, a stem of aphids giving honeydew, each with its
+// pile beside it. Buried food in pockets in the soil. The chambers, filling
+// with what's brought (seeds heaped, the fungus garden sprouting, larvae
+// in the nursery), the queen in hers. Water standing in the tunnels. The
+// ants, legs going, carrying their crumbs. A ring round any pile that's
+// spoiling.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+use super::world::*;
+use super::colony::*;
+use super::art::*;
+use super::fx::*;
+
+pub fn backdrop(g: Gfx, a: Art) {
+    let px = g.px;
+    let bg = a.bg;
+    let n = sw() * sh();
+    if g.ox == 0 && g.oy == 0 {
+        let mut i = 0;
+        while i < n {
+            px.set(i, bg.get(i));
+            i = i + 1;
+        }
+    } else {
+        let mut y = 0;
+        while y < sh() {
+            let sy = (y - g.oy).clamp(0, sh() - 1);
+            let mut x = 0;
+            while x < sw() {
+                px.set(y * sw() + x, bg.get(sy * sw() + (x - g.ox).clamp(0, sw() - 1)));
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+    }
+}
+
+// a cell's middle on the screen
+pub fn cx_of(g: Gfx, i: Int) -> Int { (i % gw()) * cell() + cell() / 2 + g.ox }
+pub fn cy_of(g: Gfx, i: Int) -> Int { (i / gw()) * cell() + cell() / 2 + y0() + g.oy }
+
+pub fn food_color(k: Int) -> Int { if k == f_seed() { 0xf0c850 } else if k == f_leaf() { 0x6ad048 } else { 0x7ad8f8 } }
+pub fn kind_color(k: Int) -> Int { if k == k_queen() { 0xe8a0d0 } else { food_color(k) } }
+
+// a crumb of food, its kind told by its shape as well as its color: a
+// seed a wide oval, a leaf a slash on the slant, honeydew a tall drop
+// (k pixels a dot; top left at x, y)
+pub fn food_mark(g: Gfx, kind: Int, x: Int, y: Int, k: Int) {
+    let col = food_color(kind);
+    let dark = scale(col, 150);
+    let rows = if kind == f_seed() { [6, 15, 6] } else if kind == f_leaf() { [3, 6, 12] } else { [2, 2, 7, 7] };
+    let mut r = 0;
+    let mut rest = rows;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(bits, tail) => {
+                let mut cbit = 0;
+                while cbit < 4 {
+                    if (bits >> (3 - cbit)) & 1 == 1 {
+                        let shade = if r == 0 && kind != f_leaf() { mix(col, 0xffffff, 90) } else if (bits >> (2 - cbit)) & 1 == 0 && cbit < 3 { dark } else { col };
+                        rect(g, x + cbit * k, y + r * k, k, k, shade);
+                    }
+                    cbit = cbit + 1;
+                }
+                r = r + 1;
+                rest = tail;
+            }
+        }
+    }
+}
+
+pub fn draw_colony(g: Gfx, a: Art, c: Colony, sines: Array<Int>) {
+    let w = c.w;
+    backdrop(g, a);
+    live_sky(g, a, w, c.week_t * 256 / week_len(), c.frame);
+    water(g, w, c.frame);
+    let mut k = 0;
+    while k < w.n_ch {
+        draw_chamber(g, w, k, c.frame, sines);
+        k = k + 1;
+    }
+    let mut s = 0;
+    while s < max_sources() {
+        if w.src_alive.get(s) { draw_source(g, c, s, sines) }
+        s = s + 1;
+    }
+    ants(g, c);
+    beetles(g, c, sines);
+}
+
+// ---- the beetles: big, dark and glossy, horned, legs going; a red mark
+// over one still on the surface (it's coming in), a bar of its strength
+// when the soldiers are at it
+fn beetles(g: Gfx, c: Colony, sines: Array<Int>) {
+    let mut b = 0;
+    while b < max_beetles() {
+        if c.be_state.get(b) > 0 {
+            let here = c.be_cell.get(b);
+            let next = c.be_next.get(b);
+            let p = c.be_prog.get(b);
+            let x = cx_of(g, here) + ((cx_of(g, next) - cx_of(g, here)) * p >> 8);
+            let y = cy_of(g, here) + ((cy_of(g, next) - cy_of(g, here)) * p >> 8) + 1;
+            let f = c.be_face.get(b);
+            let step = (c.frame / 6) % 2;
+            // legs
+            let mut l = 0;
+            while l < 3 {
+                let lx = x - 3 + l * 3;
+                put(g, lx + (if step == 0 { 1 } else { -1 }) * (l % 2 * 2 - 1), y, 0x10101a);
+                put(g, lx, y - 1, 0x10101a);
+                l = l + 1;
+            }
+            // shell: glossy violet, a bright sheen, the seam down its back
+            disc(g, x - f, y - 4, 4, 0x1a0a2a);
+            disc(g, x - f, y - 4, 3, 0x5a2a8a);
+            rect(g, x - 4, y - 5, 7, 3, 0x6a3a9a);
+            put(g, x - f * 2, y - 6, 0xc8a0ff);
+            put(g, x - f * 3, y - 5, 0xa880e8);
+            line(g, x - f * 5, y - 4, x + f * 1, y - 4, 0x2a0a3a, 256);
+            // head and horn
+            rect(g, x + f * 3 - (if f < 0 { 1 } else { 0 }), y - 4, 2, 3, 0x2a1a3a);
+            put(g, x + f * 5, y - 5, 0x2a1a3a);
+            put(g, x + f * 6, y - 6, 0x2a1a3a);
+            put(g, x + f * 6, y - 7, 0x2a1a3a);
+            put(g, x + f * 4, y - 4, 0xffe080);
+            if here < (surface() + 1) * gw() && (c.frame / 10) % 2 == 0 {
+                // (coming: a red arrow over it)
+                put(g, x, y - 9, 0xff3a2a);
+                rect(g, x - 1, y - 11, 3, 1, 0xff3a2a);
+                rect(g, x - 2, y - 12, 5, 1, 0xff3a2a);
+            }
+            let hp = c.be_hp.get(b);
+            if c.be_state.get(b) > 0 && here >= (surface() + 1) * gw() {
+                rect(g, x - 5, y - 9, 10, 2, 0x1a1008);
+                rect(g, x - 5, y - 9, (hp * 10 / 10).min(10), 2, 0xff5a3a);
+            }
+        }
+        b = b + 1;
+    }
+}
+
+// ---- water: blue, shimmering, where it stands
+fn water(g: Gfx, w: World, frame: Int) {
+    let mut i = 0;
+    while i < gw() * gh() {
+        let v = w.water.get(i);
+        if v > 8 {
+            let x = (i % gw()) * cell() + g.ox;
+            let y = (i / gw()) * cell() + y0() + g.oy;
+            // (the cell fills from the bottom)
+            let h = (v * cell() / 256).max(1);
+            let shimmer = if (x + frame / 4) % 9 == 0 { 0xc8f0ff } else { 0x4aa0e0 };
+            rect_blend(g, x - 1, y + cell() - h, cell() + 2, h, shimmer, 150);
+        }
+        i = i + 1;
+    }
+}
+
+// ---- the chambers
+
+fn draw_chamber(g: Gfx, w: World, k: Int, frame: Int, sines: Array<Int>) {
+    let kind = w.ch_kind.get(k);
+    let x0 = w.ch_x.get(k) * cell() + g.ox;
+    let y0p = w.ch_y.get(k) * cell() + y0() + g.oy;
+    let cw = w.ch_w.get(k) * cell();
+    let chh = w.ch_h.get(k) * cell();
+    let floor = y0p + chh - 1;
+    let store = w.ch_store.get(k);
+    // (the floor tinted the color of what the chamber's for, glowing a little)
+    let tint = if kind == k_sump() { 0x4a90e0 } else if kind == k_guard() { 0xa83a2a } else { kind_color(kind) };
+    round_blend(g, x0 + 2, y0p + chh / 2, cw - 4, chh / 2, 3, tint, 50);
+    if kind == k_queen() {
+        // the queen: twice an ant's size, her abdomen long and striped,
+        // a little crown; eggs in a heap beside her
+        let qx = x0 + cw / 2;
+        let qy = floor - 3;
+        let bob = sin(sines, frame * 3) >> 15;
+        disc(g, qx - 6, qy + bob, 3, 0xc83a1c);
+        rect(g, qx - 9, qy - 1 + bob, 6, 3, 0xc83a1c);
+        rect(g, qx - 9, qy - 2 + bob, 6, 1, 0xf06a3a);
+        put(g, qx - 7, qy + bob, 0x6a1a0a);
+        put(g, qx - 5, qy + bob, 0x6a1a0a);
+        rect(g, qx - 2, qy - 1, 3, 3, 0xc83a1c);
+        put(g, qx - 1, qy - 2, 0xf06a3a);
+        disc(g, qx + 3, qy - 1, 2, 0xc83a1c);
+        put(g, qx + 4, qy - 2, 0xffd8c0);
+        line(g, qx + 4, qy - 3, qx + 6, qy - 6, 0x6a1a0a, 256);
+        let mut l = 0;
+        while l < 3 {
+            put(g, qx - 3 + l * 2, qy + 2, 0x6a1a0a);
+            put(g, qx - 4 + l * 2, qy + 3, 0x6a1a0a);
+            l = l + 1;
+        }
+        put(g, qx + 2, qy - 4, 0xffd040);
+        put(g, qx + 3, qy - 5, 0xffd040);
+        put(g, qx + 4, qy - 4, 0xffd040);
+        let eggs = (store / 3).min(8);
+        let mut e = 0;
+        while e < eggs {
+            put(g, x0 + 3 + (e % 4) * 2, floor - 1 - e / 4, 0xfff8ec);
+            e = e + 1;
+        }
+    } else if kind == k_granary() {
+        // seeds heaped up, higher as more come in
+        let n = (store / 2).min(cw * 2);
+        let mut e = 0;
+        while e < n {
+            let sx = x0 + 2 + (e * 7) % (cw - 4);
+            let sy = floor - 1 - (e / (cw / 2)).min(chh - 3);
+            put(g, sx, sy, if e % 3 == 0 { 0xc89830 } else { 0xf0c850 });
+            e = e + 1;
+        }
+    } else if kind == k_garden() {
+        // the fungus: soft white puffs on leaf bits, more as it's fed
+        let n = (store / 3).min(cw / 2);
+        let mut e = 0;
+        while e < n {
+            let sx = x0 + 3 + (e * 5) % (cw - 5);
+            let sy = floor - 2;
+            disc(g, sx, sy, 1, 0xf4f0e0);
+            put(g, sx, sy + 1, 0x5aa040);
+            e = e + 1;
+        }
+    } else if kind == k_nursery() {
+        // larvae, white grubs in a row, wriggling
+        let n = (store / 3).min(cw / 3);
+        let mut e = 0;
+        while e < n {
+            let sx = x0 + 3 + e * 3;
+            let wig = (frame / 10 + e) % 2;
+            rect(g, sx, floor - 2 - wig, 2, 2, 0xfff4e0);
+            e = e + 1;
+        }
+    }
+    // a sign of what the chamber's for: its food's shape, over the door
+    if kind == k_granary() || kind == k_garden() || kind == k_nursery() {
+        round_blend(g, x0 + cw / 2 - 6, y0p - 10, 13, 10, 3, 0x1a1008, 120);
+        food_mark(g, kind, x0 + cw / 2 - 4, y0p - 9 + (if kind == k_nursery() { 0 } else { 1 }), 2);
+    }
+}
+
+// ---- the food
+
+fn draw_source(g: Gfx, c: Colony, s: Int, sines: Array<Int>) {
+    let w = c.w;
+    let kind = w.src_kind.get(s);
+    let x = w.src_x.get(s) * cell() + cell() / 2 + g.ox;
+    let y = w.src_y.get(s) * cell() + cell() / 2 + y0() + g.oy;
+    let pile = w.src_pile.get(s);
+    let age = w.src_age.get(s);
+    // (it grows in when new)
+    let grow = (age * 256 / 40).min(256);
+    let sway = sin(sines, c.frame * 4 + s * 90) >> 14;
+    if !w.src_buried.get(s) {
+        let base = y + 3;
+        if kind == f_seed() {
+            // a sunflower: a tall stem, leaves, a big head dropping seeds
+            let top = base - 4 - 14 * grow / 256;
+            line(g, x, base, x + sway, top, 0x4a9a3a, 256);
+            line(g, x + 1, base, x + 1 + sway, top, 0x3a8a2a, 256);
+            disc(g, x - 2, base - 6, 1, 0x5ab04a);
+            disc(g, x + 3, base - 9, 1, 0x5ab04a);
+            disc(g, x + sway, top, 3, 0xffc820);
+            disc(g, x + sway, top, 1, 0x8a5a20);
+            put(g, x + sway - 2, top - 2, 0xfff080);
+        } else if kind == f_leaf() {
+            // a clover patch, leaves of three
+            let r = 1 + 2 * grow / 256;
+            disc(g, x - 3, base - 3, r, 0x5ac04a);
+            disc(g, x + 3, base - 3, r, 0x4aa83a);
+            disc(g, x, base - 6, r, 0x6ad05a);
+            put(g, x - 3, base - 4, 0x8ae07a);
+            put(g, x, base - 7, 0x9af08a);
+        } else {
+            // a stem, aphids on it like green beads, a ladybird keeping watch
+            let top = base - 14 * grow / 256;
+            line(g, x, base, x, top, 0x5a8a3a, 256);
+            line(g, x, top + 4, x + 3, top + 2, 0x5a8a3a, 256);
+            put(g, x + 1, top + 3, 0x9af07a);
+            put(g, x - 1, top + 6, 0x9af07a);
+            put(g, x + 1, top + 8, 0x9af07a);
+            put(g, x - 1, top + 10, 0x9af07a);
+            put(g, x + 3, top + 1, 0xe83a2a);
+        }
+        pile_at(g, x + 5, base, pile, kind);
+    } else {
+        // buried: a pocket of food in the soil
+        disc(g, x, y, 5, 0x2a1408);
+        if kind == f_seed() {
+            // (an acorn)
+            disc(g, x, y + 1, 2, 0xb07030);
+            rect(g, x - 2, y - 2, 5, 2, 0x6a4020);
+        } else if kind == f_leaf() {
+            disc(g, x, y, 3, 0x8a6a2a);
+            put(g, x - 1, y - 1, 0x6ac040);
+        } else {
+            // (root aphids, a cluster)
+            put(g, x - 1, y, 0x9af07a);
+            put(g, x + 1, y - 1, 0x9af07a);
+            put(g, x, y + 1, 0x9af07a);
+        }
+        pile_at(g, x + 5, y + 3, pile, kind);
+        if !connected(w, s) && (c.frame / 20) % 2 == 0 { ring(g, x, y, 6, 1, food_color(kind), 120) }
+    }
+    // spoiling: a ring filling round it, red as it goes
+    let rot = w.src_rot.get(s);
+    if rot > 0 {
+        let frac = rot * 1024 / spoil();
+        let col = mix(0xffd040, 0xff3020, (rot * 256 / spoil()).min(256));
+        arc_ring(g, x, y - (if w.src_buried.get(s) { 0 } else { 6 }), 9, frac, col, sines);
+    }
+}
+
+// a pile of crumbs, each in its shape, stacked like a little heap
+fn pile_at(g: Gfx, x: Int, base: Int, n: Int, kind: Int) {
+    let mut e = 0;
+    while e < n.min(15) {
+        let row = if e < 5 { 0 } else if e < 9 { 1 } else if e < 12 { 2 } else if e < 14 { 3 } else { 4 };
+        let in_row = if e < 5 { e } else if e < 9 { e - 5 } else if e < 12 { e - 9 } else if e < 14 { e - 12 } else { 0 };
+        food_mark(g, kind, x + in_row * 5 + row * 2, base - 3 - row * 3, 1);
+        e = e + 1;
+    }
+}
+
+// the part of a ring (frac out of 1024 of the way round) from the top
+fn arc_ring(g: Gfx, x: Int, y: Int, r: Int, frac: Int, color: Int, sines: Array<Int>) {
+    let steps = 48;
+    let mut k = 0;
+    while k < steps {
+        let ang = k * 1024 / steps;
+        let on = ang < frac;
+        let px0 = x + (sin(sines, ang) * r >> 16);
+        let py = y - (cos(sines, ang) * r >> 16);
+        if on {
+            put(g, px0, py, color);
+            put(g, px0 + 1, py, color);
+        } else {
+            blend(g, px0, py, 0x1a1008, 90);
+        }
+        k = k + 1;
+    }
+}
+
+// ---- the ants
+
+fn ants(g: Gfx, c: Colony) {
+    let w = c.w;
+    let width = gw();
+    let mut a = 0;
+    while a < c.n_ants {
+        let here = c.a_cell.get(a);
+        let next = c.a_next.get(a);
+        let p = c.a_prog.get(a);
+        let x = cx_of(g, here) + ((cx_of(g, next) - cx_of(g, here)) * p >> 8);
+        // (a little lower in the tunnel than its middle: walking on the floor)
+        let y = cy_of(g, here) + ((cy_of(g, next) - cy_of(g, here)) * p >> 8) + 1;
+        let f = c.a_face.get(a);
+        let step = ((c.a_age.get(a) / 4) + a) % 2;
+        let moving = next != here;
+        // a red ant: round abdomen, waist, thorax, head with an eye,
+        // antennae, and three pairs of legs stepping
+        let soldier = c.a_soldier.get(a);
+        let lit = if soldier { 0xb83a2a } else { 0xf06a3a };
+        let mid = if soldier { 0x8a1a10 } else { 0xc83a1c };
+        let dark = if soldier { 0x3a0a04 } else { 0x6a1a0a };
+        // (abdomen)
+        put(g, x - f * 4, y - 3, mid);
+        put(g, x - f * 3, y - 3, lit);
+        put(g, x - f * 2, y - 3, mid);
+        put(g, x - f * 4, y - 2, dark);
+        put(g, x - f * 3, y - 2, mid);
+        put(g, x - f * 2, y - 2, mid);
+        // (waist, thorax)
+        put(g, x - f, y - 2, dark);
+        put(g, x, y - 2, mid);
+        put(g, x + f, y - 2, mid);
+        put(g, x, y - 3, lit);
+        // (head)
+        put(g, x + f * 2, y - 3, mid);
+        put(g, x + f * 3, y - 3, mid);
+        put(g, x + f * 2, y - 2, dark);
+        put(g, x + f * 3, y - 2, mid);
+        put(g, x + f * 3, y - 3, 0xffd8c0);
+        // (antennae; a soldier's big head and jaws)
+        put(g, x + f * 3, y - 4, dark);
+        put(g, x + f * 4, y - 5, dark);
+        if soldier {
+            put(g, x + f * 2, y - 4, mid);
+            put(g, x + f * 4, y - 2, 0xe8d8b0);
+            put(g, x + f * 4, y - 3, 0xe8d8b0);
+        }
+        // (legs: two sets, by turns)
+        if moving && step == 0 {
+            put(g, x - f * 2, y - 1, dark);
+            put(g, x + f, y - 1, dark);
+            put(g, x - f, y, dark);
+            put(g, x + f * 2, y, dark);
+        } else {
+            put(g, x - f * 1, y - 1, dark);
+            put(g, x + f * 2, y - 1, dark);
+            put(g, x - f * 2, y, dark);
+            put(g, x, y, dark);
+        }
+        // what it's carrying, held up in its jaws
+        let carry = c.a_carry.get(a);
+        if carry > 0 {
+            food_mark(g, carry, x + f * 4 - (if f < 0 { 3 } else { 0 }), y - 6, 1);
+            if c.a_load.get(a) > 1 { food_mark(g, carry, x + f * 4 - (if f < 0 { 3 } else { 0 }), y - 9, 1) }
+        }
+        a = a + 1;
+    }
+}
+
+// ---- the flourishes: particles, crumbs flying, words popping up
+
+pub fn draw_parts(g: Gfx, f: Fx) {
+    let mut i = 0;
+    while i < max_parts() {
+        let l = f.life.get(i);
+        if l > 0 {
+            let k = f.kind.get(i);
+            let x = (f.x.get(i) >> 8) + g.ox;
+            let y = (f.y.get(i) >> 8) + g.oy;
+            let c = f.color.get(i);
+            let fade = l * 256 / f.full.get(i);
+            if k == p_dot() {
+                put(g, x, y, c);
+            } else if k == p_spark() {
+                add(g, x, y, scale(c, fade));
+            } else if k == p_petal() {
+                put(g, x, y, c);
+                put(g, x + 1, y + (l / 8) % 2, scale(c, 220));
+            } else if k == p_confetti() {
+                rect(g, x, y, 2, if (l / 3) % 2 == 0 { 1 } else { 2 }, if (l / 4) % 2 == 0 { c } else { mix(c, 0x5ad0ff, 160) });
+            } else if k == p_ring() {
+                ring(g, x, y, (f.full.get(i) - l) + 3, 1, c, fade);
+            } else if k == p_dust() {
+                disc_blend(g, x, y, 1 + (f.full.get(i) - l) / 6, c, fade / 3);
+            } else {
+                put(g, x, y, if l % 6 < 3 { c } else { 0xffffff });
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_flies() {
+        if f.fval.get(i) != 0 && f.ft.get(i) >= 0 {
+            let x = fly_x(f, i);
+            let y = fly_y(f, i);
+            put(g, x, y, f.fcolor.get(i));
+            put(g, x, y - 1, 0xfff8d0);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_pops() {
+        let l = f.pop_life.get(i);
+        if l > 0 && (l > 6 || (l / 2) % 2 == 0) {
+            say_mid(g, f.pop_text.get(i), f.pop_x.get(i) + g.ox, f.pop_y.get(i) + g.oy, f.pop_size.get(i), f.pop_color.get(i), 0x1a1408);
+        }
+        i = i + 1;
+    }
+}
+
+// the banner across the screen: words dropping in, holding, sliding out
+pub fn draw_banner(g: Gfx, f: Fx) {
+    let t = f.banner_t;
+    if t >= 0 && t < 120 {
+        let y = if t < 10 { 90 - (10 - t) * (10 - t) } else if t > 100 { 90 - (t - 100) * 6 } else { 90 };
+        let w = text_w(g, f.banner, 3).max(text_w(g, f.banner2, 1)) + 28;
+        round_blend(g, 240 - w / 2, y - 6, w, 44, 6, 0x1a1008, 150);
+        say_mid(g, f.banner, 240, y, 3, f.banner_color, 0x3a2410);
+        say_mid(g, f.banner2, 240, y + 25, 1, 0xf4ead6, 0x1a1008);
+    }
+}

@@ -1,0 +1,20 @@
+// The basics: functions, inference, loops, strings.
+fn square(x: Int) -> Int { x * x }
+
+fn fib(n) {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() {
+    println("hello, " ++ "world");
+    println(square(7).show());
+    let mut i = 0;
+    while i < 10 {
+        print(fib(i).show() ++ " ");
+        i = i + 1;
+    }
+    println("");
+}
+// expect: hello, world
+// expect: 49
+// expect: 0 1 1 2 3 5 8 13 21 34 

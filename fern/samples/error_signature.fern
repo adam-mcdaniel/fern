@@ -1,0 +1,6 @@
+// A mistake in one signature, and one in another function: both are
+// reported, and a call to the first is no error of its own.
+// error: can't find Sring
+fn describe() -> Sring { "x" }
+fn twice() -> Int { describe() }
+fn main() { let n: Int = "two"; println(twice().show()); }

@@ -1,0 +1,9 @@
+// A type has the methods its impls give it (and its traits').
+
+struct Point { x: Int, y: Int }
+
+fn main() {
+    let p = Point { x: 1, y: 2 };
+    println(p.length().show());
+}
+// error: Point has no method length

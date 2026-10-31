@@ -1,0 +1,117 @@
+// What the colony can choose at the end of each week (one of three
+// cards): more digging, a new chamber (to place: the closer to the food,
+// the better), stronger jaws, quicker feet, room for bigger piles, a
+// brood of new ants, a sump to drink the rain, patience with spoiling.
+
+use super::world::*;
+use super::colony::*;
+
+pub fn up_count() -> Int { 11 }
+pub fn u_shovel() -> Int { 0 }
+pub fn u_granary() -> Int { 1 }
+pub fn u_garden() -> Int { 2 }
+pub fn u_nursery() -> Int { 3 }
+pub fn u_jaws() -> Int { 4 }
+pub fn u_feet() -> Int { 5 }
+pub fn u_piles() -> Int { 6 }
+pub fn u_brood() -> Int { 7 }
+pub fn u_sump() -> Int { 8 }
+pub fn u_patience() -> Int { 9 }
+pub fn u_guard() -> Int { 10 }
+
+pub fn up_name(u: Int) -> String {
+    if u == 0 { "Big Shovel" } else if u == 1 { "Granary" } else if u == 2 { "Fungus Garden" } else if u == 3 { "Nursery" }
+    else if u == 4 { "Strong Jaws" } else if u == 5 { "Quick Feet" } else if u == 6 { "Bigger Piles" } else if u == 7 { "Brood" }
+    else if u == 8 { "Sump" } else if u == 9 { "Patience" } else { "Guard Post" }
+}
+
+pub fn up_text(u: Int) -> String {
+    if u == 0 { "60 more dig points." }
+    else if u == 1 { "A new chamber for seeds. Place it near them." }
+    else if u == 2 { "A new chamber for leaves. Place it near them." }
+    else if u == 3 { "For honeydew: aphids turn up, and their dew hatches ants twice as fast." }
+    else if u == 4 { "Ants carry two crumbs at a time." }
+    else if u == 5 { "Ants walk a fifth faster." }
+    else if u == 6 { "Every pile holds four more before it spoils." }
+    else if u == 7 { "Twelve new ants hatch at once." }
+    else if u == 8 { "A deep chamber that drinks the rain." }
+    else if u == 9 { "Piles take half as long again to spoil." }
+    else { "Soldiers wait here, and twice as many hatch. Place it near the ways in." }
+}
+
+// whether a card places a chamber, and which kind
+pub fn up_places(u: Int) -> Bool { u == 1 || u == 2 || u == 3 || u == 8 || u == 10 }
+pub fn up_kind(u: Int) -> Int { if u == 1 { k_granary() } else if u == 2 { k_garden() } else if u == 3 { k_nursery() } else if u == 8 { k_sump() } else { k_guard() } }
+
+// three cards for the week: no two alike; the nursery offered from the
+// second week until it's built; the sump only where it rains
+pub fn deal(c: Colony, cards: Array<Int>) {
+    let mut n = 0;
+    let has_nursery = count_kind(c.w, k_nursery()) > 0;
+    if c.week >= 2 && !has_nursery {
+        cards.set(0, u_nursery());
+        n = 1;
+    }
+    let mut tries = 0;
+    while n < 3 && tries < 200 {
+        let u = roll(c, up_count());
+        let mut dup = false;
+        let mut k = 0;
+        while k < n {
+            if cards.get(k) == u { dup = true }
+            k = k + 1;
+        }
+        let ok = !dup && (u != u_nursery() || (c.week >= 1 && !has_nursery)) && (u != u_sump() || c.w.map == 2 || c.w.map == 1)
+            && (u != u_jaws() || !c.jaws) && (u != u_patience() || c.patience < 2) && (u != u_guard() || (c.week >= 2 && count_kind(c.w, k_guard()) == 0));
+        if ok {
+            cards.set(n, u);
+            n = n + 1;
+        }
+        tries = tries + 1;
+    }
+}
+
+pub fn count_kind(w: World, kind: Int) -> Int {
+    let mut n = 0;
+    let mut k = 0;
+    while k < w.n_ch {
+        if w.ch_kind.get(k) == kind { n = n + 1 }
+        k = k + 1;
+    }
+    n
+}
+
+// a card taken (not the chambers: those are placed)
+pub fn apply(c: Colony, u: Int) {
+    if u == u_shovel() { c.dig = c.dig + 60 }
+    else if u == u_jaws() { c.jaws = true }
+    else if u == u_feet() { c.pace = c.pace * 4 / 5 }
+    else if u == u_piles() {
+        c.cap_bonus = c.cap_bonus + 4;
+        let mut s = 0;
+        while s < max_sources() {
+            c.w.src_cap.set(s, c.w.src_cap.get(s) + 4);
+            s = s + 1;
+        }
+    }
+    else if u == u_brood() {
+        let mut k = 0;
+        while k < 12 {
+            hatch_ant(c);
+            k = k + 1;
+        }
+    }
+    else if u == u_patience() { c.patience = c.patience + 1 }
+}
+
+// a chamber placed (its top left, cells): whether it fitted
+pub fn place(c: Colony, u: Int, x: Int, y: Int) -> Bool {
+    let kind = up_kind(u);
+    let cw = if kind == k_sump() || kind == k_guard() { 4 } else { 5 };
+    let ch = 3;
+    if room_fits(c.w, x, y, cw, ch) {
+        chamber(c.w, kind, x, y, cw, ch);
+        if kind == k_nursery() { c.kinds = c.kinds | 8 }
+        true
+    } else { false }
+}

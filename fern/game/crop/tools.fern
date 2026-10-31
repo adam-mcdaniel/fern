@@ -1,0 +1,98 @@
+// The tools: what hangs in the shed, five at a time, each changing the
+// rules a little (the play works out what each does, by its number).
+// Each has a name, a line saying what it does, a price and a rarity.
+
+pub fn tool_count() -> Int { 30 }
+
+pub fn watering_can() -> Int { 0 }
+pub fn rooster() -> Int { 1 }
+pub fn compost() -> Int { 2 }
+pub fn scarecrow() -> Int { 3 }
+pub fn horseshoe() -> Int { 4 }
+pub fn pitchfork() -> Int { 5 }
+pub fn beehive() -> Int { 6 }
+pub fn tractor() -> Int { 7 }
+pub fn weathervane() -> Int { 8 }
+pub fn piggy_bank() -> Int { 9 }
+pub fn catalog() -> Int { 10 }
+pub fn recipe() -> Int { 11 }
+pub fn wind_chime() -> Int { 12 }
+pub fn barn_cat() -> Int { 13 }
+pub fn milk_pail() -> Int { 14 }
+pub fn scythe() -> Int { 15 }
+pub fn spreader() -> Int { 16 }
+pub fn thermos() -> Int { 17 }
+pub fn sundial() -> Int { 18 }
+pub fn feather() -> Int { 19 }
+pub fn root_cellar() -> Int { 20 }
+pub fn flower_crown() -> Int { 21 }
+pub fn fruit_basket() -> Int { 22 }
+pub fn harvest_moon() -> Int { 23 }
+pub fn spring() -> Int { 24 }
+pub fn bell() -> Int { 25 }
+pub fn seed_bag() -> Int { 26 }
+pub fn rain_barrel() -> Int { 27 }
+pub fn greenhouse() -> Int { 28 }
+pub fn almanac() -> Int { 29 }
+
+pub fn tool_name(t: Int) -> String {
+    if t == 0 { "Watering Can" } else if t == 1 { "Rooster" } else if t == 2 { "Compost Heap" } else if t == 3 { "Scarecrow" }
+    else if t == 4 { "Horseshoe" } else if t == 5 { "Pitchfork" } else if t == 6 { "Beehive" } else if t == 7 { "Old Tractor" }
+    else if t == 8 { "Weathervane" } else if t == 9 { "Piggy Bank" } else if t == 10 { "Seed Catalog" } else if t == 11 { "Gran's Recipe" }
+    else if t == 12 { "Wind Chime" } else if t == 13 { "Barn Cat" } else if t == 14 { "Milk Pail" } else if t == 15 { "Scythe" }
+    else if t == 16 { "Spreader" } else if t == 17 { "Thermos" } else if t == 18 { "Sundial" } else if t == 19 { "Crow Feather" }
+    else if t == 20 { "Root Cellar" } else if t == 21 { "Flower Crown" } else if t == 22 { "Fruit Basket" } else if t == 23 { "Harvest Moon" }
+    else if t == 24 { "Kickback Spring" } else if t == 25 { "Cow Bell" } else if t == 26 { "Seed Bag" } else if t == 27 { "Rain Barrel" }
+    else if t == 28 { "Greenhouse" } else { "Almanac" }
+}
+
+pub fn tool_text(t: Int) -> String {
+    if t == 0 { "Plants ripen one hit sooner." }
+    else if t == 1 { "The first harvest of each ball yields x3." }
+    else if t == 2 { "When a ball drains, none of the basket spills." }
+    else if t == 3 { "Crows keep away." }
+    else if t == 4 { "1 in 6 harvests is golden: x5, and a coin." }
+    else if t == 5 { "Hay bales and slingshots add 50 to the basket, not 10." }
+    else if t == 6 { "Harvesting a flower grows every plant." }
+    else if t == 7 { "Longer flippers." }
+    else if t == 8 { "Orbits give +2 mult." }
+    else if t == 9 { "Interest can reach 10 coins." }
+    else if t == 10 { "One more seed at the market, each a coin cheaper." }
+    else if t == 11 { "Every harvest yields +N more. N grows by 20 each week." }
+    else if t == 12 { "Every 12 hits of anything: +1 mult." }
+    else if t == 13 { "Once a week, saves a draining ball." }
+    else if t == 14 { "Banking at x4 mult or more earns a coin." }
+    else if t == 15 { "A harvest also harvests the ripe plants beside it." }
+    else if t == 16 { "Banking grows every plant." }
+    else if t == 17 { "Banking keeps half your mult." }
+    else if t == 18 { "Harvests yield x2 for the first 20 seconds of a ball." }
+    else if t == 19 { "Scaring a crow earns a coin and +200." }
+    else if t == 20 { "Roots yield x2." }
+    else if t == 21 { "Harvesting a flower: +1 mult." }
+    else if t == 22 { "Fruit yields x2." }
+    else if t == 23 { "Banks are doubled." }
+    else if t == 24 { "The kickback is lit at the start of each ball." }
+    else if t == 25 { "Spelling H-A-Y gives +2 mult." }
+    else if t == 26 { "Empty plots sprout wild wheat each week." }
+    else if t == 27 { "Each new ball grows every plant." }
+    else if t == 28 { "Plants start each week half grown." }
+    else { "Each ball starts with +1 mult for each kind of plant planted." }
+}
+
+pub fn tool_price(t: Int) -> Int {
+    if t == 0 { 5 } else if t == 1 { 6 } else if t == 2 { 5 } else if t == 3 { 3 } else if t == 4 { 6 }
+    else if t == 5 { 4 } else if t == 6 { 7 } else if t == 7 { 6 } else if t == 8 { 5 } else if t == 9 { 4 }
+    else if t == 10 { 5 } else if t == 11 { 7 } else if t == 12 { 6 } else if t == 13 { 6 } else if t == 14 { 4 }
+    else if t == 15 { 7 } else if t == 16 { 6 } else if t == 17 { 8 } else if t == 18 { 5 } else if t == 19 { 4 }
+    else if t == 20 { 6 } else if t == 21 { 6 } else if t == 22 { 6 } else if t == 23 { 10 } else if t == 24 { 4 }
+    else if t == 25 { 5 } else if t == 26 { 5 } else if t == 27 { 5 } else if t == 28 { 7 } else { 9 }
+}
+
+// 0 common, 1 uncommon, 2 rare
+pub fn tool_rarity(t: Int) -> Int {
+    if t == 23 || t == 29 || t == 17 || t == 11 || t == 15 { 2 }
+    else if t == 1 || t == 4 || t == 6 || t == 12 || t == 13 || t == 16 || t == 20 || t == 21 || t == 22 || t == 28 { 1 }
+    else { 0 }
+}
+
+pub fn max_tools() -> Int { 5 }

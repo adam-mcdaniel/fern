@@ -1,0 +1,208 @@
+// The sound: a circus band made up as it plays, and the crowd.
+//
+// The band: an oompah tuba (root on the one, fifth on the three), a
+// snare and cymbal on the off-beats, and a calliope (a bright square,
+// wavering) playing a tune of short phrases that repeat and answer,
+// faster and fuller as Stella's combo grows. A drumroll while the act's
+// about to begin; a fanfare when it's done. The crowd: an "ooh" (noise
+// through a sweeping filter) on a big flip or a long flight, applause
+// (bursts of noise, many hands) when she lands.
+
+use crate::screen::{note, note_swept, sound_clock, sound_volume, sound_stop};
+use super::fx::*;
+
+pub struct Band { freqs: Array<Int>, song: Int, next: Int, step: Int, tune: Int }
+
+pub fn band() -> Band {
+    let ratios = [1000, 1059, 1122, 1189, 1260, 1335, 1414, 1498, 1587, 1682, 1782, 1888];
+    let r = Array::from_list(ratios, 0);
+    let freqs = array(128, 0);
+    let mut n = 0;
+    while n < 128 {
+        let base = 4186 * r.get(n % 12) / 1000;
+        let oct = n / 12 - 5;
+        freqs.set(n, if oct >= 0 { base << oct } else { base >> (-oct) });
+        n = n + 1;
+    }
+    Band { freqs: freqs, song: -1, next: 0, step: 0, tune: 5 }
+}
+
+pub fn s_title() -> Int { 0 }
+pub fn s_act() -> Int { 1 }
+pub fn s_menu() -> Int { 2 }
+pub fn s_bravo() -> Int { 3 }
+pub fn s_silence() -> Int { 4 }
+
+fn hz(m: Band, n: Int) -> Int { m.freqs.get(n.clamp(0, 127)) }
+
+fn play(wave: Int, f: Int, f_end: Int, at: Int, attack: Int, length: Int, vol: Int, pan: Int, cutoff: Int, reverb: Int, bus: Int) with Io {
+    note(wave, f, f_end, at, attack, length, vol, pan, cutoff, reverb, bus);
+}
+
+fn swept(wave: Int, f: Int, f_end: Int, at: Int, attack: Int, length: Int, vol: Int, pan: Int, cutoff: Int, cutoff_end: Int, reverb: Int, bus: Int) with Io {
+    note_swept(wave, f, f_end, at, attack, length, vol, pan, cutoff, cutoff_end, reverb, bus);
+}
+
+fn degree(d: Int) -> Int {
+    let steps = [0, 2, 4, 5, 7, 9, 11];
+    steps.get(d.mod_floor(7)).unwrap_or(0) + d.div_floor(7) * 12
+}
+
+fn mhash(a: Int, b: Int, c: Int) -> Int {
+    let mut h = a * 374761393 + b * 668265263 + c * 1274126177;
+    h = (h ^ (h >> 13)) * 1274126177;
+    (h ^ (h >> 16)) & 0xffff
+}
+
+// keeps the band playing (heat 0 to 3: how hot the combo is)
+pub fn tick(m: Band, song: Int, tour: Int, heat: Int) with Io {
+    let now = sound_clock();
+    if m.song != song {
+        sound_stop(0);
+        m.song = song;
+        m.next = now + 80;
+        m.step = 0;
+        m.tune = mhash(now, song, tour) % 83;
+    }
+    if song != s_silence() {
+        let sl = if song == s_menu() { 150 } else if song == s_bravo() { 120 } else { 132 - heat * 8 };
+        let mut next = m.next;
+        if next < now - 500 { next = now + 50 }
+        while next < now + 260 {
+            beat(m, song, tour, m.step, next, sl, heat);
+            m.step = m.step + 1;
+            next = next + sl;
+        }
+        m.next = next;
+    }
+}
+
+fn beat(m: Band, song: Int, tour: Int, step: Int, at: Int, sl: Int, heat: Int) with Io {
+    let s = step % 8;
+    let bar = step / 8;
+    let key = if tour == 1 { 55 } else if tour == 2 { 53 } else { 50 };
+    let prog = [0, 0, 4, 4, 0, 3, 4, 0];
+    let chord = prog.get(bar % 8).unwrap_or(0);
+    let soft = song == s_menu();
+    // oompah: the tuba on the beats, root and fifth
+    if s % 4 == 0 {
+        let n = key - 12 + degree(chord + (if s == 4 { 4 } else { 0 }));
+        swept(2, hz(m, n), hz(m, n), at, 2, sl * 2, if soft { 70 } else { 110 }, 0, 700, 300, 20, 0);
+    }
+    // the chords on the off-beats ("pah")
+    if s % 4 == 2 {
+        let mut k = 0;
+        while k < 3 {
+            let n = key + degree(chord + k * 2);
+            play(2, hz(m, n), hz(m, n), at, 1, sl, if soft { 20 } else { 30 }, (k - 1) * 30, 2200, 40, 0);
+            k = k + 1;
+        }
+        if !soft { play(4, 6000 * 16, 6000 * 16, at, 1, 60, 30, 20, 8000, 30, 0) }
+    }
+    if !soft && heat >= 2 && s == 0 { play(0, 130 * 16, 50 * 16, at, 1, 160, 160, 0, 1500, 10, 0) }
+    if !soft && heat >= 1 && s == 6 { swept(4, 3000 * 16, 3000 * 16, at, 1, 120, 50, -20, 6000, 1500, 60, 0) }
+    // the calliope's tune: phrases of two bars, repeated and answered
+    let phrase = (bar / 2) % 4;
+    let line = if phrase == 2 { 1 } else { 0 };
+    let in_bar = (bar % 2) * 8 + s;
+    let r = mhash(m.tune, line, in_bar) % 100;
+    let plays = song != s_menu() || r < 30;
+    if plays && r < 62 + heat * 10 {
+        let d = (mhash(m.tune + 3, line, in_bar) % 8) - 1;
+        let n = key + 12 + degree(chord + d);
+        let len = sl * (if r < 20 { 2 } else { 1 });
+        swept(7, hz(m, n), hz(m, n) * 101 / 100, at, 2, len, if soft { 30 } else { 50 }, 10, 3800, 2400, 90, 0);
+        swept(2, hz(m, n + 12), hz(m, n + 12), at, 2, len, if soft { 12 } else { 20 }, -10, 3000, 2000, 90, 0);
+    }
+    if song == s_bravo() && bar % 2 == 0 && s % 2 == 0 {
+        let n = key + 12 + degree(s / 2 * 2);
+        swept(2, hz(m, n), hz(m, n), at, 2, sl * 2, 60, 0, 5000, 2000, 150, 0);
+    }
+}
+
+pub fn volumes(music_vol: Int, sfx_vol: Int) with Io { sound_volume(music_vol, sfx_vol) }
+
+pub fn effects(m: Band, f: Fx) with Io {
+    let seen = array(32, 0);
+    let mut i = 0;
+    while i < f.n_sounds {
+        let what = f.sounds.get(i * 3);
+        let k = f.sounds.get(i * 3 + 1);
+        let pan = f.sounds.get(i * 3 + 2);
+        if what >= 0 && what < 32 && seen.get(what) < 1 {
+            seen.set(what, 1);
+            effect(m, what, k, pan);
+        }
+        i = i + 1;
+    }
+    f.n_sounds = 0;
+}
+
+pub fn effect(m: Band, what: Int, k: Int, pan: Int) with Io {
+    let now = sound_clock();
+    if what == sn_grab() {
+        // a catch: the rope snapping taut, a note up the scale for each in a chain
+        play(4, 3000 * 16, 800 * 16, 0, 1, 40, 70, pan, 4000, 20, 1);
+        let n = 67 + degree(k.min(10));
+        play(5, hz(m, n), hz(m, n), 0, 1, 300, 90, pan, 6000, 90, 1);
+    } else if what == sn_release() {
+        swept(4, 1500 * 16, 4000 * 16, 0, 10, 220, 30 + k * 4, pan, 1200, 5000, 40, 1);
+    } else if what == sn_whoosh() {
+        swept(4, 1200 * 16, 3000 * 16, 0, 10, 250, 50, pan, 1000, 4000, 40, 1);
+    } else if what == sn_land() {
+        play(0, 140 * 16, 70 * 16, 0, 1, 160, 140, pan, 1500, 30, 1);
+        play(4, 900 * 16, 300 * 16, 0, 1, 70, 50, pan, 1600, 20, 1);
+    } else if what == sn_flip() {
+        // a flip: a whistle sliding up
+        swept(0, hz(m, 79 + k * 2), hz(m, 91 + k * 2), 0, 2, 200, 60, pan, 7000, 7000, 90, 1);
+    } else if what == sn_perfect() {
+        play(5, hz(m, 84), hz(m, 84), 0, 1, 300, 70, pan, 7000, 120, 1);
+        play(5, hz(m, 91), hz(m, 91), now + 70, 1, 400, 70, pan, 7000, 150, 1);
+    } else if what == sn_hoop() {
+        let mut i = 0;
+        while i < 4 {
+            play(1, hz(m, 79 + degree(i * 2)), hz(m, 79 + degree(i * 2)), now + i * 40, 1, 220, 60, pan, 7000, 140, 1);
+            i = i + 1;
+        }
+    } else if what == sn_pop() {
+        play(4, 2500 * 16, 400 * 16, 0, 1, 70, 120, pan, 6000, 40, 1);
+        play(0, hz(m, 96), hz(m, 96), now + 40, 1, 200, 50, pan, 9000, 120, 1);
+    } else if what == sn_boing() {
+        swept(0, 180 * 16, 520 * 16, 0, 1, 280, 120, pan, 3000, 1500, 60, 1);
+    } else if what == sn_net() {
+        // into the net, and the crowd's "awww"
+        swept(4, 600 * 16, 200 * 16, 0, 1, 260, 80, pan, 1500, 300, 60, 1);
+        swept(3, 300 * 16, 200 * 16, now + 100, 200, 900, 50, 0, 900, 500, 120, 1);
+        swept(3, 360 * 16, 240 * 16, now + 100, 200, 900, 40, 0, 900, 500, 120, 1);
+    } else if what == sn_cheer() {
+        // applause: many hands, scattered, and a cheer swelling
+        let mut i = 0;
+        while i < 24 + k * 12 {
+            play(4, (2500 + (i * 977) % 3000) * 16, (2500 + (i * 977) % 3000) * 16, now + (i * 53) % 1400, 1, 25, 40, ((i * 37) % 160) - 80, 7000, 60, 1);
+            i = i + 1;
+        }
+        swept(4, 1200 * 16, 1200 * 16, 0, 300, 1600, 50, 0, 600, 2400, 140, 1);
+        let mut j = 0;
+        while j < 4 {
+            play(2, hz(m, 62 + degree(j * 2)), hz(m, 62 + degree(j * 2)), now + j * 90, 2, 700, 60, (j - 2) * 30, 5000, 150, 1);
+            j = j + 1;
+        }
+    } else if what == sn_ooh() {
+        swept(4, 800 * 16, 800 * 16, 0, 200, 800, 50, 0, 400, 1400, 120, 1);
+    } else if what == sn_tick() {
+        play(1, (1800 + k * 300) * 16, (1600 + k * 300) * 16, 0, 1, 30, 30, pan, 6000, 30, 1);
+    } else if what == sn_pick() {
+        play(2, hz(m, 79), hz(m, 79), 0, 1, 90, 60, 0, 5000, 100, 1);
+        play(2, hz(m, 86), hz(m, 86), now + 70, 1, 200, 60, 0, 5000, 120, 1);
+    } else if what == sn_star() {
+        play(0, hz(m, 88 + k * 4), hz(m, 88 + k * 4), 0, 1, 500, 80, 0, 9000, 180, 1);
+    } else if what == sn_drum() {
+        // a drumroll
+        let mut i = 0;
+        while i < 16 {
+            play(4, 3000 * 16, 2000 * 16, now + i * 45, 1, 40, 30 + i * 3, 0, 4000, 30, 1);
+            i = i + 1;
+        }
+        play(4, 6000 * 16, 6000 * 16, now + 760, 1, 700, 80, 0, 9000, 120, 1);
+    }
+}

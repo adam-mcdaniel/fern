@@ -13,8 +13,12 @@
 //! C backend links against: `void name(int64_t **tape, int64_t **ptr,
 //! int64_t *acc)`, which `!` calls with the machine's tape, pointer and
 //! accumulator. Here, `externs` can give it in Rust instead, as a host
-//! function, which gets the same three things.
+//! function, which gets the same three things. One is always here, as it is
+//! in the C backends: `bf_exit`, which stops the program, with the status
+//! in the cell the pointer's at (what an aborting program calls: see
+//! `ir::Options::exits`).
 
+use crate::ir::EXIT;
 use crate::Op;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -169,6 +173,8 @@ pub struct Halted {
     pub tape: Vec<i64>,
     /// How many ops ran.
     pub steps: u64,
+    /// What it stopped with: 0, unless it called `bf_exit`.
+    pub status: i64,
 }
 
 impl Machine {
@@ -210,7 +216,11 @@ impl Machine {
         }
 
         let mut tape = vec![0i64; cells];
-        let externs: Vec<String> = self.externs.keys().cloned().collect();
+        // (and `bf_exit`, after them, unless the program gives its own)
+        let mut externs: Vec<String> = self.externs.keys().cloned().collect();
+        if !self.externs.contains_key(EXIT) {
+            externs.push(EXIT.to_string());
+        }
         let (mut acc, mut p, mut pc) = (0i64, 0usize, 0usize);
         let (mut pointers, mut returns) = (vec![], vec![]);
         let mut input = input.iter();
@@ -263,7 +273,12 @@ impl Machine {
                 Op::Store => tape[p] = acc,
                 Op::Call if self.unsigned(acc) as usize >= ops.len() => {
                     let i = self.unsigned(acc) as usize - ops.len();
-                    let host = &self.externs[externs.get(i).ok_or("call to an address past the program")?];
+                    let name = externs.get(i).ok_or("call to an address past the program")?;
+                    if !self.externs.contains_key(name) {
+                        // (`bf_exit`: the status is its argument)
+                        return Ok(Halted { output, steps, status: tape[p], tape });
+                    }
+                    let host = &self.externs[name];
                     let at = self.base.wrapping_add(p as i64 * self.stride);
                     let mut memory = Tape { cells: &mut tape, base: self.base, stride: self.stride };
                     let mut call = HostCall { tape: &mut memory, ptr: at, acc, output: &mut output };
@@ -290,6 +305,6 @@ impl Machine {
             }
             pc = next;
         }
-        Ok(Halted { output, tape, steps })
+        Ok(Halted { output, tape, steps, status: 0 })
     }
 }

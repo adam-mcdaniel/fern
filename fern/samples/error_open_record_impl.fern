@@ -1,0 +1,4 @@
+// A record's methods are for records with exactly those fields.
+// error: a record's methods are for records with exactly those fields
+impl {x: Int, ..r} { fn f(self) -> Int { self.x } }
+fn main() {}

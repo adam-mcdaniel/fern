@@ -1,0 +1,20 @@
+// BUMPER CROP's parts (see bumpercrop.fern)
+pub mod gfx;
+pub mod font;
+pub mod physics;
+pub mod table;
+pub mod art;
+pub mod seeds;
+pub mod tools;
+pub mod run;
+pub mod fx;
+pub mod play;
+pub mod sprites;
+pub mod icons;
+pub mod scene;
+pub mod hud;
+pub mod market;
+pub mod sound;
+pub mod save;
+pub mod ui;
+pub mod bot;

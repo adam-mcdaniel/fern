@@ -1,0 +1,24 @@
+// Modules: `mod name;` loads name.fern (or name/mod.fern) next to this
+// file, `mod name { .. }` is one inline, `use` brings names in, and only
+// `pub` items are visible from outside a module.
+mod lib;
+
+use lib::geometry::{Point, distance2};
+use lib::geometry::shapes;
+
+mod util {
+    pub fn twice(x: Int) -> Int { helper(x) * 2 }
+    fn helper(x: Int) -> Int { x }
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    println(distance2(p, Point { x: 0, y: 0 }).show());
+    println(shapes::describe(shapes::unit()));
+    println(util::twice(21).show());
+    println(lib::geometry::origin().show());
+}
+// expect: 25
+// expect: a square of side 1
+// expect: 42
+// expect: Point { x: 0, y: 0 }

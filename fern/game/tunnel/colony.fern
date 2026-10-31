@@ -1,0 +1,618 @@
+// The colony at work: the ants, the food piling up, ants hatching, new
+// food turning up as the weeks go by, and the clock.
+//
+// An ant with nothing to do waits where it is. Every few frames, each
+// pile of food with more in it than ants already on their way gets the
+// nearest idle ant (by that pile's distance field) that can get to it
+// and from it to a chamber of its kind. The ant walks there, a cell at a
+// time, always to a neighbour nearer by the field; picks up a crumb;
+// walks to the nearest chamber of the food's kind; puts it down there,
+// and waits again. Ants go slower carrying, slower uphill, and wait their
+// turn where a tunnel's crowded.
+//
+// A pile grows by itself; past its capacity it starts to spoil, a ring
+// filling round it, and a pile left spoiling to the end of its ring is
+// the end of the colony. Delivered food hatches new ants (honeydew, at a
+// nursery, twice as fast).
+
+use super::world::*;
+
+pub fn max_ants() -> Int { 300 }
+// a pile spoils over this many frames once it's full
+pub fn spoil() -> Int { 60 * 40 }
+// a week, in frames
+pub fn week_len() -> Int { 60 * 100 }
+
+// what an ant's doing
+pub fn a_idle() -> Int { 0 }
+pub fn a_fetch() -> Int { 1 }
+pub fn a_carry() -> Int { 2 }
+// a soldier going for a beetle
+pub fn a_fight() -> Int { 3 }
+// a soldier going back to the guard post
+pub fn a_guard() -> Int { 4 }
+
+pub fn max_beetles() -> Int { 3 }
+
+pub struct Colony {
+    w: World,
+    // the ants: cell, the cell they're stepping to and how far they've
+    // got (256ths), what they're doing, for which pile, carrying what,
+    // how long they've waited, and which way they face
+    a_cell: Array<Int>,
+    a_next: Array<Int>,
+    a_prog: Array<Int>,
+    a_state: Array<Int>,
+    a_src: Array<Int>,
+    a_carry: Array<Int>,
+    a_wait: Array<Int>,
+    a_face: Array<Int>,
+    a_age: Array<Int>,
+    a_load: Array<Int>,
+    // which ants are soldiers: they take no food, and see off beetles
+    a_soldier: Array<Bool>,
+    n_ants: Int,
+    hatched: Int,
+    // the beetles: cell, next cell and the way there, what each's doing
+    // (0 none, 1 coming, 2 eating in a chamber, 3 leaving), its strength,
+    // how long it's been at it, which way it faces
+    be_cell: Array<Int>,
+    be_next: Array<Int>,
+    be_prog: Array<Int>,
+    be_state: Array<Int>,
+    be_hp: Array<Int>,
+    be_t: Array<Int>,
+    be_face: Array<Int>,
+    next_beetle: Int,
+    // what the beetles did this frame: one came, one was beaten, ants eaten
+    ev_beetle: Int,
+    ev_beaten: Int,
+    ev_eaten: Int,
+    // how many ants are in each cell (for crowding)
+    crowd: Array<Int>,
+    // the clock: frames, week, frames into the week
+    frame: Int,
+    week: Int,
+    week_t: Int,
+    // dig points to spend, food delivered (the score), toward the next hatchling
+    dig: Int,
+    delivered: Int,
+    hatch: Int,
+    // when the next pile turns up
+    next_source: Int,
+    // how the run ended: -1 still going, else the pile that spoiled
+    lost: Int,
+    // what happened this frame (for the sounds and flourishes): deliveries
+    // (cells), hatchings, new piles, spoil warnings
+    ev_delivered: Array<Int>,
+    n_delivered: Int,
+    ev_hatched: Int,
+    ev_new_src: Int,
+    ev_gone: Int,
+    ev_warn: Int,
+    // which food kinds turn up yet (a bit each)
+    kinds: Int,
+    // ants' walking speeds (frames a cell, 256ths: lower is faster)
+    pace: Int,
+    // the upgrades: two crumbs a trip, piles' extra room, patience (each
+    // half as long again to spoil)
+    jaws: Bool,
+    cap_bonus: Int,
+    patience: Int,
+    // rain: frames of it left, and how much water's standing (0 for none)
+    rain: Int,
+    wet: Int,
+    seed: Int,
+}
+
+pub fn colony(w: World, ants: Int) -> Colony {
+    let n = max_ants();
+    let c = Colony {
+        w: w,
+        a_cell: array(n, 0), a_next: array(n, 0), a_prog: array(n, 0), a_state: array(n, 0), a_src: array(n, -1),
+        a_carry: array(n, 0), a_wait: array(n, 0), a_face: array(n, 1), a_age: array(n, 0), a_load: array(n, 0), a_soldier: array(n, false), n_ants: 0, hatched: 0,
+        be_cell: array(max_beetles(), 0), be_next: array(max_beetles(), 0), be_prog: array(max_beetles(), 0), be_state: array(max_beetles(), 0),
+        be_hp: array(max_beetles(), 0), be_t: array(max_beetles(), 0), be_face: array(max_beetles(), 1), next_beetle: week_len() * 3 + 60 * 30,
+        ev_beetle: -1, ev_beaten: -1, ev_eaten: 0,
+        crowd: array(gw() * gh(), 0),
+        frame: 0, week: 0, week_t: 0,
+        dig: 60, delivered: 0, hatch: 0,
+        next_source: 60 * 6, lost: -1,
+        ev_delivered: array(64, 0), n_delivered: 0, ev_hatched: 0, ev_new_src: -1, ev_gone: -1, ev_warn: 0,
+        kinds: 2 + 4, pace: 256, jaws: false, cap_bonus: 0, patience: 0, rain: 0, wet: 0, seed: w.seed + 9,
+    };
+    let mut k = 0;
+    while k < ants {
+        hatch_ant(c);
+        k = k + 1;
+    }
+    // the first food: seeds and leaves on the surface, near the entrance
+    add_source(c, f_seed(), 26, surface(), false);
+    add_source(c, f_leaf(), 52, surface(), false);
+    c
+}
+
+pub fn roll(c: Colony, n: Int) -> Int {
+    c.seed = (c.seed * 1103515245 + 12345) & 0x7fffffff;
+    (c.seed >> 16) % n.max(1)
+}
+
+// a new ant, in the queen's chamber
+pub fn hatch_ant(c: Colony) {
+    let w = c.w;
+    if c.n_ants < max_ants() {
+        let q = 0;
+        let x = w.ch_x.get(q) + 1 + roll(c, (w.ch_w.get(q) - 2).max(1));
+        let y = w.ch_y.get(q) + 1 + roll(c, (w.ch_h.get(q) - 2).max(1));
+        let i = idx(x, y);
+        let a = c.n_ants;
+        c.a_cell.set(a, i);
+        c.a_next.set(a, i);
+        c.a_prog.set(a, 0);
+        c.a_state.set(a, a_idle());
+        c.a_src.set(a, -1);
+        c.a_carry.set(a, 0);
+        c.a_wait.set(a, roll(c, 60));
+        c.a_face.set(a, if roll(c, 2) == 0 { 1 } else { -1 });
+        c.a_age.set(a, 0);
+        c.a_load.set(a, 0);
+        c.a_soldier.set(a, false);
+        c.crowd.set(i, c.crowd.get(i) + 1);
+        c.n_ants = a + 1;
+        // (from the fourth week, every eighth hatching brings a soldier too;
+        // every fourth, with a guard post)
+        c.hatched = c.hatched + 1;
+        let every = if guard_post(w) >= 0 { 4 } else { 8 };
+        if c.week >= 3 && c.hatched % every == 0 && c.n_ants < max_ants() {
+            let s = c.n_ants;
+            c.a_cell.set(s, i);
+            c.a_next.set(s, i);
+            c.a_prog.set(s, 0);
+            c.a_state.set(s, a_idle());
+            c.a_src.set(s, -1);
+            c.a_carry.set(s, 0);
+            c.a_wait.set(s, 30);
+            c.a_face.set(s, -c.a_face.get(a));
+            c.a_age.set(s, 0);
+            c.a_load.set(s, 0);
+            c.a_soldier.set(s, true);
+            c.crowd.set(i, c.crowd.get(i) + 1);
+            c.n_ants = s + 1;
+        }
+        c.ev_hatched = c.ev_hatched + 1;
+    }
+}
+
+// the guard post's chamber, or -1
+pub fn guard_post(w: World) -> Int {
+    let mut found = -1;
+    let mut k = 0;
+    while k < w.n_ch {
+        if w.ch_kind.get(k) == k_guard() && found < 0 { found = k }
+        k = k + 1;
+    }
+    found
+}
+
+// an ant gone (eaten): the last one takes its place
+pub fn kill_ant(c: Colony, a: Int) {
+    let w = c.w;
+    if a < c.n_ants {
+        let s = c.a_src.get(a);
+        if c.a_state.get(a) == a_fetch() && s >= 0 { w.src_coming.set(s, (w.src_coming.get(s) - 1).max(0)) }
+        c.crowd.set(c.a_cell.get(a), (c.crowd.get(c.a_cell.get(a)) - 1).max(0));
+        let last = c.n_ants - 1;
+        if a != last {
+            c.a_cell.set(a, c.a_cell.get(last));
+            c.a_next.set(a, c.a_next.get(last));
+            c.a_prog.set(a, c.a_prog.get(last));
+            c.a_state.set(a, c.a_state.get(last));
+            c.a_src.set(a, c.a_src.get(last));
+            c.a_carry.set(a, c.a_carry.get(last));
+            c.a_wait.set(a, c.a_wait.get(last));
+            c.a_face.set(a, c.a_face.get(last));
+            c.a_age.set(a, c.a_age.get(last));
+            c.a_load.set(a, c.a_load.get(last));
+            c.a_soldier.set(a, c.a_soldier.get(last));
+        }
+        c.n_ants = last;
+    }
+}
+
+// whether any beetle's in the tunnels (where soldiers can get at it)
+pub fn beetle_below(c: Colony) -> Bool {
+    let mut yes = false;
+    let mut b = 0;
+    while b < max_beetles() {
+        if c.be_state.get(b) > 0 && c.be_cell.get(b) >= (surface() + 1) * gw() { yes = true }
+        b = b + 1;
+    }
+    yes
+}
+
+// a pile of food: of a kind, at a cell (a surface cell, or a buried one);
+// its index, or -1
+pub fn add_source(c: Colony, kind: Int, x: Int, y: Int, buried: Bool) -> Int {
+    let w = c.w;
+    let mut s = 0;
+    let mut slot = -1;
+    while s < max_sources() {
+        if !w.src_alive.get(s) && slot < 0 { slot = s }
+        s = s + 1;
+    }
+    if slot >= 0 {
+        w.src_kind.set(slot, kind);
+        w.src_x.set(slot, x);
+        w.src_y.set(slot, y);
+        w.src_buried.set(slot, buried);
+        w.src_pile.set(slot, 2);
+        w.src_cap.set(slot, 10 + c.cap_bonus);
+        // (faster as the weeks go by)
+        w.src_every.set(slot, (60 * 9 - c.week * 45).max(100));
+        w.src_timer.set(slot, w.src_every.get(slot));
+        w.src_rot.set(slot, 0);
+        w.src_coming.set(slot, 0);
+        w.src_alive.set(slot, true);
+        w.src_age.set(slot, 0);
+        // (it lasts three to five weeks, then it's done)
+        w.src_life.set(slot, week_len() * (3 + c.week / 3) + roll(c, week_len() * 2));
+        w.fields_dirty = true;
+        c.ev_new_src = slot;
+    }
+    slot
+}
+
+// how long a full pile takes to spoil, with the colony's patience
+pub fn spoil_for(c: Colony) -> Int {
+    // (late in a colony's life, piles spoil quicker: no colony lasts for ever)
+    let late = (256 - (c.week - 10).max(0) * 12).max(90);
+    spoil() * (2 + c.patience) / 2 * late / 256
+}
+
+// ---- a frame
+
+pub fn step_colony(c: Colony) {
+    let w = c.w;
+    c.n_delivered = 0;
+    c.ev_hatched = 0;
+    c.ev_beetle = -1;
+    c.ev_beaten = -1;
+    c.ev_eaten = 0;
+    c.ev_new_src = -1;
+    c.ev_gone = -1;
+    c.ev_warn = 0;
+    if c.lost < 0 {
+        c.frame = c.frame + 1;
+        c.week_t = c.week_t + 1;
+        refresh_fields(w);
+        piles(c);
+        if c.frame % 6 == 0 { assign(c) }
+        walk(c);
+        new_food(c);
+        weather(c);
+    }
+}
+
+// whether this week has rain in it, by the map
+pub fn rainy_week(c: Colony) -> Bool {
+    let m = c.w.map;
+    if m == 3 { false } else if m == 2 { c.week >= 2 } else if m == 1 { c.week >= 2 && c.week % 2 == 0 } else { c.week >= 3 && c.week % 3 == 0 }
+}
+
+// when this week's rain starts (frames into it)
+pub fn rain_at() -> Int { week_len() / 2 }
+
+fn weather(c: Colony) {
+    if rainy_week(c) && c.week_t == rain_at() {
+        c.rain = 60 * (8 + c.week.min(10));
+        c.wet = 1;
+    }
+}
+
+// the piles grow, and spoil when they're full
+fn piles(c: Colony) {
+    let w = c.w;
+    let mut s = 0;
+    while s < max_sources() {
+        if w.src_alive.get(s) && w.src_age.get(s) > w.src_life.get(s) && w.src_pile.get(s) == 0 && w.src_coming.get(s) == 0 {
+            // done: the flower's gone to seed, the acorn's empty
+            w.src_alive.set(s, false);
+            w.fields_dirty = true;
+            c.ev_gone = s;
+        }
+        if w.src_alive.get(s) {
+            w.src_age.set(s, w.src_age.get(s) + 1);
+            let t = w.src_timer.get(s) - 1;
+            if t <= 0 {
+                w.src_timer.set(s, w.src_every.get(s));
+                if w.src_age.get(s) <= w.src_life.get(s) { w.src_pile.set(s, w.src_pile.get(s) + 1) }
+            } else {
+                w.src_timer.set(s, t);
+            }
+            if w.src_pile.get(s) > w.src_cap.get(s) {
+                let r = w.src_rot.get(s) + 1;
+                w.src_rot.set(s, r);
+                let limit = spoil_for(c);
+                if r == limit / 2 || r == limit * 4 / 5 { c.ev_warn = c.ev_warn + 1 }
+                if r >= limit { c.lost = s }
+            } else if w.src_rot.get(s) > 0 {
+                // (cleared below capacity, it recovers, slowly)
+                w.src_rot.set(s, (w.src_rot.get(s) - 3).max(0));
+            }
+        }
+        s = s + 1;
+    }
+}
+
+// idle ants given jobs: for each pile with food no ant's coming for, the
+// nearest idle ant that can get there
+fn assign(c: Colony) {
+    let w = c.w;
+    let mut s = 0;
+    while s < max_sources() {
+        if w.src_alive.get(s) && w.src_pile.get(s) > w.src_coming.get(s) && connected(w, s) {
+            let field = w.to_src.get(s);
+            let mut best = -1;
+            let mut best_d = far();
+            let mut a = 0;
+            while a < c.n_ants {
+                if c.a_state.get(a) == a_idle() && !c.a_soldier.get(a) {
+                    let d = field.get(c.a_cell.get(a));
+                    if d < best_d {
+                        best_d = d;
+                        best = a;
+                    }
+                }
+                a = a + 1;
+            }
+            if best >= 0 {
+                c.a_state.set(best, a_fetch());
+                c.a_src.set(best, s);
+                w.src_coming.set(s, w.src_coming.get(s) + 1);
+            }
+        }
+        s = s + 1;
+    }
+}
+
+// the field an ant's following, and the value that means it's arrived
+fn goal_field(c: Colony, a: Int) -> Array<Int> {
+    let w = c.w;
+    let st = c.a_state.get(a);
+    if st == a_fetch() { w.to_src.get(c.a_src.get(a)) } else if st == a_fight() { w.to_beetle } else if st == a_guard() { w.to_kind.get(k_guard()) } else { w.to_kind.get(c.a_carry.get(a)) }
+}
+
+fn walk(c: Colony) {
+    let w = c.w;
+    let width = gw();
+    let mut a = 0;
+    while a < c.n_ants {
+        c.a_age.set(a, c.a_age.get(a) + 1);
+        if c.a_soldier.get(a) && c.a_state.get(a) == a_idle() && beetle_below(c) && w.to_beetle.get(c.a_cell.get(a)) < far() {
+            c.a_state.set(a, a_fight());
+        }
+        if c.a_state.get(a) == a_fight() && !beetle_below(c) { c.a_state.set(a, a_idle()) }
+        // (an idle soldier goes back to wait at the guard post)
+        if c.a_soldier.get(a) && c.a_state.get(a) == a_idle() && c.a_wait.get(a) <= 1 && w.to_kind.get(k_guard()).get(c.a_cell.get(a)) > 0 && w.to_kind.get(k_guard()).get(c.a_cell.get(a)) < far() {
+            c.a_state.set(a, a_guard());
+        }
+        let st = c.a_state.get(a);
+        if st == a_idle() {
+            // (waiting: now and then a step to a neighbouring cell of the room)
+            let wt = c.a_wait.get(a) - 1;
+            c.a_wait.set(a, wt);
+            if wt <= 0 { c.a_wait.set(a, 40 + roll(c, 120)) }
+        } else {
+            let here = c.a_cell.get(a);
+            let next = c.a_next.get(a);
+            if !walkable(w, here) || !walkable(w, next) {
+                // (its tunnel filled in under it: back to the queen's chamber)
+                rescue(c, a);
+            } else if next != here {
+                // stepping: how fast, by load, slope and crowding
+                let carrying = st == a_carry();
+                let up = next < here - width / 2;
+                let mut speed = if carrying { 20 } else { 27 };
+                if up { speed = speed * 2 / 3 }
+                // (out on the surface, in the open, they hurry less surely)
+                if next < (surface() + 1) * width { speed = speed * 3 / 5 }
+                if c.crowd.get(next) >= 3 { speed = speed / 3 }
+                if w.water.get(next) >= 128 { speed = 0 }
+                speed = speed * 256 / c.pace;
+                let p = c.a_prog.get(a) + speed;
+                if p >= 256 {
+                    c.crowd.set(here, (c.crowd.get(here) - 1).max(0));
+                    c.crowd.set(next, c.crowd.get(next) + 1);
+                    c.a_cell.set(a, next);
+                    c.a_prog.set(a, 0);
+                } else {
+                    c.a_prog.set(a, p);
+                }
+            } else {
+                // at a cell: arrived? else the next step
+                let field = goal_field(c, a);
+                let d = field.get(here);
+                let goal = if st == a_fetch() { if w.src_buried.get(c.a_src.get(a)) { 1 } else { 0 } } else if st == a_fight() { 1 } else { 0 };
+                if d <= goal {
+                    // (a soldier at the beetle stays and fights: see beetles)
+                    if st == a_guard() { c.a_state.set(a, a_idle()) } else if st != a_fight() { arrive(c, a) }
+                } else if d >= far() {
+                    // (cut off: give up the job)
+                    drop_job(c, a);
+                } else {
+                    let x = here % width;
+                    let y = here / width;
+                    let mut best = here;
+                    let mut best_d = d;
+                    let mut k = 0;
+                    // (looking round the neighbours in a different order
+                    // each time, so ants spread across a wide tunnel)
+                    let start = (a + c.frame) % 8;
+                    while k < 8 {
+                        let o = (start + k) % 8;
+                        let dx = if o < 3 { o - 1 } else if o == 3 { 1 } else if o == 4 { 1 } else if o == 5 { 0 } else if o == 6 { -1 } else { -1 };
+                        let dy = if o < 3 { -1 } else if o == 3 { 0 } else if o == 7 { 0 } else { 1 };
+                        let nx = x + dx;
+                        let ny = y + dy;
+                        if nx >= 0 && ny >= 0 && nx < width && ny < gh() {
+                            let j = ny * width + nx;
+                            let dj = field.get(j);
+                            if dj < best_d && walkable(w, j) {
+                                best_d = dj;
+                                best = j;
+                            }
+                        }
+                        k = k + 1;
+                    }
+                    c.a_next.set(a, best);
+                    if best % width != x { c.a_face.set(a, if best % width > x { 1 } else { -1 }) }
+                }
+            }
+        }
+        a = a + 1;
+    }
+}
+
+fn rescue(c: Colony, a: Int) {
+    let w = c.w;
+    let i = idx(w.ch_x.get(0) + 2, w.ch_y.get(0) + 1);
+    c.crowd.set(c.a_cell.get(a), (c.crowd.get(c.a_cell.get(a)) - 1).max(0));
+    c.a_cell.set(a, i);
+    c.a_next.set(a, i);
+    c.a_prog.set(a, 0);
+    c.crowd.set(i, c.crowd.get(i) + 1);
+    drop_job(c, a);
+}
+
+fn arrive(c: Colony, a: Int) {
+    let w = c.w;
+    if c.a_state.get(a) == a_fetch() {
+        let s = c.a_src.get(a);
+        w.src_coming.set(s, (w.src_coming.get(s) - 1).max(0));
+        if w.src_alive.get(s) && w.src_pile.get(s) > 0 && connected(w, s) {
+            // (two at a time, with strong jaws)
+            let take = if c.jaws && w.src_pile.get(s) >= 2 { 2 } else { 1 };
+            w.src_pile.set(s, w.src_pile.get(s) - take);
+            c.a_load.set(a, take);
+            c.a_carry.set(a, w.src_kind.get(s));
+            c.a_state.set(a, a_carry());
+        } else {
+            drop_job(c, a);
+        }
+    } else {
+        // delivered, to the chamber it's in
+        let here = c.a_cell.get(a);
+        let room = w.room.get(here);
+        let kind = c.a_carry.get(a);
+        let load = c.a_load.get(a).max(1);
+        if room >= 0 { w.ch_store.set(room, w.ch_store.get(room) + load) }
+        c.delivered = c.delivered + load;
+        if c.n_delivered < 64 {
+            c.ev_delivered.set(c.n_delivered, here);
+            c.n_delivered = c.n_delivered + 1;
+        }
+        // (food hatches ants: honeydew at a nursery twice as fast)
+        c.hatch = c.hatch + load * (if kind == f_dew() { 2 } else { 1 });
+        let need = 8 + c.n_ants / 10;
+        if c.hatch >= need {
+            c.hatch = c.hatch - need;
+            hatch_ant(c);
+        }
+        c.a_carry.set(a, 0);
+        c.a_state.set(a, a_idle());
+        c.a_src.set(a, -1);
+        c.a_wait.set(a, 10 + roll(c, 30));
+    }
+}
+
+fn drop_job(c: Colony, a: Int) {
+    let w = c.w;
+    let s = c.a_src.get(a);
+    if c.a_state.get(a) == a_fetch() && s >= 0 { w.src_coming.set(s, (w.src_coming.get(s) - 1).max(0)) }
+    if c.a_state.get(a) == a_carry() {
+        // (the crumb goes back on the nearest... it's simply dropped)
+        c.a_carry.set(a, 0);
+    }
+    c.a_state.set(a, a_idle());
+    c.a_src.set(a, -1);
+}
+
+// new piles of food, at random places, farther and deeper as the weeks go
+fn new_food(c: Colony) {
+    c.next_source = c.next_source - 1;
+    if c.next_source <= 0 {
+        c.next_source = (60 * 22 - c.week * 60 * 2).max(60 * 5) + roll(c, 60 * 5);
+        spawn_food(c);
+    }
+}
+
+pub fn alive_sources(w: World) -> Int {
+    let mut n = 0;
+    let mut s = 0;
+    while s < max_sources() {
+        if w.src_alive.get(s) { n = n + 1 }
+        s = s + 1;
+    }
+    n
+}
+
+pub fn spawn_food(c: Colony) {
+    let w = c.w;
+    // (which kind: one of those turning up yet)
+    let mut kind = 1 + roll(c, 3);
+    let mut tries = 0;
+    while (c.kinds >> kind) & 1 == 0 && tries < 20 {
+        kind = 1 + roll(c, 3);
+        tries = tries + 1;
+    }
+    // (where: on the surface, or buried; not on top of another)
+    let buried = roll(c, 100) < (25 + c.week * 7).min(70);
+    tries = 0;
+    let mut done = false;
+    while !done && tries < 60 {
+        let x = 3 + roll(c, gw() - 6);
+        let y = if buried { 6 + roll(c, gh() - 9) } else { surface() };
+        let i = idx(x, y);
+        let ok_ground = if buried { (w.kind.get(i) == c_soil() || w.kind.get(i) == c_clay()) && !w.dug.get(i) } else { true };
+        let mut clear = ok_ground;
+        let mut s = 0;
+        while s < max_sources() {
+            if w.src_alive.get(s) && (w.src_x.get(s) - x).abs() < 5 && (w.src_y.get(s) - y).abs() < 4 { clear = false }
+            s = s + 1;
+        }
+        if clear {
+            add_source(c, kind, x, y, buried);
+            done = true;
+        }
+        tries = tries + 1;
+    }
+}
+
+// on to the next week
+pub fn next_week(c: Colony) {
+    c.week = c.week + 1;
+    c.week_t = 0;
+    // (every pile gives faster, each week)
+    let mut s = 0;
+    while s < max_sources() {
+        c.w.src_every.set(s, (c.w.src_every.get(s) * 86 / 100).max((70 - (c.week - 12).max(0) * 6).max(24)));
+        s = s + 1;
+    }
+    // (honeydew turns up once there's a nursery to take it)
+    let mut k = 0;
+    while k < c.w.n_ch {
+        if c.w.ch_kind.get(k) == k_nursery() { c.kinds = c.kinds | 8 }
+        k = k + 1;
+    }
+}
+
+// how many ants there are doing each thing
+pub fn busy(c: Colony) -> Int {
+    let mut n = 0;
+    let mut a = 0;
+    while a < c.n_ants {
+        if c.a_state.get(a) != a_idle() { n = n + 1 }
+        a = a + 1;
+    }
+    n
+}

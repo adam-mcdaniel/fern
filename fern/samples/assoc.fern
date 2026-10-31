@@ -1,0 +1,42 @@
+// Associated types: an impl says what its trait's `type Item` is, generic
+// code says `C::Item`, and a bound on it (`type Item: Show + Ord`) lets
+// generic code use it, through the trait's dictionary.
+trait Container {
+    type Item: Show + Ord;
+    fn get(self, i: Int) -> Self::Item;
+    fn size(self) -> Int;
+}
+struct Wrap<T> { xs: Array<T> }
+impl<T: Show + Ord> Container for Wrap<T> {
+    type Item = T;
+    fn get(self, i: Int) -> T { self.xs.get(i) }
+    fn size(self) -> Int { self.xs.len() }
+}
+struct Digits {}
+impl Container for Digits {
+    type Item = Int;
+    fn get(self, i: Int) -> Int { i }
+    fn size(self) -> Int { 10 }
+}
+fn first<C: Container>(c: C) -> C::Item { c.get(0) }
+fn largest<C: Container>(c: C) -> String {
+    let mut best = c.get(0);
+    let mut i = 1;
+    while i < c.size() {
+        if c.get(i) > best { best = c.get(i); }
+        i = i + 1;
+    }
+    best.show()
+}
+fn main() {
+    let w = Wrap { xs: array(3, "b") };
+    w.xs.set(1, "z");
+    println(first(w));
+    println(largest(w));
+    println((first(Digits {}) + 1).show());
+    println(largest(Digits {}));
+}
+// expect: b
+// expect: "z"
+// expect: 1
+// expect: 9

@@ -1,0 +1,38 @@
+// The standard library: strings, characters and arrays.
+
+fn strings() {
+    let s = "  Hello, fern world!  ";
+    println("[" ++ s.trim() ++ "] [" ++ s.trim_start() ++ "] [" ++ s.trim_end() ++ "]");
+    println(s.words().show() ++ " " ++ "a,b,,c".split(",").show() ++ " " ++ "one\ntwo\n".lines().show());
+    println("fern".to_upper() ++ " " ++ "LOUD".to_lower() ++ " " ++ "stressed".reverse() ++ " " ++ "a-b-c".replace("-", "+"));
+    println("abcdefg".substring(2, 5) ++ " " ++ "prefix".starts_with("pre").show() ++ " " ++ "prefix".ends_with("fix").show() ++ " " ++ "banana".find("nan").show() ++ " " ++ "banana".contains("x").show());
+    println("7".pad_left(3, "0") ++ " " ++ "ab".pad_right(4, ".") ++ "| " ++ "na".repeat(4) ++ " " ++ ["a", "b", "c"].join("/") ++ " " ++ String::from_chars("abc".chars().map(|c| c.to_upper())));
+    println("a1 Z".chars().map(|c| (c.is_alpha(), c.is_digit(), c.is_space())).show());
+}
+
+fn arrays() {
+    let a = Array::from_list([5, 2, 8, 1, 9, 3], 0);
+    a.sort();
+    println(a.show() ++ " " ++ a.binary_search(8).show() ++ " " ++ a.binary_search(4).show());
+    let b = a.slice(1, 4);
+    b.reverse();
+    b.update(|x| x * 10);
+    println(b.show() ++ " " ++ a.show() ++ " " ++ a.fold(0, |acc, x| acc + x).show() ++ " " ++ a.index_of(9).show() ++ " " ++ b.contains(7).show());
+    let words = Array::from_list(["pear", "fig", "apple"], "");
+    words.sort_by(|x, y| x.len() - y.len());
+    println(words.show() ++ " " ++ words.copy().to_list().show());
+}
+
+fn main() {
+    strings();
+    arrays();
+}
+// expect: [Hello, fern world!] [Hello, fern world!  ] [  Hello, fern world!]
+// expect: ["Hello,", "fern", "world!"] ["a", "b", "", "c"] ["one", "two"]
+// expect: FERN loud desserts a+b+c
+// expect: cde true true Some(2) false
+// expect: 007 ab..| nananana a/b/c ABC
+// expect: [(true, false, false), (false, true, false), (false, false, true), (true, false, false)]
+// expect: #[1, 2, 3, 5, 8, 9] Some(4) None
+// expect: #[50, 30, 20] #[1, 2, 3, 5, 8, 9] 28 Some(5) false
+// expect: #["fig", "pear", "apple"] ["fig", "pear", "apple"]

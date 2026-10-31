@@ -1,0 +1,6 @@
+// Effects are tracked: main can only have Io left.
+effect Ask { fn ask() -> Int; }
+fn main() {
+    println(ask().show());
+}
+// error: main doesn't handle the effect Ask

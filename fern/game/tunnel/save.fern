@@ -1,0 +1,60 @@
+// What's kept between plays, in a file of numbers in the user's own
+// folder (screen.c's file_save): the settings, which maps are open, the
+// best each map's colony has done (food brought in, and weeks), and
+// whether the game's been taught.
+
+use crate::screen::{file_save, file_load};
+
+pub fn version() -> Int { 1 }
+pub fn cells() -> Int { 32 }
+
+pub fn sv_music() -> Int { 1 }
+pub fn sv_sfx() -> Int { 2 }
+pub fn sv_full() -> Int { 3 }
+pub fn sv_shake() -> Int { 4 }
+pub fn sv_maps() -> Int { 5 }
+pub fn sv_taught() -> Int { 6 }
+pub fn sv_runs() -> Int { 7 }
+// each map's best food, and best weeks
+pub fn sv_best(m: Int) -> Int { 8 + m }
+pub fn sv_weeks(m: Int) -> Int { 12 + m }
+// the tips a new player's been shown, a bit each
+pub fn sv_tips() -> Int { 20 }
+
+fn file() -> String { "tunnelvision.sav" }
+
+pub fn fresh() -> Array<Int> {
+    let d = array(cells(), 0);
+    d.set(0, version());
+    d.set(sv_music(), 70);
+    d.set(sv_sfx(), 80);
+    d.set(sv_shake(), 1);
+    d.set(sv_maps(), 1);
+    d
+}
+
+pub fn load() -> Array<Int> with Io {
+    let d = array(cells(), 0);
+    let n = file_load(file(), d);
+    if n < 1 || d.get(0) != version() { fresh() } else { d }
+}
+
+pub fn store(d: Array<Int>) with Io { file_save(file(), d, cells()); }
+
+pub fn get(d: Array<Int>, k: Int) -> Int { d.get(k) }
+pub fn set(d: Array<Int>, k: Int, v: Int) { d.set(k, v) }
+pub fn map_open(d: Array<Int>, m: Int) -> Bool { (d.get(sv_maps()) >> m) & 1 == 1 }
+
+// what it takes to open the next map: this much food on the one before
+pub fn unlock_food() -> Int { 1500 }
+
+// a colony's end, kept: whether it opened a new map (its number, or -1)
+pub fn record(d: Array<Int>, m: Int, food: Int, weeks: Int) -> Int {
+    d.set(sv_runs(), d.get(sv_runs()) + 1);
+    if food > d.get(sv_best(m)) { d.set(sv_best(m), food) }
+    if weeks > d.get(sv_weeks(m)) { d.set(sv_weeks(m), weeks) }
+    if food >= unlock_food() && m + 1 < 4 && !map_open(d, m + 1) {
+        d.set(sv_maps(), d.get(sv_maps()) | (1 << (m + 1)));
+        m + 1
+    } else { -1 }
+}

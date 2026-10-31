@@ -1,0 +1,19 @@
+// Bitwise operators and hex literals, with Rust's precedence.
+
+fn nibbles(op: Int) -> List<Int> {
+    [op >> 12, (op & 0x0f00) >> 8, (op & 0x00f0) >> 4, op & 0xf]
+}
+
+fn main() {
+    println(nibbles(0xd12f).show());
+    println((0xf0 | 0x0f).show() ++ " " ++ (0xff ^ 0x0f).show() ++ " " ++ (1 << 10).show() ++ " " ++ (-16 >> 2).show());
+    // `&` is tighter than `==`, and `+` than `<<`
+    println((6 & 3 == 2).show() ++ " " ++ (1 << 2 + 1).show());
+    // `>>` closing two lists of type arguments
+    let nested: Option<List<Int>> = Some([1, 2]);
+    println(nested.show());
+}
+// expect: [13, 1, 2, 15]
+// expect: 255 240 1024 -4
+// expect: true 8
+// expect: Some([1, 2])

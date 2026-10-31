@@ -1,0 +1,577 @@
+// The table's physics: balls rolling on a tilted table among walls,
+// rubbers, posts, bumpers and plants, struck by flippers.
+//
+// Everything is in fixed point, 4096 to the pixel (see `px`), with
+// velocities in those units a frame. A frame is worked out in eight
+// substeps, so a ball moves at most two pixels between looks and can't
+// pass through anything thinner than itself.
+//
+// What the ball can touch are shapes, eight numbers each in one array:
+// segments (with a thickness, so each is a capsule: a wall's corners are
+// round, and a ball rolls smoothly from one segment of a curve onto the
+// next), circles, and gates (segments solid from one side only). Each has
+// a material: how lively it is, and whether it kicks. Flippers are capsules
+// that taper, turning about a pivot; what they hit takes on their
+// surface's speed. Sensors are boxes that say when a ball comes into them
+// (lanes, the barn's door, the spinner).
+//
+// What happens (a shape struck, and how hard; a sensor entered) is written
+// to `events`, for the game to make something of.
+
+use crate::math::isqrt;
+
+pub fn unit() -> Int { 4096 }
+pub fn px(n: Int) -> Int { n * 4096 }
+
+pub fn substeps() -> Int { 8 }
+pub fn ball_r() -> Int { px(4) + 1024 }
+// the fastest a ball may go, a frame
+pub fn top_speed() -> Int { px(15) }
+
+// ---- shapes: kind, ax, ay, bx, by, r, material, tag
+
+pub fn stride() -> Int { 8 }
+pub fn k_seg() -> Int { 0 }
+pub fn k_circle() -> Int { 1 }
+pub fn k_gate() -> Int { 2 }
+
+// materials
+pub fn m_wall() -> Int { 0 }
+pub fn m_rubber() -> Int { 1 }
+pub fn m_sling() -> Int { 2 }
+pub fn m_bumper() -> Int { 3 }
+pub fn m_plant() -> Int { 4 }
+pub fn m_kicker() -> Int { 5 }
+pub fn m_post() -> Int { 6 }
+pub fn m_gate() -> Int { 7 }
+pub fn m_target() -> Int { 8 }
+pub fn m_dead() -> Int { 9 }
+pub fn m_critter() -> Int { 10 }
+pub fn m_flipper() -> Int { 11 }
+
+// how much of its speed into a material a ball keeps (256ths)
+fn bounce(m: Int) -> Int {
+    if m == 0 { 120 } else if m == 1 { 190 } else if m == 2 { 150 } else if m == 3 { 150 }
+    else if m == 4 { 140 } else if m == 5 { 150 } else if m == 6 { 160 } else if m == 7 { 70 }
+    else if m == 8 { 110 } else if m == 9 { 50 } else if m == 11 { 175 } else { 120 }
+}
+
+// how hard a material kicks a ball that strikes it hard enough (a frame)
+fn kick(m: Int) -> Int {
+    if m == 2 { px(4) + 2048 } else if m == 3 { px(5) } else if m == 5 { px(4) } else { 0 }
+}
+
+// event kinds: (kind, a, b, c) each
+pub fn ev_hit() -> Int { 1 }        // a shape struck: shape, ball, speed
+pub fn ev_flip() -> Int { 2 }       // a flipper struck the ball: flipper, ball, speed
+pub fn ev_enter() -> Int { 3 }      // a sensor entered: sensor, ball, speed
+pub fn ev_leave() -> Int { 4 }      // a sensor left: sensor, ball, vy
+pub fn ev_clack() -> Int { 5 }      // two balls met: ball, ball, speed
+
+pub struct Ball {
+    x: Int, y: Int, vx: Int, vy: Int,
+    // in play; or held (in the barn, or on the plunger) and not moving
+    live: Bool,
+    held: Bool,
+    // how fast it's spinning, to draw (a 1024th of a turn a frame), and its turn
+    spin: Int,
+    turn: Int,
+    // frames since it last struck anything
+    quiet: Int,
+}
+
+pub struct Flipper {
+    px: Int, py: Int,
+    len: Int, r0: Int, r1: Int,
+    // its angle now, at rest and raised (a 262144th of a turn, clockwise
+    // from pointing right), how fast it swings (a substep), its speed now
+    // (a frame), and whether its button's held
+    ang: Int, rest: Int, up: Int, swing: Int, omega: Int,
+    held: Bool,
+}
+
+pub struct Phys {
+    shapes: Array<Int>,
+    on: Array<Bool>,
+    n: Int,
+    balls: Array<Ball>,
+    flips: Array<Flipper>,
+    // sensors: x0, y0, x1, y1 each; which balls are in each (a bit a ball)
+    sensors: Array<Int>,
+    inside: Array<Int>,
+    n_sensors: Int,
+    events: Array<Int>,
+    n_events: Int,
+    // gravity's pull, down the table and across it (wind), a frame
+    gy: Int,
+    gx: Int,
+    // how much speed's lost to rolling a frame (65536ths kept)
+    drag: Int,
+    // a patch of the table that slows the ball (water): an ellipse, its
+    // middle (units) and radii (pixels; 0 for none), and what's kept a frame
+    zone_x: Int,
+    zone_y: Int,
+    zone_rx: Int,
+    zone_ry: Int,
+    zone_drag: Int,
+    sines: Array<Int>,
+}
+
+pub fn max_balls() -> Int { 4 }
+pub fn max_shapes() -> Int { 400 }
+pub fn max_sensors() -> Int { 32 }
+pub fn max_events() -> Int { 256 }
+
+pub fn phys(sines: Array<Int>) -> Phys {
+    let balls = array(max_balls(), Ball { x: 0, y: 0, vx: 0, vy: 0, live: false, held: false, spin: 0, turn: 0, quiet: 0 });
+    let mut i = 0;
+    while i < max_balls() {
+        balls.set(i, Ball { x: 0, y: 0, vx: 0, vy: 0, live: false, held: false, spin: 0, turn: 0, quiet: 0 });
+        i = i + 1;
+    }
+    Phys {
+        shapes: array(max_shapes() * stride(), 0),
+        on: array(max_shapes(), true),
+        n: 0,
+        balls: balls,
+        flips: array(0, flipper(0, 0, 0, 0, 0)),
+        sensors: array(max_sensors() * 4, 0),
+        inside: array(max_sensors(), 0),
+        n_sensors: 0,
+        events: array(max_events() * 4, 0),
+        n_events: 0,
+        gy: 560,
+        gx: 0,
+        drag: 65480,
+        zone_x: 0, zone_y: 0, zone_rx: 0, zone_ry: 0, zone_drag: 62000,
+        sines: sines,
+    }
+}
+
+// ---- building a table
+
+// a shape; its index
+pub fn add_shape(p: Phys, kind: Int, ax: Int, ay: Int, bx: Int, by: Int, r: Int, mat: Int, tag: Int) -> Int {
+    let i = p.n;
+    if i < max_shapes() {
+        let s = p.shapes;
+        let o = i * stride();
+        s.set(o, kind);
+        s.set(o + 1, ax);
+        s.set(o + 2, ay);
+        s.set(o + 3, bx);
+        s.set(o + 4, by);
+        s.set(o + 5, r);
+        s.set(o + 6, mat);
+        s.set(o + 7, tag);
+        p.on.set(i, true);
+        p.n = i + 1;
+    }
+    i
+}
+
+pub fn shape_kind(p: Phys, i: Int) -> Int { p.shapes.get(i * stride()) }
+pub fn shape_ax(p: Phys, i: Int) -> Int { p.shapes.get(i * stride() + 1) }
+pub fn shape_ay(p: Phys, i: Int) -> Int { p.shapes.get(i * stride() + 2) }
+pub fn shape_bx(p: Phys, i: Int) -> Int { p.shapes.get(i * stride() + 3) }
+pub fn shape_by(p: Phys, i: Int) -> Int { p.shapes.get(i * stride() + 4) }
+pub fn shape_r(p: Phys, i: Int) -> Int { p.shapes.get(i * stride() + 5) }
+pub fn shape_mat(p: Phys, i: Int) -> Int { p.shapes.get(i * stride() + 6) }
+pub fn shape_tag(p: Phys, i: Int) -> Int { p.shapes.get(i * stride() + 7) }
+pub fn set_shape_r(p: Phys, i: Int, r: Int) { p.shapes.set(i * stride() + 5, r) }
+pub fn set_shape_mat(p: Phys, i: Int, m: Int) { p.shapes.set(i * stride() + 6, m) }
+
+// a sensor; its index
+pub fn add_sensor(p: Phys, x0: Int, y0: Int, x1: Int, y1: Int) -> Int {
+    let i = p.n_sensors;
+    if i < max_sensors() {
+        p.sensors.set(i * 4, x0);
+        p.sensors.set(i * 4 + 1, y0);
+        p.sensors.set(i * 4 + 2, x1);
+        p.sensors.set(i * 4 + 3, y1);
+        p.inside.set(i, 0);
+        p.n_sensors = i + 1;
+    }
+    i
+}
+
+pub fn flipper(x: Int, y: Int, len: Int, rest: Int, up: Int) -> Flipper {
+    // (a full swing in about three frames)
+    let swing = ((up - rest).abs() / 3 / substeps()).max(1);
+    Flipper { px: x, py: y, len: len, r0: px(5), r1: px(3), ang: rest, rest: rest, up: up, swing: swing, omega: 0, held: false }
+}
+
+// ---- angles, finer than math's table: a 262144th of a turn, between its entries
+
+pub fn sin_fine(t: Array<Int>, a: Int) -> Int {
+    let i = (a >> 8) & 1023;
+    let f = a & 255;
+    let s0 = t.get(i);
+    let s1 = t.get((i + 1) & 1023);
+    s0 + (((s1 - s0) * f) >> 8)
+}
+
+pub fn cos_fine(t: Array<Int>, a: Int) -> Int { sin_fine(t, a + 65536) }
+
+// a flipper's tip
+pub fn tip_x(p: Phys, f: Flipper) -> Int { f.px + ((f.len * cos_fine(p.sines, f.ang)) >> 16) }
+pub fn tip_y(p: Phys, f: Flipper) -> Int { f.py + ((f.len * sin_fine(p.sines, f.ang)) >> 16) }
+
+// ---- events
+
+fn event(p: Phys, kind: Int, a: Int, b: Int, c: Int) {
+    let n = p.n_events;
+    if n < max_events() {
+        let o = n * 4;
+        p.events.set(o, kind);
+        p.events.set(o + 1, a);
+        p.events.set(o + 2, b);
+        p.events.set(o + 3, c);
+        p.n_events = n + 1;
+    }
+}
+
+pub fn ev_kind(p: Phys, i: Int) -> Int { p.events.get(i * 4) }
+pub fn ev_a(p: Phys, i: Int) -> Int { p.events.get(i * 4 + 1) }
+pub fn ev_b(p: Phys, i: Int) -> Int { p.events.get(i * 4 + 2) }
+pub fn ev_c(p: Phys, i: Int) -> Int { p.events.get(i * 4 + 3) }
+
+// ---- the simulation
+
+// a frame: the flippers swing, the balls roll and bounce; events for the
+// game are in p.events (cleared at the start)
+pub fn simulate(p: Phys) {
+    p.n_events = 0;
+    let n = substeps();
+    let mut s = 0;
+    while s < n {
+        swing_flippers(p);
+        let mut b = 0;
+        while b < max_balls() {
+            let ball = p.balls.get(b);
+            if ball.live && !ball.held { move_ball(p, ball, b, n) }
+            b = b + 1;
+        }
+        balls_meet(p);
+        s = s + 1;
+    }
+    let mut b = 0;
+    while b < max_balls() {
+        let ball = p.balls.get(b);
+        if ball.live && !ball.held {
+            // rolling: a little slower (much slower in water), and spinning with its speed
+            let kept = if in_zone(p, ball) { p.zone_drag } else { p.drag };
+            ball.vx = (ball.vx * kept) >> 16;
+            ball.vy = (ball.vy * kept) >> 16;
+            let sp2 = ball.vx * ball.vx + ball.vy * ball.vy;
+            let top = top_speed();
+            if sp2 > top * top {
+                let sp = isqrt(sp2);
+                ball.vx = ball.vx * top / sp;
+                ball.vy = ball.vy * top / sp;
+            }
+            ball.turn = (ball.turn + (ball.vy >> 9) + (ball.vx >> 10)) & 1023;
+            ball.quiet = ball.quiet + 1;
+        }
+        b = b + 1;
+    }
+}
+
+fn swing_flippers(p: Phys) {
+    let mut i = 0;
+    while i < p.flips.len() {
+        let f = p.flips.get(i);
+        let target = if f.held { f.up } else { f.rest };
+        // (going down is a little slower than up, as a spring returns it)
+        let sp = if f.held { f.swing } else { f.swing * 3 / 4 };
+        if f.ang < target {
+            let a = (f.ang + sp).min(target);
+            f.omega = (a - f.ang) * substeps();
+            f.ang = a;
+        } else if f.ang > target {
+            let a = (f.ang - sp).max(target);
+            f.omega = (a - f.ang) * substeps();
+            f.ang = a;
+        } else {
+            f.omega = 0;
+        }
+        i = i + 1;
+    }
+}
+
+fn move_ball(p: Phys, ball: Ball, b: Int, n: Int) {
+    ball.vx = ball.vx + p.gx / n;
+    ball.vy = ball.vy + p.gy / n;
+    ball.x = ball.x + ball.vx / n;
+    ball.y = ball.y + ball.vy / n;
+    let rb = ball_r();
+    let reach = rb + px(8);
+    let s = p.shapes;
+    let mut i = 0;
+    let count = p.n;
+    while i < count {
+        if p.on.get(i) {
+            let o = i * stride();
+            let kind = s.get(o);
+            let ax = s.get(o + 1);
+            let ay = s.get(o + 2);
+            if kind == 1 {
+                let r = s.get(o + 5);
+                let dx = ball.x - ax;
+                let dy = ball.y - ay;
+                let rr = rb + r;
+                if dx < rr && dx > -rr && dy < rr && dy > -rr {
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < rr * rr { resolve(p, ball, b, i, dx, dy, d2, rr, s.get(o + 6), 0, 0) }
+                }
+            } else {
+                let bx = s.get(o + 3);
+                let by = s.get(o + 4);
+                // (a quick look at the box round it first)
+                let lo_x = ax.min(bx) - reach;
+                let hi_x = ax.max(bx) + reach;
+                let lo_y = ay.min(by) - reach;
+                let hi_y = ay.max(by) + reach;
+                if ball.x > lo_x && ball.x < hi_x && ball.y > lo_y && ball.y < hi_y {
+                    let r = s.get(o + 5);
+                    let abx = bx - ax;
+                    let aby = by - ay;
+                    let apx = ball.x - ax;
+                    let apy = ball.y - ay;
+                    let len2 = (abx * abx + aby * aby).max(1);
+                    let t = ((apx * abx + apy * aby) / (len2 >> 12).max(1)).clamp(0, 4096);
+                    let cx = ax + ((abx * t) >> 12);
+                    let cy = ay + ((aby * t) >> 12);
+                    let dx = ball.x - cx;
+                    let dy = ball.y - cy;
+                    let rr = rb + r;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < rr * rr {
+                        // (a gate is solid only to a ball on its left, going from a to b)
+                        let solid = kind == 0 || (abx * apy - aby * apx) < 0;
+                        if solid { resolve(p, ball, b, i, dx, dy, d2, rr, s.get(o + 6), 0, 0) }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    // the flippers
+    let mut f = 0;
+    while f < p.flips.len() {
+        flipper_contact(p, ball, b, f);
+        f = f + 1;
+    }
+    sense(p, ball, b);
+}
+
+// pushes the ball out of what it's sunk into (dx, dy from the nearest
+// point of it, d2 that squared, rr how far apart they should be) and
+// bounces it, off a surface moving at (ux, uy)
+fn resolve(p: Phys, ball: Ball, b: Int, shape: Int, dx0: Int, dy0: Int, d2: Int, rr: Int, mat: Int, ux: Int, uy: Int) {
+    let d = isqrt(d2);
+    let dx = if d == 0 { 0 } else { dx0 };
+    let dy = if d == 0 { -4096 } else { dy0 };
+    let dd = d.max(1);
+    // the normal, in 4096ths
+    let nx = if d == 0 { 0 } else { dx * 4096 / dd };
+    let ny = if d == 0 { -4096 } else { dy * 4096 / dd };
+    let sink = rr - d;
+    ball.x = ball.x + ((nx * sink) >> 12);
+    ball.y = ball.y + ((ny * sink) >> 12);
+    let rvx = ball.vx - ux;
+    let rvy = ball.vy - uy;
+    let vn = (rvx * nx + rvy * ny) >> 12;
+    if vn < 0 {
+        let speed = -vn;
+        // (a ball barely touching, rolling along, doesn't bounce: it would jitter)
+        let e = if speed < px(1) / 3 { 0 } else { bounce(mat) };
+        let j = (speed * (256 + e)) >> 8;
+        ball.vx = ball.vx + ((j * nx) >> 12);
+        ball.vy = ball.vy + ((j * ny) >> 12);
+        // (a little grip along the surface, on a real knock)
+        if speed > px(1) {
+            let tx = rvx + ((speed * nx) >> 12);
+            let ty = rvy + ((speed * ny) >> 12);
+            ball.vx = ball.vx - (tx >> 6);
+            ball.vy = ball.vy - (ty >> 6);
+        }
+        let k = kick(mat);
+        if k > 0 && speed > px(1) / 2 {
+            ball.vx = ball.vx + ((k * nx) >> 12);
+            ball.vy = ball.vy + ((k * ny) >> 12);
+        }
+        if speed > px(1) / 3 {
+            if shape >= 0 { event(p, ev_hit(), shape, b, speed) }
+            ball.quiet = 0;
+            ball.spin = speed >> 10;
+        }
+    }
+}
+
+fn flipper_contact(p: Phys, ball: Ball, b: Int, fi: Int) {
+    let f = p.flips.get(fi);
+    let tx = tip_x(p, f);
+    let ty = tip_y(p, f);
+    let rb = ball_r();
+    let reach = rb + px(6);
+    if ball.x > f.px.min(tx) - reach && ball.x < f.px.max(tx) + reach && ball.y > f.py.min(ty) - reach && ball.y < f.py.max(ty) + reach {
+        let abx = tx - f.px;
+        let aby = ty - f.py;
+        let apx = ball.x - f.px;
+        let apy = ball.y - f.py;
+        let len2 = (abx * abx + aby * aby).max(1);
+        let t = ((apx * abx + apy * aby) / (len2 >> 12).max(1)).clamp(0, 4096);
+        let cx = f.px + ((abx * t) >> 12);
+        let cy = f.py + ((aby * t) >> 12);
+        let r = f.r0 + (((f.r1 - f.r0) * t) >> 12);
+        let dx = ball.x - cx;
+        let dy = ball.y - cy;
+        let rr = rb + r;
+        let d2 = dx * dx + dy * dy;
+        if d2 < rr * rr {
+            // the flipper's surface there moves at omega x (the point - the
+            // pivot): omega in radians a frame is f.omega * 2 pi / 262144
+            let rx = cx - f.px;
+            let ry = cy - f.py;
+            let ux = ((-ry * f.omega) >> 18) * 411775 >> 16;
+            let uy = ((rx * f.omega) >> 18) * 411775 >> 16;
+            let before = ball.vx * ball.vx + ball.vy * ball.vy;
+            resolve(p, ball, b, -1, dx, dy, d2, rr, m_flipper(), ux, uy);
+            let after = ball.vx * ball.vx + ball.vy * ball.vy;
+            if f.omega != 0 && after > before { event(p, ev_flip(), fi, b, isqrt(after)) }
+        }
+    }
+}
+
+fn balls_meet(p: Phys) {
+    let rb = ball_r();
+    let mut i = 0;
+    while i < max_balls() {
+        let a = p.balls.get(i);
+        if a.live && !a.held {
+            let mut j = i + 1;
+            while j < max_balls() {
+                let c = p.balls.get(j);
+                if c.live && !c.held {
+                    let dx = c.x - a.x;
+                    let dy = c.y - a.y;
+                    let rr = rb * 2;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < rr * rr && d2 > 0 {
+                        let d = isqrt(d2).max(1);
+                        let nx = dx * 4096 / d;
+                        let ny = dy * 4096 / d;
+                        let sink = (rr - d) / 2;
+                        a.x = a.x - ((nx * sink) >> 12);
+                        a.y = a.y - ((ny * sink) >> 12);
+                        c.x = c.x + ((nx * sink) >> 12);
+                        c.y = c.y + ((ny * sink) >> 12);
+                        // (equal balls trade the speed along the line between them)
+                        let vn = ((c.vx - a.vx) * nx + (c.vy - a.vy) * ny) >> 12;
+                        if vn < 0 {
+                            let j2 = (-vn * 230) >> 8;
+                            a.vx = a.vx - ((j2 * nx) >> 12);
+                            a.vy = a.vy - ((j2 * ny) >> 12);
+                            c.vx = c.vx + ((j2 * nx) >> 12);
+                            c.vy = c.vy + ((j2 * ny) >> 12);
+                            if -vn > px(1) { event(p, ev_clack(), i, j, -vn) }
+                        }
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// which sensors the ball's middle is in, and the ones it's come into or left
+fn sense(p: Phys, ball: Ball, b: Int) {
+    let bit = 1 << b;
+    let s = p.sensors;
+    let mut i = 0;
+    while i < p.n_sensors {
+        let o = i * 4;
+        let now = ball.x >= s.get(o) && ball.x < s.get(o + 2) && ball.y >= s.get(o + 1) && ball.y < s.get(o + 3);
+        let was = (p.inside.get(i) & bit) != 0;
+        if now && !was {
+            p.inside.set(i, p.inside.get(i) | bit);
+            event(p, ev_enter(), i, b, ball.vy);
+        } else if was && !now {
+            p.inside.set(i, p.inside.get(i) & (-1 - bit));
+            event(p, ev_leave(), i, b, ball.vy);
+        }
+        i = i + 1;
+    }
+}
+
+// a ball's taken off the table (drained, or held): out of every sensor
+pub fn forget(p: Phys, b: Int) {
+    let bit = 1 << b;
+    let mut i = 0;
+    while i < p.n_sensors {
+        p.inside.set(i, p.inside.get(i) & (-1 - bit));
+        i = i + 1;
+    }
+}
+
+// whether a ball's in the slow patch
+pub fn in_zone(p: Phys, ball: Ball) -> Bool {
+    if p.zone_rx == 0 { false } else {
+        let dx = (ball.x - p.zone_x) / p.zone_rx;
+        let dy = (ball.y - p.zone_y) / p.zone_ry;
+        dx * dx + dy * dy < 4096 * 4096
+    }
+}
+
+// a ball's speed, a frame
+pub fn speed(ball: Ball) -> Int { isqrt(ball.vx * ball.vx + ball.vy * ball.vy) }
+
+// how many balls are in play
+pub fn live_count(p: Phys) -> Int {
+    let mut n = 0;
+    let mut b = 0;
+    while b < max_balls() {
+        if p.balls.get(b).live { n = n + 1 }
+        b = b + 1;
+    }
+    n
+}
+
+// a free ball's slot, or -1
+pub fn free_ball(p: Phys) -> Int {
+    let mut b = 0;
+    let mut found = -1;
+    while b < max_balls() && found < 0 {
+        if !p.balls.get(b).live { found = b }
+        b = b + 1;
+    }
+    found
+}
+
+// a ball put on the table at (x, y), moving (vx, vy)
+pub fn place(p: Phys, b: Int, x: Int, y: Int, vx: Int, vy: Int) {
+    let ball = p.balls.get(b);
+    ball.x = x;
+    ball.y = y;
+    ball.vx = vx;
+    ball.vy = vy;
+    ball.live = true;
+    ball.held = false;
+    ball.quiet = 0;
+    forget(p, b);
+}
+
+// every ball given a shove (the table nudged)
+pub fn nudge(p: Phys, dx: Int, dy: Int) {
+    let mut b = 0;
+    while b < max_balls() {
+        let ball = p.balls.get(b);
+        if ball.live && !ball.held {
+            ball.vx = ball.vx + dx;
+            ball.vy = ball.vy + dy;
+        }
+        b = b + 1;
+    }
+}

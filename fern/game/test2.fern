@@ -1,0 +1,14 @@
+// use std::{all_ways, first_way, guard, Choose, Show};
+
+fn main() {
+    println(first_way(|| {
+        let a = choose(-10..=10);
+        let b = choose(-10..=10);
+        let c = choose(-10..=10);
+        guard(a - 2 * b + 3 * c == 1 &&
+            2 * a + b + c == 2 &&
+            -3 * a + 2*b - 2*c == 3);
+        (a, b, c)
+    }).show());
+    println("hello world");
+}

@@ -1,0 +1,273 @@
+// A run: one year on the farm, from the first week of spring to the fair
+// at the end of winter (and on, into more years, if you keep it). What
+// carries from week to week: the money, what's planted in each plot and
+// how well it's grown (its level), the tools in the shed, the farm's
+// improvements, and the season's fair.
+//
+// Each season is two weeks and a fair; each week has a rent to bank
+// before the balls run out.
+
+use super::seeds::*;
+use super::tools::*;
+
+pub struct Run {
+    farm: Int,
+    farmer: Int,
+    // how hard (0 the first ribbon, and up)
+    ribbon: Int,
+    season: Int,
+    week: Int,
+    year: Int,
+    money: Int,
+    // each plot's seed (-1 for none) and level (1 up)
+    plot_seed: Array<Int>,
+    plot_level: Array<Int>,
+    // the shed: a tool in each slot (-1 for none), and each one's count
+    // (for those that grow)
+    tools: Array<Int>,
+    tool_val: Array<Int>,
+    // the farm's improvements: balls a week, seconds of ball save, plots open
+    balls: Int,
+    save_secs: Int,
+    plots_open: Int,
+    // this season's fair: who's visiting
+    fair: Int,
+    // the market's rerolls this visit, and its price
+    rerolls: Int,
+    seed: Int,
+    // over the run
+    total: Int,
+    harvests: Int,
+    best_bank: Int,
+    weeks_paid: Int,
+}
+
+pub fn max_plots() -> Int { 12 }
+
+pub fn new_run(farm: Int, farmer: Int, ribbon: Int, seed: Int, plots: Int) -> Run {
+    let r = Run {
+        farm: farm, farmer: farmer, ribbon: ribbon,
+        season: 0, week: 0, year: 0,
+        money: 4,
+        plot_seed: array(max_plots(), -1),
+        plot_level: array(max_plots(), 1),
+        tools: array(max_tools(), -1),
+        tool_val: array(max_tools(), 0),
+        balls: 3, save_secs: 8, plots_open: plots.min(6),
+        fair: 0, rerolls: 0, seed: seed,
+        total: 0, harvests: 0, best_bank: 0, weeks_paid: 0,
+    };
+    kit(r);
+    r.fair = pick_fair(r);
+    r
+}
+
+// each farmer's start: seeds in the plots, a tool, money
+fn kit(r: Run) {
+    if r.farmer == 0 {
+        r.plot_seed.set(0, turnip());
+        r.plot_seed.set(1, turnip());
+        r.plot_seed.set(3, turnip());
+        give_tool(r, watering_can());
+        r.money = 4;
+    } else if r.farmer == 1 {
+        r.plot_seed.set(0, strawberry());
+        r.plot_seed.set(4, strawberry());
+        r.plot_seed.set(1, sunflower());
+        give_tool(r, rooster());
+        r.money = 3;
+    } else if r.farmer == 2 {
+        r.plot_seed.set(0, tulip());
+        r.plot_seed.set(3, tulip());
+        r.plot_seed.set(1, clover());
+        give_tool(r, beehive());
+        r.money = 2;
+    } else {
+        r.plot_seed.set(0, carrot());
+        r.plot_seed.set(1, carrot());
+        r.plot_seed.set(4, carrot());
+        give_tool(r, compost());
+        r.balls = 4;
+        r.money = 2;
+    }
+}
+
+pub fn farmer_count() -> Int { 4 }
+pub fn farmer_name(f: Int) -> String {
+    if f == 0 { "Gran" } else if f == 1 { "The Kid" } else if f == 2 { "The Beekeeper" } else { "The Rancher" }
+}
+pub fn farmer_text(f: Int) -> String {
+    if f == 0 { "Three turnips and a watering can. Steady hands." }
+    else if f == 1 { "Strawberries, a sunflower and a very loud rooster." }
+    else if f == 2 { "Tulips, a clover, and the bees to go with them." }
+    else { "Four balls a week, carrots, and a compost heap." }
+}
+
+pub fn roll(r: Run, n: Int) -> Int {
+    r.seed = (r.seed * 1103515245 + 12345) & 0x7fffffff;
+    (r.seed >> 16) % n.max(1)
+}
+
+// ---- the calendar
+
+// which week of the year this is (0 to 11)
+pub fn week_index(r: Run) -> Int { r.season * 3 + r.week }
+pub fn is_fair(r: Run) -> Bool { r.week == 2 }
+
+// the rent: what has to be banked this week
+pub fn rent(r: Run) -> Int { rent_for(week_index(r), r.year, r.ribbon) }
+
+pub fn rent_for(w: Int, year: Int, ribbon: Int) -> Int {
+    let base = [1000, 1800, 3000, 4500, 6500, 10000, 14000, 20000, 30000, 42000, 60000, 90000];
+    let b = base.get(w.clamp(0, 11)).unwrap_or(1000);
+    // (every year after the first, five times as much; each ribbon a quarter more)
+    let mut k = b;
+    let mut y = 0;
+    while y < year {
+        k = k * 5;
+        y = y + 1;
+    }
+    k * (4 + ribbon) / 4
+}
+
+// on to the next week: the season turns after its fair
+pub fn advance(r: Run) {
+    r.weeks_paid = r.weeks_paid + 1;
+    r.rerolls = 0;
+    if r.week == 2 {
+        r.week = 0;
+        if r.season == 3 {
+            r.season = 0;
+            r.year = r.year + 1;
+        } else {
+            r.season = r.season + 1;
+        }
+        r.fair = pick_fair(r);
+    } else {
+        r.week = r.week + 1;
+    }
+    // (the tools that grow by the week)
+    let mut i = 0;
+    while i < max_tools() {
+        if r.tools.get(i) == recipe() { r.tool_val.set(i, r.tool_val.get(i) + 20) }
+        i = i + 1;
+    }
+}
+
+// ---- the fairs: who visits at the end of each season, and what they do
+
+pub fn fair_count() -> Int { 8 }
+pub fn f_gale() -> Int { 0 }
+pub fn f_murder() -> Int { 1 }
+pub fn f_drought() -> Int { 2 }
+pub fn f_frost() -> Int { 3 }
+pub fn f_taxman() -> Int { 4 }
+pub fn f_flood() -> Int { 5 }
+pub fn f_judge() -> Int { 6 }
+pub fn f_short() -> Int { 7 }
+// the last fair of the year: the landlord himself
+pub fn f_goose() -> Int { 8 }
+
+pub fn pick_fair(r: Run) -> Int {
+    if r.season == 3 { f_goose() } else {
+        // (frost only in autumn or later; never the same twice running)
+        let mut f = roll(r, fair_count());
+        let mut tries = 0;
+        while (f == f_frost() && r.season < 2) && tries < 20 {
+            f = roll(r, fair_count());
+            tries = tries + 1;
+        }
+        f
+    }
+}
+
+pub fn fair_name(f: Int) -> String {
+    if f == 0 { "The Gale" } else if f == 1 { "The Murder" } else if f == 2 { "The Drought" } else if f == 3 { "The Frost" }
+    else if f == 4 { "The Tax Man" } else if f == 5 { "The Flood" } else if f == 6 { "The Judge" } else if f == 7 { "The Short Day" }
+    else { "Lord Goose" }
+}
+
+pub fn fair_text(f: Int) -> String {
+    if f == 0 { "Gusts blow the ball sideways." }
+    else if f == 1 { "Crows come in flocks, and eat fast." }
+    else if f == 2 { "Plants grow at half pace, unless H-A-Y brings rain." }
+    else if f == 3 { "Plants start frozen: the first hit thaws them." }
+    else if f == 4 { "A quarter of every bank goes in taxes." }
+    else if f == 5 { "No ball save, and no kickback." }
+    else if f == 6 { "Only the judged crop counts." }
+    else if f == 7 { "One ball fewer." }
+    else { "The landlord himself: taxes, and crows." }
+}
+
+// ---- the shed
+
+pub fn has_tool(r: Run, t: Int) -> Bool {
+    let mut found = false;
+    let mut i = 0;
+    while i < max_tools() {
+        if r.tools.get(i) == t { found = true }
+        i = i + 1;
+    }
+    found
+}
+
+pub fn tool_slot(r: Run, t: Int) -> Int {
+    let mut found = -1;
+    let mut i = 0;
+    while i < max_tools() {
+        if r.tools.get(i) == t && found < 0 { found = i }
+        i = i + 1;
+    }
+    found
+}
+
+pub fn tools_held(r: Run) -> Int {
+    let mut n = 0;
+    let mut i = 0;
+    while i < max_tools() {
+        if r.tools.get(i) >= 0 { n = n + 1 }
+        i = i + 1;
+    }
+    n
+}
+
+// a tool into the first empty slot: whether there was one
+pub fn give_tool(r: Run, t: Int) -> Bool {
+    let mut put = false;
+    let mut i = 0;
+    while i < max_tools() {
+        if !put && r.tools.get(i) < 0 {
+            r.tools.set(i, t);
+            r.tool_val.set(i, if t == recipe() { 20 } else { 0 });
+            put = true;
+        }
+        i = i + 1;
+    }
+    put
+}
+
+// what each different kind of plant planted counts
+pub fn kinds_planted(r: Run) -> Int {
+    let seen = array(seed_count(), false);
+    let mut n = 0;
+    let mut i = 0;
+    while i < r.plots_open {
+        let s = r.plot_seed.get(i);
+        if s >= 0 && !seen.get(s) {
+            seen.set(s, true);
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    n
+}
+
+pub fn count_planted(r: Run, s: Int) -> Int {
+    let mut n = 0;
+    let mut i = 0;
+    while i < r.plots_open {
+        if r.plot_seed.get(i) == s { n = n + 1 }
+        i = i + 1;
+    }
+    n
+}

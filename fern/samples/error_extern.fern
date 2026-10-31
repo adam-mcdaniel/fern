@@ -1,0 +1,8 @@
+// An extern fn is C: every parameter needs a type.
+
+extern fn draw(x: Int, y);
+
+fn main() {
+    draw(1, 2);
+}
+// error: extern fn draw's parameter y needs a type

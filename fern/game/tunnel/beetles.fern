@@ -1,0 +1,208 @@
+// Beetles: from the fourth week, now and then a beetle turns up at one end
+// of the surface and makes for the nearest way in, then down through the
+// tunnels to the granary, eating any ant it catches; in a chamber it sits
+// and eats the ants coming to it, till it's had enough and wanders off.
+//
+// It comes in only where a tunnel opens onto the surface, so the counter
+// is digging: fewer ways in, or the one it's making for filled in before
+// it gets there (and dug again after), or a guard post placed near the
+// entrances, where the soldiers wait. Soldiers (hatched as well as the
+// workers: one with every eighth, every fourth with a guard post) go for
+// a beetle in the tunnels by its
+// own distance field, and together they beat it, for dig points.
+
+use super::world::*;
+use super::colony::*;
+
+// a beetle's strength, and how long it'll stay in a chamber
+fn beetle_hp() -> Int { 8 }
+fn stay() -> Int { 60 * 25 }
+fn pace() -> Int { 14 }
+
+pub fn step_beetles(c: Colony) {
+    if c.lost < 0 {
+        if c.week >= 3 {
+            c.next_beetle = c.next_beetle - 1;
+            if c.next_beetle <= 0 {
+                c.next_beetle = (week_len() * 3 / 2 - c.week * 300).max(week_len() / 2) + roll(c, week_len() / 2);
+                spawn(c);
+            }
+        }
+        let mut moved = false;
+        let mut b = 0;
+        while b < max_beetles() {
+            if c.be_state.get(b) > 0 && walk_beetle(c, b) { moved = true }
+            b = b + 1;
+        }
+        if moved || c.w.fields_dirty { beetle_field(c) }
+        fight(c);
+    }
+}
+
+fn spawn(c: Colony) {
+    let mut b = 0;
+    let mut slot = -1;
+    while b < max_beetles() {
+        if c.be_state.get(b) == 0 && slot < 0 { slot = b }
+        b = b + 1;
+    }
+    if slot >= 0 {
+        let left = roll(c, 2) == 0;
+        let i = idx(if left { 0 } else { gw() - 1 }, surface());
+        c.be_cell.set(slot, i);
+        c.be_next.set(slot, i);
+        c.be_prog.set(slot, 0);
+        c.be_state.set(slot, 1);
+        c.be_hp.set(slot, beetle_hp() + c.week / 3);
+        c.be_t.set(slot, 0);
+        c.be_face.set(slot, if left { 1 } else { -1 });
+        c.ev_beetle = slot;
+    }
+}
+
+// a beetle's step along the granary's field (or, shut out, along the
+// surface and away); whether it got to a new cell
+fn walk_beetle(c: Colony, b: Int) -> Bool {
+    let w = c.w;
+    let width = gw();
+    let st = c.be_state.get(b);
+    c.be_t.set(b, c.be_t.get(b) + 1);
+    let here = c.be_cell.get(b);
+    let next = c.be_next.get(b);
+    let mut moved = false;
+    if next != here {
+        let p = c.be_prog.get(b) + pace();
+        if p >= 256 {
+            c.be_cell.set(b, next);
+            c.be_prog.set(b, 0);
+            moved = true;
+            // (an ant where it steps is caught)
+            catch(c, b, next);
+        } else { c.be_prog.set(b, p) }
+    } else if st == 1 {
+        let field = w.to_kind.get(k_granary());
+        let d = field.get(here);
+        if d == 0 {
+            c.be_state.set(b, 2);
+            c.be_t.set(b, 0);
+        } else if d >= far() || !walkable(w, here) {
+            // (no way in: it wanders along the surface, and off)
+            if c.be_t.get(b) > 60 * 20 || here / width > surface() { c.be_state.set(b, 0) } else {
+                let x = here % width;
+                let nx = x + c.be_face.get(b);
+                if nx < 0 || nx >= width { c.be_state.set(b, 0) } else { c.be_next.set(b, idx(nx, surface())) }
+            }
+        } else {
+            let x = here % width;
+            let y = here / width;
+            let mut best = here;
+            let mut best_d = d;
+            let mut dy = -1;
+            while dy <= 1 {
+                let mut dx = -1;
+                while dx <= 1 {
+                    if (dx != 0 || dy != 0) && inside(x + dx, y + dy) {
+                        let j = idx(x + dx, y + dy);
+                        if field.get(j) < best_d && walkable(w, j) {
+                            best_d = field.get(j);
+                            best = j;
+                        }
+                    }
+                    dx = dx + 1;
+                }
+                dy = dy + 1;
+            }
+            c.be_next.set(b, best);
+            if best % width != x { c.be_face.set(b, if best % width > x { 1 } else { -1 }) }
+        }
+    } else if st == 2 {
+        // eating in the chamber: now and then an ant nearby; then off
+        if c.be_t.get(b) % 70 == 0 { catch_near(c, b) }
+        if c.be_t.get(b) > stay() { c.be_state.set(b, 0) }
+    }
+    moved
+}
+
+fn catch(c: Colony, b: Int, cell: Int) {
+    let mut a = 0;
+    let mut done = false;
+    while a < c.n_ants && !done {
+        if c.a_cell.get(a) == cell && !c.a_soldier.get(a) && roll(c, 3) == 0 {
+            kill_ant(c, a);
+            c.ev_eaten = c.ev_eaten + 1;
+            done = true;
+        }
+        a = a + 1;
+    }
+}
+
+fn catch_near(c: Colony, b: Int) {
+    let here = c.be_cell.get(b);
+    let x = here % gw();
+    let y = here / gw();
+    let mut a = 0;
+    let mut done = false;
+    while a < c.n_ants && !done {
+        let i = c.a_cell.get(a);
+        if (i % gw() - x).abs() <= 2 && (i / gw() - y).abs() <= 1 {
+            kill_ant(c, a);
+            c.ev_eaten = c.ev_eaten + 1;
+            done = true;
+        }
+        a = a + 1;
+    }
+}
+
+// the soldiers' field: every tunnel cell's steps to the nearest beetle in
+// the tunnels
+fn beetle_field(c: Colony) {
+    let w = c.w;
+    let starts = array(max_beetles(), 0);
+    let mut n = 0;
+    let mut b = 0;
+    while b < max_beetles() {
+        if c.be_state.get(b) > 0 && c.be_cell.get(b) >= (surface() + 1) * gw() {
+            starts.set(n, c.be_cell.get(b));
+            n = n + 1;
+        }
+        b = b + 1;
+    }
+    flood(w, w.to_beetle, starts, n);
+}
+
+// soldiers beside a beetle bite it; it bites back
+fn fight(c: Colony) {
+    if c.frame % 20 == 0 {
+        let mut b = 0;
+        while b < max_beetles() {
+            if c.be_state.get(b) > 0 {
+                let here = c.be_cell.get(b);
+                let x = here % gw();
+                let y = here / gw();
+                let mut biters = 0;
+                let mut a = 0;
+                let mut victim = -1;
+                while a < c.n_ants {
+                    let i = c.a_cell.get(a);
+                    if c.a_soldier.get(a) && (i % gw() - x).abs() <= 1 && (i / gw() - y).abs() <= 1 {
+                        biters = biters + 1;
+                        victim = a;
+                    }
+                    a = a + 1;
+                }
+                if biters > 0 {
+                    c.be_hp.set(b, c.be_hp.get(b) - biters);
+                    if c.be_hp.get(b) <= 0 {
+                        c.be_state.set(b, 0);
+                        c.ev_beaten = here;
+                        c.dig = c.dig + 15;
+                    } else if c.frame % 60 == 0 && victim >= 0 && roll(c, 3) == 0 {
+                        kill_ant(c, victim);
+                        c.ev_eaten = c.ev_eaten + 1;
+                    }
+                }
+            }
+            b = b + 1;
+        }
+    }
+}

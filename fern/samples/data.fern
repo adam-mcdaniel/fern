@@ -1,0 +1,60 @@
+// Enums, structs, derive, and pattern matching, with exhaustiveness.
+
+#[derive(Eq, Ord, Show)]
+enum Suit { Hearts, Spades }
+
+#[derive(Eq, Ord, Show)]
+struct Card { rank: Int, suit: Suit }
+
+#[derive(Show)]
+enum Expr {
+    Num(Int),
+    Add(Expr, Expr),
+    Mul(Expr, Expr),
+    Neg(Expr),
+}
+
+fn eval(e: Expr) -> Int {
+    match e {
+        Num(n) => n,
+        Add(a, b) => eval(a) + eval(b),
+        Mul(a, b) => eval(a) * eval(b),
+        Neg(a) => -eval(a),
+    }
+}
+
+// nested patterns, literals, and lists
+fn describe(xs: List<Int>) -> String {
+    match xs {
+        [] => "empty",
+        [0] => "just zero",
+        [x] => "one: " ++ x.show(),
+        [x, y] => "two, adding to " ++ (x + y).show(),
+        [x, ..rest] => "starts with " ++ x.show() ++ ", then " ++ rest.len().show() ++ " more",
+    }
+}
+
+fn main() {
+    let a = Card { rank: 10, suit: Hearts };
+    let b = Card { rank: 10, suit: Spades };
+    println(a.show());
+    println((a == b).show() ++ " " ++ (a < b).show() ++ " " ++ (a == a).show());
+    println([Spades, Hearts, Spades].sort().show());
+    let e = Add(Num(2), Mul(Num(3), Neg(Num(4))));
+    println(e.show() ++ " = " ++ eval(e).show());
+    [[], [0], [5], [2, 3], [1, 2, 3, 4]].each(|xs| println(describe(xs)));
+    let (x, y) = (1, "one");
+    println(x.show() ++ " is " ++ y);
+    println(None.unwrap_or(5).show() ++ " " ++ Some((1, true)).show());
+}
+// expect: Card { rank: 10, suit: Hearts }
+// expect: false true true
+// expect: [Hearts, Spades, Spades]
+// expect: Add(Num(2), Mul(Num(3), Neg(Num(4)))) = -10
+// expect: empty
+// expect: just zero
+// expect: one: 5
+// expect: two, adding to 5
+// expect: starts with 1, then 3 more
+// expect: 1 is one
+// expect: 5 Some((1, true))

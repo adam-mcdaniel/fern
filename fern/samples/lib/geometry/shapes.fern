@@ -1,0 +1,8 @@
+// The module `lib::geometry::shapes`: `super::` is geometry.
+use super::Point;
+
+pub struct Square { corner: Point, side: Int }
+
+pub fn unit() -> Square { Square { corner: super::origin(), side: 1 } }
+
+pub fn describe(s: Square) -> String { "a square of side " ++ s.side.show() }

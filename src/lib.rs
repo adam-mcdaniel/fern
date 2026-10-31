@@ -4,6 +4,7 @@ pub mod cpu;
 pub mod asm;
 pub mod interp;
 pub mod backends;
+pub mod ir;
 
 #[derive(Logos, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[logos(skip r"[ \t\n\f]+")]

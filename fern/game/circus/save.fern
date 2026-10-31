@@ -1,0 +1,64 @@
+// What's kept between plays, in a file of numbers in the user's own
+// folder (screen.c's file_save): the settings, each act's stars and best
+// time and style, the Encore's best, and whether she's been taught.
+
+use crate::screen::{file_save, file_load};
+
+pub fn version() -> Int { 1 }
+pub fn cells() -> Int { 128 }
+
+pub fn sv_music() -> Int { 1 }
+pub fn sv_sfx() -> Int { 2 }
+pub fn sv_full() -> Int { 3 }
+pub fn sv_encore() -> Int { 4 }
+pub fn sv_runs() -> Int { 5 }
+// each act's stars, best time (frames) and best style
+pub fn sv_stars(n: Int) -> Int { 10 + n }
+pub fn sv_time(n: Int) -> Int { 40 + n }
+pub fn sv_style(n: Int) -> Int { 70 + n }
+
+fn file() -> String { "stella.sav" }
+
+pub fn fresh() -> Array<Int> {
+    let d = array(cells(), 0);
+    d.set(0, version());
+    d.set(sv_music(), 70);
+    d.set(sv_sfx(), 80);
+    d
+}
+
+pub fn load() -> Array<Int> with Io {
+    let d = array(cells(), 0);
+    let n = file_load(file(), d);
+    if n < 1 || d.get(0) != version() { fresh() } else { d }
+}
+
+pub fn store(d: Array<Int>) with Io { file_save(file(), d, cells()); }
+
+pub fn get(d: Array<Int>, k: Int) -> Int { d.get(k) }
+pub fn set(d: Array<Int>, k: Int, v: Int) { d.set(k, v) }
+
+pub fn total_stars(d: Array<Int>) -> Int {
+    let mut n = 0;
+    let mut i = 0;
+    while i < 30 {
+        n = n + d.get(sv_stars(i));
+        i = i + 1;
+    }
+    n
+}
+
+// stars it takes to open each tour, and the Encore
+pub fn tour_need(t: Int) -> Int { if t == 0 { 0 } else if t == 1 { 14 } else if t == 2 { 36 } else { 60 } }
+pub fn tour_open(d: Array<Int>, t: Int) -> Bool { total_stars(d) >= tour_need(t) }
+
+// an act done, kept: whether it's a new best of anything
+pub fn record(d: Array<Int>, n: Int, stars: Int, time: Int, style: Int) -> Bool {
+    let mut better = false;
+    if n < 30 {
+        if stars > d.get(sv_stars(n)) { d.set(sv_stars(n), stars); better = true; }
+        if d.get(sv_time(n)) == 0 || time < d.get(sv_time(n)) { d.set(sv_time(n), time); better = true; }
+        if style > d.get(sv_style(n)) { d.set(sv_style(n), style); better = true; }
+    }
+    better
+}

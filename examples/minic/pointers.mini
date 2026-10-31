@@ -1,0 +1,49 @@
+// Pointers: the address of a variable (&x) or an element (&a[i]), reading
+// and writing through one (*p, *p = v, p[i]), and arrays on the stack
+// (let buf[n];) and the heap (array(n)), which are addresses too.
+fn swap(a, b) {
+    let t = *a;
+    *a = *b;
+    *b = t;
+}
+
+fn sum(p, n) {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + p[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn fill(p, n, value) {
+    while n > 0 {
+        n = n - 1;
+        p[n] = value;
+    }
+}
+
+fn main() {
+    let x = 1;
+    let y = 2;
+    swap(&x, &y);
+    print(x, " ", y, "\n");              // 2 1
+
+    let buf[5];
+    fill(buf, 5, 3);
+    print(sum(buf, 5), "\n");            // 15
+    let p = &buf[2];
+    *p = 10;
+    print(sum(buf, 5), " ", p[1], "\n"); // 22 3
+
+    let heap = array(3);
+    heap[0] = 4;
+    heap[1] = 5;
+    heap[2] = 6;
+    print(sum(heap, 3), "\n");           // 15
+
+    let q = &x;
+    *q = *q + 40;
+    print(x, "\n");                      // 42
+}

@@ -1,0 +1,380 @@
+// The game around the acts: the title (the autopilot performing behind
+// the poster), choosing an act, the act, BRAVO, the intermission, the
+// options, and the Encore's curtain. A frame at a time, from what the
+// player's pressing; the main program reads the keys and shows the
+// pictures, and the test harnesses drive it with pretend presses (`loud`
+// off: no sound, nothing saved, the window left alone).
+
+use crate::screen::{screen_full};
+use super::gfx::*;
+use super::acts::*;
+use super::body::*;
+use super::maker::*;
+use super::play::*;
+use super::scene::*;
+use super::fx::*;
+use super::sound::*;
+use super::ui::*;
+use super::bot::*;
+use super::save;
+use crate::math::{sin};
+
+#[derive(Eq)]
+pub enum Scene { Title, Acts, Curtain, Play, Bravo, Pause, Options, EncoreOver }
+
+pub struct Input { held: Bool, ok: Bool, back: Bool, up: Bool, down: Bool, west: Bool, east: Bool, mx: Int, my: Int, click: Bool, moved: Bool, full: Bool }
+
+pub fn no_input() -> Input {
+    Input { held: false, ok: false, back: false, up: false, down: false, west: false, east: false, mx: -1, my: -1, click: false, moved: false, full: false }
+}
+
+pub struct App {
+    data: Array<Int>,
+    tab: Array<Int>,
+    m: Band,
+    f: Fx,
+    loud: Bool,
+    // the title's act, and the autopilot performing it
+    demo: Show,
+    demo_bot: Bot,
+    // the act in play, and the autopilot that times its hints
+    sh: Show,
+    coach: Bot,
+    scene: Scene,
+    back_to: Scene,
+    sel: Int,
+    tour: Int,
+    anim: Int,
+    frame: Int,
+    current: Int,
+    best: Bool,
+    encore_run: Int,
+    quit: Bool,
+    // the act the curtain's closing for, and what's behind it till then
+    next: Int,
+    behind: Show,
+}
+
+pub fn app(data: Array<Int>, tab: Array<Int>, loud: Bool) -> App {
+    let f = fx();
+    let demo = show_act(build(4, tab), fx(), tab);
+    App {
+        data: data, tab: tab, m: band(), f: f, loud: loud,
+        demo: demo, demo_bot: bot(250), sh: demo, coach: bot(256),
+        scene: Title, back_to: Title, sel: 0, tour: 0, anim: 0, frame: 0,
+        current: 0, best: false, encore_run: 0, quit: false, next: 0, behind: demo,
+    }
+}
+
+fn store(p: App) with Io { if p.loud { save::store(p.data) } }
+fn noise(p: App, what: Int, k: Int) with Io { if p.loud { effect(p.m, what, k, 0) } }
+fn music(p: App, song: Int, tour: Int, heat: Int) with Io { if p.loud { tick(p.m, song, tour, heat) } }
+fn full(p: App) with Io {
+    save::set(p.data, save::sv_full(), 1 - save::get(p.data, save::sv_full()));
+    if p.loud { screen_full(save::get(p.data, save::sv_full()) > 0) }
+}
+
+// how hot the act is, for the band
+fn heat(sh: Show) -> Int { if sh.combo >= 5 { 3 } else if sh.combo >= 3 { 2 } else if sh.combo >= 1 { 1 } else { 0 } }
+
+// act n, from the start: the curtain closes over what's showing, and opens on it
+fn begin(p: App, n: Int) {
+    p.behind = if p.scene == Title || p.scene == Acts { p.demo } else { p.sh };
+    p.next = n;
+    p.scene = Curtain;
+    p.anim = 0;
+}
+
+pub fn draw_show(g: Gfx, sh: Show, tab: Array<Int>) {
+    draw_tent(g, sh.v, tour_of(sh.a.n.min(29)), tab);
+    let tg = if sh.s.state == s_air() { target(sh.s, sh.a, sh.t, tab) } else { -1 };
+    draw_act(g, sh.v, sh.a, sh.s, sh.t, tab, tg, sh.taken);
+    // (a dotted line to the hook holding would grab)
+    if tg >= 0 {
+        let x0 = sh.s.x / 256 - sh.v.cam;
+        let y0 = sh.s.y / 256 - 8;
+        let x1 = hook_x(sh.a, tg, sh.t, tab) - sh.v.cam;
+        let y1 = hook_y(sh.a, tg, sh.t, tab) + 8;
+        let mut k = 0;
+        while k < 12 {
+            if (k + sh.t / 3) % 2 == 0 { put(g, x0 + (x1 - x0) * k / 12, y0 + (y1 - y0) * k / 12, 0xfff4c0) }
+            k = k + 1;
+        }
+    }
+    draw_stella(g, sh.v, sh.s, sh.a, sh.t, tab);
+    draw_parts(g, sh.fx);
+}
+
+// a frame: what's pressed, and the picture drawn into g
+pub fn frame(p: App, inp: Input, g: Gfx) with Io {
+    let tab = p.tab;
+    let m = p.m;
+    p.frame = p.frame + 1;
+    p.anim = p.anim + 1;
+    let frame = p.frame;
+    if inp.full {
+        full(p);
+        store(p);
+    }
+    match p.scene {
+        Title => {
+            let demo = p.demo;
+            let k = think(p.demo_bot, demo.s, demo.a, demo.t, tab);
+            step_show(demo, k >= 2);
+            demo.fx.n_sounds = 0;
+            if demo.respawn > 0 { p.demo_bot.plan_hook = -1 }
+            if demo.done && demo.done_t > 90 || demo.falls > 2 {
+                p.demo = show_act(build(3 + frame % 20, tab), fx(), tab);
+                p.demo_bot.plan_hook = -1;
+            }
+            draw_show(g, p.demo, tab);
+            draw_title(g, frame, tab);
+            if (frame / 25) % 2 == 0 { say_mid(g, "press to perform", 240, 238, 2, 0xffffff, 0x3a0a10) }
+            if inp.ok || inp.click {
+                noise(p, sn_drum(), 0);
+                if save::total_stars(p.data) == 0 {
+                    // (the first time: straight into the first act)
+                    begin(p, 0);
+                } else {
+                    p.scene = Acts;
+                    p.sel = 0;
+                    p.anim = 0;
+                }
+            }
+            if inp.back { p.quit = true }
+            music(p, s_title(), 0, 0);
+        }
+        Acts => {
+            let demo = p.demo;
+            let k = think(p.demo_bot, demo.s, demo.a, demo.t, tab);
+            step_show(demo, k >= 2);
+            demo.fx.n_sounds = 0;
+            draw_show(g, demo, tab);
+            let over = draw_acts(g, p.data, p.tour, p.sel, frame, tab, inp.mx, inp.my);
+            let count = if p.tour == 3 { 1 } else { 10 };
+            if inp.moved && over >= 0 && over != p.sel { p.sel = over; noise(p, sn_tick(), 0); }
+            if inp.east {
+                if p.sel % 5 == 4 || p.tour == 3 { p.tour = (p.tour + 1) % 4; p.sel = 0; } else { p.sel = (p.sel + 1).min(count - 1) }
+                noise(p, sn_tick(), 0);
+            }
+            if inp.west {
+                if p.sel % 5 == 0 || p.tour == 3 { p.tour = (p.tour + 3) % 4; p.sel = if p.tour == 3 { 0 } else { 4 }; } else { p.sel = p.sel - 1 }
+                noise(p, sn_tick(), 0);
+            }
+            if (inp.down || inp.up) && p.tour < 3 { p.sel = (p.sel + 5) % 10; noise(p, sn_tick(), 0); }
+            if inp.ok || (inp.click && over >= 0) {
+                if save::tour_open(p.data, p.tour) {
+                    noise(p, sn_drum(), 0);
+                    p.encore_run = 0;
+                    begin(p, if p.tour == 3 { 30 } else { p.tour * 10 + p.sel });
+                } else { noise(p, sn_net(), 0) }
+            }
+            if inp.back { p.scene = Title; }
+            music(p, s_menu(), p.tour, 0);
+        }
+        Curtain => {
+            let anim = p.anim;
+            // (closing over 12 frames; closed, the act's made, while its card
+            // shows; then opening over 14)
+            if anim == 14 {
+                p.current = p.next;
+                p.sh = show_act(build(p.next, tab), p.f, tab);
+                p.coach = bot(256);
+            }
+            draw_show(g, if anim < 14 { p.behind } else { p.sh }, tab);
+            let shut = if anim <= 12 { anim * 256 / 12 } else if anim < 26 { 256 } else { (256 - (anim - 26) * 256 / 14).max(0) };
+            curtain(g, shut, tab);
+            if shut >= 200 { act_card(g, p.next, p.encore_run, tab) }
+            if anim >= 40 { p.scene = Play; p.anim = 0; }
+            if anim == 2 { music(p, s_silence(), 0, 0) }
+        }
+        Play => {
+            let sh = p.sh;
+            step_show(sh, inp.held);
+            if p.loud { effects(m, p.f) } else { p.f.n_sounds = 0 }
+            draw_show(g, sh, tab);
+            draw_hud(g, p.current, sh.clock, sh.style, sh.combo, frame);
+            hints(p, g);
+            if p.current >= 30 && sh.falls > 0 && sh.respawn == 50 {
+                // (the Encore: a fall ends it)
+                if p.encore_run > save::get(p.data, save::sv_encore()) { save::set(p.data, save::sv_encore(), p.encore_run) }
+                store(p);
+                p.scene = EncoreOver;
+                p.anim = 0;
+                p.sel = 0;
+            }
+            if sh.done && sh.done_t > 50 {
+                if p.current >= 30 {
+                    // (the Encore: straight on to the next act)
+                    p.encore_run = p.encore_run + 1;
+                    begin(p, p.current + 1);
+                } else {
+                    p.best = save::record(p.data, p.current, sh.stars, sh.clock, sh.style);
+                    store(p);
+                    p.scene = Bravo;
+                    p.anim = 0;
+                    p.sel = if p.current < 29 { 0 } else { 2 };
+                }
+            }
+            if inp.back { p.scene = Pause; p.sel = 0; }
+            music(p, s_act(), tour_of(p.current.min(29)), heat(sh));
+        }
+        Bravo => {
+            let sh = p.sh;
+            step_show(sh, false);
+            if p.loud { effects(m, p.f) } else { p.f.n_sounds = 0 }
+            draw_show(g, sh, tab);
+            let anim = p.anim;
+            draw_bravo(g, p.current, sh.stars, sh.clock, sh.a.par, sh.style, sh.a.style_goal, p.best, anim, p.sel, tab);
+            if anim == 21 || anim == 39 || anim == 57 {
+                let i = (anim - 21) / 18;
+                let ok = i == 0 || (i == 1 && time_ok(sh)) || (i == 2 && style_ok(sh));
+                if ok { noise(p, sn_star(), i) }
+            }
+            if inp.west { p.sel = (p.sel + 2) % 3; noise(p, sn_tick(), 0); }
+            if inp.east { p.sel = (p.sel + 1) % 3; noise(p, sn_tick(), 0); }
+            let by = 180;
+            let over = if inp.my >= by && inp.my < by + 20 && inp.mx >= 142 && inp.mx < 346 { ((inp.mx - 142) / 68).min(2) } else { -1 };
+            if inp.moved && over >= 0 { p.sel = over }
+            if anim > 40 && (inp.ok || (inp.click && over >= 0)) {
+                noise(p, sn_pick(), 0);
+                if p.sel == 0 && p.current < 29 { begin(p, p.current + 1) }
+                else if p.sel == 1 || p.sel == 0 { begin(p, p.current) }
+                else {
+                    p.tour = tour_of(p.current);
+                    p.sel = p.current % 10;
+                    p.scene = Acts;
+                }
+            }
+            music(p, s_bravo(), tour_of(p.current.min(29)), 0);
+        }
+        EncoreOver => {
+            let sh = p.sh;
+            step_show(sh, false);
+            p.f.n_sounds = 0;
+            draw_show(g, sh, tab);
+            panel(g, 150, 70, 180, 110);
+            say_mid(g, "CURTAIN!", 240, 82, 2, gold(), 0x6a1a10);
+            text_mid(g, p.encore_run.show() ++ (if p.encore_run == 1 { " act" } else { " acts" }) ++ " in a row", 240, 112, 1, ink());
+            text_mid(g, "best: " ++ save::get(p.data, save::sv_encore()).show(), 240, 126, 1, 0x8a6a40);
+            if (frame / 20) % 2 == 0 { text_mid(g, "press to go on", 240, 156, 1, 0x8a7a70) }
+            if p.anim > 40 && (inp.ok || inp.click) { p.scene = Acts; p.tour = 3; p.sel = 0; }
+            music(p, s_menu(), 0, 0);
+        }
+        Pause => {
+            draw_show(g, p.sh, tab);
+            let over = draw_pause(g, p.sel, inp.mx, inp.my);
+            if inp.moved && over >= 0 { p.sel = over }
+            if inp.up { p.sel = (p.sel + 4) % 5; noise(p, sn_tick(), 0); }
+            if inp.down { p.sel = (p.sel + 1) % 5; noise(p, sn_tick(), 0); }
+            if inp.back { p.scene = Play }
+            else if inp.ok || (inp.click && over >= 0) {
+                noise(p, sn_pick(), 0);
+                let sel = p.sel;
+                if sel == 0 { p.scene = Play }
+                else if sel == 1 { p.encore_run = 0; begin(p, if p.current >= 30 { 30 } else { p.current }); }
+                else if sel == 2 { p.tour = tour_of(p.current.min(30)); p.sel = if p.current >= 30 { 0 } else { p.current % 10 }; p.scene = Acts; }
+                else if sel == 3 { p.scene = Options; p.back_to = Pause; p.sel = 0; }
+                else { p.scene = Title }
+            }
+            // (the act waits: the button that was held mustn't count as a new press)
+            p.sh.was_held = inp.held;
+            music(p, s_silence(), 0, 0);
+        }
+        Options => {
+            draw_show(g, p.sh, tab);
+            let over = draw_options(g, p.data, p.sel, inp.mx, inp.my);
+            if inp.moved && over >= 0 { p.sel = over }
+            if inp.up { p.sel = (p.sel + 3) % 4; noise(p, sn_tick(), 0); }
+            if inp.down { p.sel = (p.sel + 1) % 4; noise(p, sn_tick(), 0); }
+            let sel = p.sel;
+            let delta = if inp.west { -1 } else if inp.east || inp.ok || (inp.click && over >= 0) { 1 } else { 0 };
+            if delta != 0 && sel < 3 {
+                let d = p.data;
+                if sel == 0 { save::set(d, save::sv_music(), wrap_vol(save::get(d, save::sv_music()) + delta * 10, inp.west)) }
+                else if sel == 1 { save::set(d, save::sv_sfx(), wrap_vol(save::get(d, save::sv_sfx()) + delta * 10, inp.west)) }
+                else { full(p) }
+                if p.loud { volumes(save::get(d, save::sv_music()), save::get(d, save::sv_sfx())) }
+                noise(p, sn_tick(), 2);
+                store(p);
+            }
+            if inp.back || ((inp.ok || (inp.click && over >= 0)) && sel == 3) { p.scene = p.back_to; p.sel = 3; }
+            p.sh.was_held = inp.held;
+            music(p, s_silence(), 0, 0);
+        }
+    }
+}
+
+// a volume stepped: past full goes round to nothing (pressing on with
+// one button), but not stepping down
+fn wrap_vol(v: Int, down: Bool) -> Int { if v > 100 && !down { 0 } else { v.clamp(0, 100) } }
+
+// hints, in the first acts: what to press, and (from the autopilot, which
+// knows) when to let go
+fn hints(p: App, g: Gfx) {
+    let sh = p.sh;
+    let n = p.current;
+    let tab = p.tab;
+    if n <= 4 && !sh.done && sh.respawn == 0 {
+        let s = sh.s;
+        let x = (s.x / 256 - sh.v.cam).clamp(60, 420);
+        let y = (s.y / 256 - 34).max(34);
+        if s.state == s_stand() {
+            if sh.t > 30 { hint(g, if n == 0 { "press to leap" } else { "press" }, x + 10, y, p.frame) }
+        } else if s.state == s_air() && target(s, sh.a, sh.t, tab) >= 0 && n <= 2 {
+            hint(g, "HOLD to grab", x, y, p.frame);
+        } else if s.state == s_swing() && n <= 2 {
+            let c = p.coach;
+            if s.hook != c.plan_hook || s.t > c.release_at + 20 { c.plan_hook = -1 }
+            think(c, s, sh.a, sh.t, tab);
+            let wait = c.release_at - s.t;
+            if wait <= 10 && wait >= -10 { hint(g, "LET GO!", x, y, 1) } else if wait > 10 { hint(g, "hold on...", x, y, p.frame) }
+        } else if s.state == s_air() && n == 4 && target(s, sh.a, sh.t, tab) < 0 && sh.flips == 0 {
+            hint(g, "hold now to tuck and FLIP", x, y, p.frame);
+        }
+    }
+}
+
+// the big top's curtain, drawn in from both sides (shut: 0 open, 256 closed):
+// red velvet in folds, a gold fringe along the bottom, tied back a little
+fn curtain(g: Gfx, shut: Int, tab: Array<Int>) {
+    if shut > 0 {
+        let w = (sw() / 2 + 8) * shut / 256;
+        let mut y = 0;
+        while y < sh() {
+            // (the inner edges bow outward lower down, like drapes held back)
+            let bow = if shut < 256 { (y * y / 2400) * (256 - shut) / 256 } else { 0 };
+            let reach = (w - bow).max(0);
+            let mut i = 0;
+            while i < reach {
+                let fold = sin(tab, (i + (w - reach)) * 24) >> 10;
+                let c = scale(0xb01828, 200 + fold - (if i > reach - 3 { 60 } else { 0 }));
+                put(g, i, y, c);
+                put(g, sw() - 1 - i, y, c);
+                i = i + 1;
+            }
+            y = y + 1;
+        }
+        // (the pelmet along the top, and the fringe)
+        rect(g, 0, 0, sw(), 10, 0x7a0a18);
+        let mut x = 0;
+        while x < sw() {
+            if (x / 4) % 2 == 0 { rect(g, x, 10, 4, 3, gold()) }
+            x = x + 1;
+        }
+    }
+}
+
+// the act's card, on the closed curtain
+fn act_card(g: Gfx, n: Int, run: Int, tab: Array<Int>) {
+    panel(g, 150, 90, 180, 84);
+    if n >= 30 {
+        say_mid(g, "ENCORE", 240, 102, 3, crimson(), 0x6a1a10);
+        text_mid(g, "act " ++ (run + 1).show() ++ ": " ++ act_name(n), 240, 136, 1, ink());
+        text_mid(g, "one fall ends it", 240, 152, 1, 0x8a6a60);
+    } else {
+        say_mid(g, "ACT " ++ (n + 1).show(), 240, 102, 3, crimson(), 0x6a1a10);
+        text_mid(g, act_name(n), 240, 136, 1, ink());
+        text_mid(g, tour_name(tour_of(n)), 240, 152, 1, 0x8a6a60);
+    }
+}

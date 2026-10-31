@@ -1,0 +1,50 @@
+// Rational numbers: exact fractions, in place of floating point. `1.25`
+// is one, and + - * / and comparisons work on them, as on any type with
+// the operators' traits (Add, Sub, Mul, Div, Rem, Neg).
+
+// generic: any type with + (and a zero to start from)
+fn total<T: Add>(xs: List<T>, zero: T) -> T {
+    xs.fold(zero, |a, b| a + b)
+}
+
+// generic: any number (Num: + - * / and negation), Int or Rational
+fn lerp<T: Num>(a: T, b: T, t: T) -> T { a + (b - a) * t }
+fn mirror<T: Num>(x: T, around: T) -> T { -(x - around) + around }
+
+// a type with + and - and negation, but no * or /
+#[derive(Eq, Show)]
+struct Vec2 { x: Int, y: Int }
+
+impl Add for Vec2 { fn add(self, o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } } }
+impl Sub for Vec2 { fn sub(self, o: Vec2) -> Vec2 { Vec2 { x: self.x - o.x, y: self.y - o.y } } }
+impl Neg for Vec2 { fn neg(self) -> Vec2 { Vec2 { x: -self.x, y: -self.y } } }
+
+fn main() {
+    let a = 1.5;
+    let b = Rational::new(1, 3);
+    println((a + b).show() ++ " " ++ (a - b).show() ++ " " ++ (a * b).show() ++ " " ++ (a / b).show() ++ " " ++ (-a).show());
+    println((0.1 + 0.2 == 0.3).show() ++ " " ++ (b < 0.34).show() ++ " " ++ [2.5, 0.75, 1.0].sort().show() ++ " " ++ [2.5, 0.75].maximum().show());
+    let third = Rational::from_int(1) / Rational::from_int(3);
+    println(third.to_decimal(5) ++ " " ++ (-2.675).to_decimal(2) ++ " " ++ (22.0 / 7.0).to_decimal(3) ++ " " ++ 3.0.to_decimal(0));
+    println((7.0 / 2.0).floor().show() ++ " " ++ (7.0 / 2.0).ceil().show() ++ " " ++ (-3.5).round().show() ++ " " ++ (-3.5).trunc().show() ++ " " ++ 1.5.pow(3).show() ++ " " ++ 2.0.pow(-2).show());
+    println(["3", "-7/2", "1.25", " 0.050 ", "x", "1/0"].map(Rational::parse).show());
+    // 355/113 is the best fraction for pi with a denominator under 1000
+    let pi = 3.14159265358979;
+    println(pi.limit(1000).show() ++ " " ++ pi.limit(10).show() ++ " " ++ 2.0.sqrt().to_decimal(10) ++ " " ++ (2.0.sqrt() * 2.0.sqrt()).to_decimal(9));
+    println(total([0.5, 0.25, 0.125], 0.0).show() ++ " " ++ total([1, 2, 3], 0).show() ++ " " ++ total([Vec2 { x: 1, y: 2 }, Vec2 { x: 3, y: 4 }], Vec2 { x: 0, y: 0 }).show());
+    let v = Vec2 { x: 5, y: 1 } - -Vec2 { x: 1, y: 1 };
+    let add = |p, q| p + q;
+    // (arithmetic nothing ever says the type of is Int's)
+    let unused = |p, q| p * q - p;
+    println(v.show() ++ " " ++ add(2, 3).show() ++ " " ++ (17 % 5).show());
+    println(lerp(1.0, 2.0, 0.25).show() ++ " " ++ lerp(0, 10, 3).show() ++ " " ++ mirror(0.5, 2.0).show() ++ " " ++ mirror(7, 5).show());
+}
+// expect: 11/6 7/6 1/2 9/2 -3/2
+// expect: true true [3/4, 1, 5/2] Some(5/2)
+// expect: 0.33333 -2.68 3.143 3
+// expect: 3 4 -3 -3 27/8 1/4
+// expect: [Some(3), Some(-7/2), Some(5/4), Some(1/20), None, None]
+// expect: 355/113 22/7 1.4142135624 2.000000000
+// expect: 7/8 6 Vec2 { x: 4, y: 6 }
+// expect: Vec2 { x: 6, y: 2 } 5 2
+// expect: 5/4 30 7/2 3

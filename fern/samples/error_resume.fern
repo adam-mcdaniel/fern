@@ -1,0 +1,14 @@
+// fail<A> never comes back: each call is whatever type it needs to be,
+// so a handler can't know what A is there, and can't resume with one.
+
+fn sneaky<T>(f: fn() -> T with {Fail}) -> T {
+    handle f() {
+        return(v) => v,
+        fail(msg) => resume(5),
+    }
+}
+
+fn main() {
+    println(sneaky(|| fail("no") ++ "!"));
+}
+// error: A and Int are different types

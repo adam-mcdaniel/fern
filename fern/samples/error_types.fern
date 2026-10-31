@@ -1,0 +1,5 @@
+// A type mismatch.
+fn main() {
+    let x: Int = "five";
+}
+// error: String and Int are different types

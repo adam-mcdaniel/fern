@@ -1,0 +1,6 @@
+// A record without the field that's read.
+fn main() {
+    let p = { x: 1, y: 2 };
+    println(p.z.show());
+}
+// error: has no field z

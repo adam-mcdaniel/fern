@@ -1,0 +1,346 @@
+// The tables: each farm's layout, made of physics shapes (walls, rubbers,
+// slingshots, posts, bumpers, gates), its sensors (lanes, the barn door,
+// the spinner, the orbit), its flippers and plunger, and its plots, where
+// the plants grow.
+//
+// A table is 256 x 270 pixels, in the middle of the screen. The plunger's
+// lane is down the right side; the ball comes up it, round the arch at
+// the top, and into play. Positions here are in pixels, the table's own.
+
+use crate::math::{sin, cos};
+use super::physics::*;
+
+pub fn table_w() -> Int { 256 }
+pub fn table_h() -> Int { 270 }
+// where the table is on the screen
+pub fn table_x() -> Int { 112 }
+
+// what a shape is, for drawing it (its tag's kind, tag / 256)
+pub fn t_wall() -> Int { 0 }
+pub fn t_rail() -> Int { 1 }
+pub fn t_sling() -> Int { 2 }
+pub fn t_hay() -> Int { 3 }
+pub fn t_plot() -> Int { 4 }
+pub fn t_post() -> Int { 5 }
+pub fn t_target() -> Int { 6 }
+pub fn t_gate() -> Int { 7 }
+pub fn t_barn() -> Int { 8 }
+pub fn t_guide() -> Int { 9 }
+pub fn t_stone() -> Int { 10 }
+pub fn t_critter() -> Int { 11 }
+pub fn t_tree() -> Int { 12 }
+
+pub fn tag(kind: Int, n: Int) -> Int { kind * 256 + n }
+pub fn tag_kind(t: Int) -> Int { t / 256 }
+pub fn tag_n(t: Int) -> Int { t % 256 }
+
+// the inserts: which lamp is which
+pub fn i_lane(n: Int) -> Int { n }
+pub fn i_barn() -> Int { 3 }
+pub fn i_orbit() -> Int { 4 }
+pub fn i_kick() -> Int { 5 }
+pub fn i_save() -> Int { 6 }
+pub fn i_fence() -> Int { 7 }
+// their shapes
+pub fn ik_dot() -> Int { 0 }
+pub fn ik_arrow() -> Int { 1 }
+pub fn ik_shield() -> Int { 2 }
+
+pub struct Table {
+    farm: Int,
+    p: Phys,
+    // the plots: where each is, and its circle (off while it's empty)
+    plot_x: Array<Int>,
+    plot_y: Array<Int>,
+    plot_shape: Array<Int>,
+    n_plots: Int,
+    // the hay bales (pop bumpers): where, and their shapes
+    hay_x: Array<Int>,
+    hay_y: Array<Int>,
+    n_hay: Int,
+    // the fence's drop targets: their shapes
+    targets: Array<Int>,
+    n_targets: Int,
+    // sensors
+    lanes: Array<Int>,
+    lane_x: Array<Int>,
+    s_barn: Int,
+    s_spinner: Int,
+    s_orbit_in: Int,
+    s_orbit_top: Int,
+    s_shooter: Int,
+    s_out_l: Int,
+    s_out_r: Int,
+    s_in_l: Int,
+    s_in_r: Int,
+    // the barn: its door's middle and the way the ball comes out
+    barn_x: Int,
+    barn_y: Int,
+    spin_x: Int,
+    spin_y: Int,
+    // the plunger: the lane's middle, and the top of the plunger at rest
+    plunger_x: Int,
+    plunger_y: Int,
+    // the kickback in the left outlane: its post's shape
+    kick_shape: Int,
+    // the inserts: lamps set in the playfield (kind, x, y, color, which
+    // way an arrow points: 1024ths of a turn)
+    ins_kind: Array<Int>,
+    ins_x: Array<Int>,
+    ins_y: Array<Int>,
+    ins_color: Array<Int>,
+    ins_dir: Array<Int>,
+    n_ins: Int,
+    // the pond (the orchard's), if any: its middle and radii, pixels
+    pond_x: Int,
+    pond_y: Int,
+    pond_rx: Int,
+    pond_ry: Int,
+    // the arch's shape: middle and radii (for drawing)
+    arch_cx: Int,
+    arch_cy: Int,
+    arch_rx: Int,
+    arch_ry: Int,
+}
+
+fn wall(p: Phys, x0: Int, y0: Int, x1: Int, y1: Int, r: Int, mat: Int, t: Int) -> Int {
+    add_shape(p, k_seg(), px(x0), px(y0), px(x1), px(y1), r, mat, t)
+}
+
+fn post(p: Phys, x: Int, y: Int, r: Int, mat: Int, t: Int) -> Int {
+    add_shape(p, k_circle(), px(x), px(y), 0, 0, r, mat, t)
+}
+
+// a curve of walls round an ellipse, from angle a0 to a1 (1024ths of a
+// turn, clockwise from the right), in n pieces
+fn arc(p: Phys, sines: Array<Int>, cx: Int, cy: Int, rx: Int, ry: Int, a0: Int, a1: Int, n: Int, r: Int, mat: Int, t: Int) {
+    let mut i = 0;
+    while i < n {
+        let a = a0 + (a1 - a0) * i / n;
+        let b = a0 + (a1 - a0) * (i + 1) / n;
+        add_shape(p, k_seg(), px(cx) + rx * cos(sines, a) / 16, px(cy) + ry * sin(sines, a) / 16,
+            px(cx) + rx * cos(sines, b) / 16, px(cy) + ry * sin(sines, b) / 16, r, mat, t);
+        i = i + 1;
+    }
+}
+
+pub fn farm_count() -> Int { 2 }
+
+pub fn farm_name(f: Int) -> String {
+    if f == 0 { "The Meadow" } else { "The Orchard" }
+}
+
+pub fn farm_text(f: Int) -> String {
+    if f == 0 { "Hay bales, a barn and eight plots. Where every farmer starts." }
+    else { "Apple trees to bounce off, and a duck pond that slows the ball down." }
+}
+
+pub fn make_table(farm: Int, sines: Array<Int>) -> Table {
+    let p = phys(sines);
+    let t = Table {
+        farm: farm, p: p,
+        plot_x: array(12, 0), plot_y: array(12, 0), plot_shape: array(12, -1), n_plots: 0,
+        hay_x: array(4, 0), hay_y: array(4, 0), n_hay: 0,
+        targets: array(4, -1), n_targets: 0,
+        lanes: array(3, 0), lane_x: array(3, 0),
+        s_barn: 0, s_spinner: 0, s_orbit_in: 0, s_orbit_top: 0, s_shooter: 0,
+        s_out_l: 0, s_out_r: 0, s_in_l: 0, s_in_r: 0,
+        barn_x: 196, barn_y: 60, spin_x: 16, spin_y: 112,
+        plunger_x: 243, plunger_y: 262, kick_shape: -1,
+        ins_kind: array(16, 0), ins_x: array(16, 0), ins_y: array(16, 0), ins_color: array(16, 0), ins_dir: array(16, 0), n_ins: 0,
+        pond_x: 0, pond_y: 0, pond_rx: 0, pond_ry: 0,
+        arch_cx: 128, arch_cy: 100, arch_rx: 122, arch_ry: 92,
+    };
+    skeleton(t, sines);
+    if farm == 1 { orchard(t) } else { meadow(t) }
+    t
+}
+
+// what every farm has: the cabinet and its arch, the plunger's lane, the
+// orbit up the left, the inlanes and outlanes, the slingshots, the top
+// lanes, the barn, the fence, the flippers, the lamps for them
+fn skeleton(t: Table, sines: Array<Int>) {
+    let p = t.p;
+    let w2 = px(2);
+    let w = tag(t_wall(), 0);
+    let rail = tag(t_rail(), 0);
+    // the cabinet: the arch over the top, the sides, and the slopes into the drain
+    arc(p, sines, 128, 100, 122, 92, 512, 1024, 36, w2, m_wall(), w);
+    wall(p, 6, 100, 6, 222, w2, m_wall(), w);
+    wall(p, 6, 222, 62, 276, w2, m_wall(), w);
+    wall(p, 250, 100, 250, 276, w2, m_wall(), w);
+    // the plunger's lane, and the gate at its top that keeps the ball out
+    // once it's in play
+    wall(p, 236, 130, 236, 276, w2, m_wall(), w);
+    wall(p, 236, 222, 180, 276, w2, m_wall(), w);
+    add_shape(p, k_gate(), px(236), px(128), px(250), px(121), px(1), m_gate(), tag(t_gate(), 0));
+    t.s_shooter = add_sensor(p, px(237), px(200), px(250), px(270));
+    // the left orbit: a lane up the left side, with the windmill's spinner in it
+    wall(p, 26, 84, 26, 146, w2, m_wall(), rail);
+    post(p, 26, 84, px(3), m_post(), tag(t_post(), 0));
+    // (a gate at its top: the ball can go up the lane and out round the
+    // arch, but a ball coming round the arch the other way rolls off it
+    // into play instead of down the lane)
+    add_shape(p, k_gate(), px(7), px(74), px(25), px(82), px(1), m_gate(), tag(t_gate(), 1));
+    // (a one-way flap at its foot: a ball shot up the lane goes through,
+    // but one falling back down it lands on the post between the inlane
+    // and the outlane, not straight out)
+    add_shape(p, k_gate(), px(7), px(156), px(17), px(163), px(1), m_gate(), tag(t_gate(), 2));
+    t.s_spinner = add_sensor(p, px(8), px(108), px(24), px(116));
+    t.s_orbit_in = add_sensor(p, px(8), px(130), px(24), px(138));
+    t.s_orbit_top = add_sensor(p, px(150), px(4), px(220), px(22));
+    t.spin_x = 16;
+    t.spin_y = 112;
+    // the inlanes and outlanes, each side: the post at the top of the
+    // divider, and the guide that brings the ball down to the flipper
+    let gl = tag(t_guide(), 0);
+    // (each guide in line with its flipper's top edge, lowered, so the
+    // ball rolls from one onto the other without a bump)
+    wall(p, 22, 178, 22, 201, w2, m_wall(), gl);
+    wall(p, 22, 201, 80, 234, w2, m_wall(), gl);
+    post(p, 22, 176, px(3), m_rubber(), tag(t_post(), 1));
+    wall(p, 220, 178, 220, 201, w2, m_wall(), gl);
+    wall(p, 220, 201, 162, 234, w2, m_wall(), gl);
+    post(p, 220, 176, px(3), m_rubber(), tag(t_post(), 2));
+    t.s_out_l = add_sensor(p, px(8), px(196), px(20), px(206));
+    t.s_in_l = add_sensor(p, px(24), px(196), px(40), px(206));
+    t.s_out_r = add_sensor(p, px(222), px(196), px(234), px(206));
+    t.s_in_r = add_sensor(p, px(202), px(196), px(218), px(206));
+    // the slingshots: hay bales, the face toward the middle kicking
+    let sl = tag(t_sling(), 0);
+    let sr = tag(t_sling(), 1);
+    wall(p, 40, 166, 40, 196, w2, m_rubber(), sl);
+    wall(p, 40, 196, 66, 213, w2, m_rubber(), sl);
+    wall(p, 40, 166, 66, 213, px(2), m_sling(), sl);
+    wall(p, 202, 166, 202, 196, w2, m_rubber(), sr);
+    wall(p, 202, 196, 176, 213, w2, m_rubber(), sr);
+    wall(p, 202, 166, 176, 213, px(2), m_sling(), sr);
+    // the top lanes: H, A and Y, between four posts
+    let mut i = 0;
+    while i < 4 {
+        let x = 89 + i * 22;
+        wall(p, x, 30, x, 42, px(2), m_wall(), tag(t_guide(), 1));
+        post(p, x, 28, px(2), m_post(), tag(t_post(), 3 + i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 3 {
+        let x = 100 + i * 22;
+        t.lane_x.set(i, x);
+        t.lanes.set(i, add_sensor(p, px(x - 6), px(32), px(x + 6), px(42)));
+        i = i + 1;
+    }
+    // the barn: a pocket on the right, its door facing down and to the
+    // left, toward the left flipper; its roof sealed behind it, the roof's
+    // far edge on the slant so nothing rests on it
+    let bn = tag(t_barn(), 0);
+    wall(p, 191, 111, 216, 81, w2, m_wall(), bn);
+    wall(p, 209, 125, 233, 96, w2, m_wall(), bn);
+    wall(p, 216, 81, 233, 96, w2, m_wall(), bn);
+    wall(p, 205, 94, 223, 108, w2, m_wall(), bn);
+    t.barn_x = 208;
+    t.barn_y = 108;
+    t.s_barn = add_sensor(p, px(203), px(102), px(214), px(113));
+    // the fence: three drop targets on the right
+    i = 0;
+    while i < 3 {
+        let y = 134 + i * 12;
+        t.targets.set(i, wall(p, 229, y, 229, y + 8, px(2), m_target(), tag(t_target(), i)));
+        i = i + 1;
+    }
+    t.n_targets = 3;
+    // the inserts
+    insert(t, ik_dot(), 100, 50, 0xff5a4a, 0);
+    insert(t, ik_dot(), 122, 50, 0xffd23a, 0);
+    insert(t, ik_dot(), 144, 50, 0x4ab0ff, 0);
+    insert(t, ik_arrow(), 170, 148, 0xff8a3a, 882);
+    insert(t, ik_arrow(), 34, 154, 0x7ae05a, 768);
+    insert(t, ik_dot(), 14, 214, 0xff5ad0, 0);
+    insert(t, ik_shield(), 121, 262, 0x5ae0ff, 0);
+    insert(t, ik_arrow(), 212, 150, 0xffe05a, 0);
+    // the flippers
+    let left = flipper(px(84), px(240), px(32), 21845, -18933);
+    let right = flipper(px(158), px(240), px(32), 109227, 150005);
+    p.flips = Array::from_list([left, right], left);
+    t.plunger_x = 243;
+    t.plunger_y = 262;
+}
+
+// the meadow: hay bales in a nest left of the middle, eight plots
+fn meadow(t: Table) {
+    // the hay bales: three pop bumpers
+    // (in a nest left of the middle, clear of the shots to the barn)
+    hay(t, 122, 76);
+    hay(t, 148, 94);
+    hay(t, 118, 106);
+    // the plots
+    // (the first six are open from the start; the last two, low down
+    // by the flippers, are bought)
+    plot(t, 90, 130);
+    plot(t, 128, 150);
+    plot(t, 60, 98);
+    plot(t, 84, 66);
+    plot(t, 56, 142);
+    plot(t, 196, 56);
+    plot(t, 86, 180);
+    plot(t, 156, 198);
+}
+
+// the orchard: two apple trees for bumpers (they drop apples), a duck
+// pond in the middle that slows the ball, and its plots round them
+fn orchard(t: Table) {
+    tree(t, 108, 80);
+    tree(t, 152, 98);
+    t.pond_x = 100;
+    t.pond_y = 162;
+    t.pond_rx = 30;
+    t.pond_ry = 13;
+    t.p.zone_x = px(100);
+    t.p.zone_y = px(162);
+    t.p.zone_rx = 30;
+    t.p.zone_ry = 13;
+    plot(t, 90, 124);
+    plot(t, 132, 146);
+    plot(t, 60, 96);
+    plot(t, 84, 58);
+    plot(t, 152, 126);
+    plot(t, 196, 56);
+    plot(t, 70, 196);
+    plot(t, 156, 198);
+}
+
+fn tree(t: Table, x: Int, y: Int) {
+    let n = t.n_hay;
+    t.hay_x.set(n, x);
+    t.hay_y.set(n, y);
+    post(t.p, x, y, px(10), m_bumper(), tag(t_tree(), n));
+    t.n_hay = n + 1;
+}
+
+fn hay(t: Table, x: Int, y: Int) {
+    let n = t.n_hay;
+    t.hay_x.set(n, x);
+    t.hay_y.set(n, y);
+    post(t.p, x, y, px(7), m_bumper(), tag(t_hay(), n));
+    t.n_hay = n + 1;
+}
+
+fn plot(t: Table, x: Int, y: Int) {
+    let n = t.n_plots;
+    t.plot_x.set(n, x);
+    t.plot_y.set(n, y);
+    let s = post(t.p, x, y, px(4), m_plant(), tag(t_plot(), n));
+    t.plot_shape.set(n, s);
+    t.p.on.set(s, false);
+    t.n_plots = n + 1;
+}
+
+fn insert(t: Table, kind: Int, x: Int, y: Int, color: Int, dir: Int) {
+    let n = t.n_ins;
+    t.ins_kind.set(n, kind);
+    t.ins_x.set(n, x);
+    t.ins_y.set(n, y);
+    t.ins_color.set(n, color);
+    t.ins_dir.set(n, dir);
+    t.n_ins = n + 1;
+}

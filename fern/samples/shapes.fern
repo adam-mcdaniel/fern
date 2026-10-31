@@ -1,0 +1,21 @@
+// Methods for tuples (one table for each size) and records (one for each
+// set of fields, in any order): generic, or for particular types.
+impl<A, B> (A, B) {
+    fn swap(self) -> (B, A) { let (a, b) = self; (b, a) }
+    fn first(self) -> A { let (a, _b) = self; a }
+}
+impl (Int, Int, Int) {
+    fn total(self) -> Int { let (a, b, c) = self; a + b + c }
+}
+impl {x: Int, y: Int} {
+    fn dot(self, o: {x: Int, y: Int}) -> Int { self.x * o.x + self.y * o.y }
+    fn len2(self) -> Int { self.dot(self) }
+}
+fn main() {
+    println((1, "one").swap().first());
+    println({y: 4, x: 3}.len2().show());
+    println((1, 2, 3).total().show());
+}
+// expect: one
+// expect: 25
+// expect: 6

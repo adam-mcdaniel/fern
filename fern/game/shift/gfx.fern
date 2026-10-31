@@ -1,0 +1,690 @@
+// The picture. The world is drawn in 128 colors (a palette index a pixel:
+// 0 to 63 the deck's, 64 to 127 the creatures' and things'), and lit: the
+// light is worked out at half the resolution, two channels of it, lamp
+// (the station's lights and the robot's, a cold white) and bloom (the
+// glow of the thing that's eating the station, magenta), each pixel's
+// packed into a level (32 of lamp by 8 of bloom), and the shade table says
+// what each color is in each level of light. So lighting the screen is one
+// table lookup a pixel.
+//
+// What gives off light of its own (sparks, lenses, eyes in the dark, the
+// writing) is drawn after, straight in color, often added to what's there.
+
+use crate::draw::{Canvas, canvas};
+use crate::math::isqrt;
+
+pub fn sw() -> Int { 480 }
+pub fn sh() -> Int { 270 }
+// the light's resolution: a cell for each 2 x 2 pixels
+pub fn lw() -> Int { 240 }
+pub fn lh() -> Int { 135 }
+
+pub struct Gfx {
+    c: Canvas,
+    // the light this frame, a cell for 2 x 2 pixels: each channel 0 up
+    // (255 is full), and packed into a level (lamp / 8 * 8 + bloom / 32)
+    lamp: Array<Int>,
+    bloom: Array<Int>,
+    lit: Array<Int>,
+    // how much of the light reaches each cell (out of 256): darker at the edges
+    vignette: Array<Int>,
+    // the colors, and each in each level of light: (level << 7) + color
+    base: Array<Int>,
+    shade: Array<Int>,
+    // what each level of light is, per channel (256ths)
+    level_r: Array<Int>,
+    level_g: Array<Int>,
+    level_b: Array<Int>,
+    // what a sprite's emissive pixels are (see Sprite)
+    emit: Array<Int>,
+    font: Font,
+    // how strong light falls off: falloff[d2 * 1024 / r2], out of 256
+    falloff: Array<Int>,
+}
+
+pub fn gfx(font: Font) -> Gfx {
+    let vignette = array(lw() * lh(), 256);
+    let mut y = 0;
+    while y < lh() {
+        let mut x = 0;
+        while x < lw() {
+            // (an ellipse the screen's shape: 1 inside, falling to 0.55 at the corners)
+            let dx = (x - lw() / 2) * 256 / (lw() / 2);
+            let dy = (y - lh() / 2) * 256 / (lh() / 2);
+            let d2 = (dx * dx + dy * dy) >> 8;
+            let v = if d2 < 110 { 256 } else { (256 - (d2 - 110) * 115 / 400).max(140) };
+            vignette.set(y * lw() + x, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let falloff = array(1025, 0);
+    let mut i = 0;
+    while i <= 1024 {
+        let k = (1024 - i) / 4;
+        falloff.set(i, k * k >> 8);
+        i = i + 1;
+    }
+    Gfx {
+        c: canvas(sw(), sh()),
+        lamp: array(lw() * lh(), 0),
+        bloom: array(lw() * lh(), 0),
+        lit: array(lw() * lh(), 0),
+        vignette: vignette,
+        base: array(128, 0),
+        shade: array(256 * 128, 0),
+        level_r: array(256, 0),
+        level_g: array(256, 0),
+        level_b: array(256, 0),
+        emit: array(64, 0xffffff),
+        font: font,
+        falloff: falloff,
+    }
+}
+
+pub fn rgb(r: Int, g: Int, b: Int) -> Int { (r.clamp(0, 255) << 16) + (g.clamp(0, 255) << 8) + b.clamp(0, 255) }
+pub fn red(c: Int) -> Int { (c >> 16) & 255 }
+pub fn green(c: Int) -> Int { (c >> 8) & 255 }
+pub fn blue(c: Int) -> Int { c & 255 }
+
+// a color between two, t out of 256
+pub fn mix(a: Int, b: Int, t: Int) -> Int {
+    rgb(red(a) + (red(b) - red(a)) * t / 256, green(a) + (green(b) - green(a)) * t / 256, blue(a) + (blue(b) - blue(a)) * t / 256)
+}
+
+// a color made brighter or darker (k out of 256)
+pub fn scale(c: Int, k: Int) -> Int { rgb(red(c) * k >> 8, green(c) * k >> 8, blue(c) * k >> 8) }
+
+// ---- light and the shade table
+
+// what each level of light is: what's there with none (the dark, up to
+// the station's own lighting all on, power 0 to 256) plus the lamp and
+// bloom light's
+pub fn set_ambient(g: Gfx, power: Int) {
+    let (ar, ag, ab) = (18 + 222 * power / 256, 26 + 216 * power / 256, 42 + 196 * power / 256);
+    let mut l = 0;
+    while l < 256 {
+        let (w, k) = (l >> 3, l & 7);
+        g.level_r.set(l, ar + w * 440 / 31 + k * 330 / 7);
+        g.level_g.set(l, ag + w * 540 / 31 + k * 100 / 7);
+        g.level_b.set(l, ab + w * 580 / 31 + k * 390 / 7);
+        l = l + 1;
+    }
+    let mut i = 0;
+    while i < 128 {
+        shade_color(g, i);
+        i = i + 1;
+    }
+}
+
+// a color's own, and in each level of light
+pub fn set_color(g: Gfx, i: Int, color: Int) {
+    g.base.set(i, color);
+    shade_color(g, i);
+}
+
+fn shade_color(g: Gfx, i: Int) {
+    let c = g.base.get(i);
+    let (r, gr, b) = (red(c), green(c), blue(c));
+    let mut l = 0;
+    while l < 256 {
+        let v = rgb(tone(r * g.level_r.get(l) >> 8), tone(gr * g.level_g.get(l) >> 8), tone(b * g.level_b.get(l) >> 8));
+        g.shade.set((l << 7) + i, v);
+        l = l + 1;
+    }
+}
+
+// (brighter than white is folded back below it, gently, rather than cut off)
+fn tone(v: Int) -> Int {
+    if v < 190 { v } else { 190 + (v - 190) * 65 / (v - 190 + 65) }
+}
+
+pub fn light_clear(g: Gfx, lamp: Int, bloom: Int) {
+    let n = lw() * lh();
+    let mut i = 0;
+    while i < n {
+        g.lamp.set(i, lamp);
+        g.bloom.set(i, bloom);
+        i = i + 1;
+    }
+}
+
+// a light with no shadows at (sx, sy) on the screen, reaching r pixels
+pub fn light_add(g: Gfx, sx: Int, sy: Int, r: Int, lamp: Int, bloom: Int) {
+    let (cx, cy, rr) = (sx / 2, sy / 2, (r / 2).max(1));
+    let r2 = rr * rr;
+    let inv = (1024 << 16) / r2;
+    let (w, h) = (lw(), lh());
+    let x0 = (cx - rr).max(0);
+    let x1 = (cx + rr + 1).min(w);
+    let mut y = (cy - rr).max(0);
+    let y1 = (cy + rr + 1).min(h);
+    while y < y1 {
+        let dy2 = (y - cy) * (y - cy);
+        let mut x = x0;
+        let row = y * w;
+        while x < x1 {
+            let d2 = (x - cx) * (x - cx) + dy2;
+            if d2 < r2 {
+                let k = g.falloff.get((d2 * inv) >> 16);
+                let p = row + x;
+                if lamp > 0 { g.lamp.set(p, g.lamp.get(p) + ((k * lamp) >> 8)) }
+                if bloom > 0 { g.bloom.set(p, g.bloom.get(p) + ((k * bloom) >> 8)) }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// light cast through a fan of rays, from (cx, cy), out to their ends (x
+// then y, rays + 1 of them), reaching r: into light buffers bw wide and bh
+// high, where (cx, cy), the ends and r are in the buffers' cells; only
+// within the box x0 <= x < x1, y0 <= y < y1
+pub fn fan(fall: Array<Int>, lamp_buf: Array<Int>, bloom_buf: Array<Int>, bw: Int, ends: Array<Int>, rays: Int, cx: Int, cy: Int, r: Int, lamp: Int, bloom: Int, x0: Int, y0: Int, x1: Int, y1: Int) {
+    let r2 = (r * r).max(1);
+    let inv = (1024 << 16) / r2;
+    let mut i = 0;
+    while i < rays {
+        tri(fall, lamp_buf, bloom_buf, bw, cx, cy, ends.get(i * 2), ends.get(i * 2 + 1), ends.get(i * 2 + 2), ends.get(i * 2 + 3), cx, cy, r2, inv, lamp, bloom, x0, y0, x1, y1);
+        i = i + 1;
+    }
+}
+
+// one triangle of a fan, a row at a time: from its left edge up to (not
+// including) its right, so a fan's triangles meet without overlapping
+fn tri(fall: Array<Int>, wb: Array<Int>, cb: Array<Int>, bw: Int, x0: Int, y0: Int, x1: Int, y1: Int, x2: Int, y2: Int, cx: Int, cy: Int, r2: Int, inv: Int, lamp: Int, bloom: Int, bx0: Int, by0: Int, bx1: Int, by1: Int) {
+    // (sorted by y: a at the top, c at the bottom)
+    let (ax, ay, bx, by, ccx, ccy) = if y0 <= y1 && y0 <= y2 { if y1 <= y2 { (x0, y0, x1, y1, x2, y2) } else { (x0, y0, x2, y2, x1, y1) } }
+        else if y1 <= y2 { if y0 <= y2 { (x1, y1, x0, y0, x2, y2) } else { (x1, y1, x2, y2, x0, y0) } }
+        else if y0 <= y1 { (x2, y2, x0, y0, x1, y1) } else { (x2, y2, x1, y1, x0, y0) };
+    let mut y = ay.max(by0);
+    let yend = ccy.min(by1);
+    while y < yend {
+        let long = ax + (ccx - ax) * (y - ay) / (ccy - ay).max(1);
+        let short = if y < by { ax + (bx - ax) * (y - ay) / (by - ay).max(1) } else { bx + (ccx - bx) * (y - by) / (ccy - by).max(1) };
+        let left = long.min(short).max(bx0);
+        let right = long.max(short).min(bx1);
+        let dy2 = (y - cy) * (y - cy);
+        let row = y * bw;
+        let mut x = left;
+        while x < right {
+            let d2 = (x - cx) * (x - cx) + dy2;
+            if d2 < r2 {
+                let k = fall.get((d2 * inv) >> 16);
+                let p = row + x;
+                if lamp > 0 { wb.set(p, wb.get(p) + ((k * lamp) >> 8)) }
+                if bloom > 0 { cb.set(p, cb.get(p) + ((k * bloom) >> 8)) }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// the picture: the world (palette indices, ww wide) from the camera, in
+// the light. A light cell (2 x 2 pixels) at a time: the light that stays
+// (still_lamp and still_bloom, at half resolution, sw wide) and this
+// frame's, which is cleared for the next as it's read, with the ambient,
+// darker toward the edges, packed into a level and kept (for what's drawn
+// on top to be lit by), and its four pixels shaded by it.
+pub fn render(g: Gfx, world: Array<Int>, ww: Int, still_lamp: Array<Int>, still_bloom: Array<Int>, sww: Int, camx: Int, camy: Int, ambient_lamp: Int, ambient_bloom: Int) {
+    let (w, h, lwv, lhv) = (sw(), sh(), lw(), lh());
+    let px = g.c.pixels;
+    let shade = g.shade;
+    let (dw, dc, vig, lit) = (g.lamp, g.bloom, g.vignette, g.lit);
+    let mut ly = 0;
+    while ly < lhv {
+        let mut s = (camy / 2 + ly) * sww + camx / 2;
+        let mut l = ly * lwv;
+        let end = l + lwv;
+        let mut src = (camy + ly * 2) * ww + camx;
+        let mut dst = ly * 2 * w;
+        while l < end {
+            let v = vig.get(l);
+            let lamp = (((still_lamp.get(s) + dw.get(l) + ambient_lamp) * v) >> 11).min(31);
+            let bloom = (((still_bloom.get(s) + dc.get(l) + ambient_bloom) * v) >> 13).min(7);
+            dw.set(l, 0);
+            dc.set(l, 0);
+            let level = (lamp << 3) + bloom;
+            lit.set(l, level);
+            let row = level << 7;
+            px.set(dst, shade.get(row + world.get(src)));
+            px.set(dst + 1, shade.get(row + world.get(src + 1)));
+            px.set(dst + w, shade.get(row + world.get(src + ww)));
+            px.set(dst + w + 1, shade.get(row + world.get(src + ww + 1)));
+            s = s + 1;
+            l = l + 1;
+            src = src + 2;
+            dst = dst + 2;
+        }
+        ly = ly + 1;
+    }
+}
+
+// the level of light at (x, y) on the screen
+pub fn lit_at(g: Gfx, x: Int, y: Int) -> Int {
+    if x < 0 || y < 0 || x >= sw() || y >= sh() { 0 } else { g.lit.get((y >> 1) * lw() + (x >> 1)) }
+}
+
+// how bright a level of light is, 0 to 255, both channels together
+pub fn brightness(level: Int) -> Int { ((level >> 3) * 8 + (level & 7) * 12).min(255) }
+
+// ---- drawing in color
+
+pub fn put(g: Gfx, x: Int, y: Int, color: Int) {
+    if x >= 0 && y >= 0 && x < sw() && y < sh() { g.c.pixels.set(y * sw() + x, color) }
+}
+
+// a color added to a pixel (light on it)
+pub fn add(g: Gfx, x: Int, y: Int, color: Int) {
+    if x >= 0 && y >= 0 && x < sw() && y < sh() {
+        let p = y * sw() + x;
+        let o = g.c.pixels.get(p);
+        g.c.pixels.set(p, ((red(o) + red(color)).min(255) << 16) + ((green(o) + green(color)).min(255) << 8) + (blue(o) + blue(color)).min(255));
+    }
+}
+
+pub fn rect(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int) {
+    let x0 = x.max(0);
+    let x1 = (x + w).min(sw());
+    let mut yy = y.max(0);
+    let y1 = (y + h).min(sh());
+    let px = g.c.pixels;
+    while yy < y1 {
+        let mut i = yy * sw() + x0;
+        let end = yy * sw() + x1;
+        while i < end {
+            px.set(i, color);
+            i = i + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+// a rectangle's pixels darkened, by halves (shift 1 is half, 2 a quarter)
+pub fn dim(g: Gfx, x: Int, y: Int, w: Int, h: Int, shift: Int) {
+    let mask = if shift == 1 { 0x7f7f7f } else if shift == 2 { 0x3f3f3f } else { 0x1f1f1f };
+    let x0 = x.max(0);
+    let x1 = (x + w).min(sw());
+    let mut yy = y.max(0);
+    let y1 = (y + h).min(sh());
+    let px = g.c.pixels;
+    while yy < y1 {
+        let mut i = yy * sw() + x0;
+        let end = yy * sw() + x1;
+        while i < end {
+            px.set(i, (px.get(i) >> shift) & mask);
+            i = i + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+// a rectangle's pixels toward a color (t out of 256)
+pub fn tint(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int, t: Int) {
+    let x0 = x.max(0);
+    let x1 = (x + w).min(sw());
+    let mut yy = y.max(0);
+    let y1 = (y + h).min(sh());
+    let px = g.c.pixels;
+    let (cr, cg, cb) = (red(color) * t, green(color) * t, blue(color) * t);
+    let u = 256 - t;
+    while yy < y1 {
+        let mut i = yy * sw() + x0;
+        let end = yy * sw() + x1;
+        while i < end {
+            let o = px.get(i);
+            px.set(i, ((((o >> 16) & 255) * u + cr) >> 8 << 16) + ((((o >> 8) & 255) * u + cg) >> 8 << 8) + (((o & 255) * u + cb) >> 8));
+            i = i + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+pub fn outline(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int) {
+    rect(g, x, y, w, 1, color);
+    rect(g, x, y + h - 1, w, 1, color);
+    rect(g, x, y, 1, h, color);
+    rect(g, x + w - 1, y, 1, h, color);
+}
+
+// a glow of a color added round (x, y), fading out to r
+pub fn glow(g: Gfx, x: Int, y: Int, r: Int, color: Int) {
+    let r2 = (r * r).max(1);
+    let inv = (1024 << 16) / r2;
+    let (cr, cg, cb) = (red(color), green(color), blue(color));
+    let x0 = (x - r).max(0);
+    let x1 = (x + r + 1).min(sw());
+    let mut yy = (y - r).max(0);
+    let y1 = (y + r + 1).min(sh());
+    let px = g.c.pixels;
+    while yy < y1 {
+        let dy2 = (yy - y) * (yy - y);
+        let mut xx = x0;
+        while xx < x1 {
+            let d2 = (xx - x) * (xx - x) + dy2;
+            if d2 < r2 {
+                let k = g.falloff.get((d2 * inv) >> 16);
+                let p = yy * sw() + xx;
+                let o = px.get(p);
+                px.set(p, ((((o >> 16) & 255) + ((cr * k) >> 8)).min(255) << 16) + ((((o >> 8) & 255) + ((cg * k) >> 8)).min(255) << 8) + ((o & 255) + ((cb * k) >> 8)).min(255));
+            }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+}
+
+// a filled disc
+pub fn disc(g: Gfx, x: Int, y: Int, r: Int, color: Int) {
+    let r2 = r * r + r;
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            if dx * dx + dy * dy <= r2 { put(g, x + dx, y + dy, color) }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// a ring of a color added, of radius r, `thick` pixels thick: each row's
+// one or two spans of it
+pub fn ring(g: Gfx, x: Int, y: Int, r: Int, thick: Int, color: Int) {
+    let rr = r + thick;
+    let mut dy = -rr;
+    while dy <= rr {
+        let outer = isqrt(rr * rr - dy * dy);
+        let inner = if dy * dy < r * r { isqrt(r * r - dy * dy) } else { -1 };
+        let mut dx = -outer;
+        while dx <= outer {
+            if dx > -inner && dx < inner { dx = inner } else {
+                add(g, x + dx, y + dy, color);
+                dx = dx + 1;
+            }
+        }
+        dy = dy + 1;
+    }
+}
+
+// a line of a color added, from (x0, y0) to (x1, y1)
+pub fn ray(g: Gfx, x0: Int, y0: Int, x1: Int, y1: Int, color: Int) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+    let mut n = 0;
+    while n < 2000 {
+        add(g, x, y, color);
+        if x == x1 && y == y1 { n = 2000 } else {
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err = err + dy;
+                x = x + sx;
+            }
+            if e2 <= dx {
+                err = err + dx;
+                y = y + sy;
+            }
+            n = n + 1;
+        }
+    }
+}
+
+// an ellipse of shadow under something standing at (x, y)
+pub fn shadow(g: Gfx, x: Int, y: Int, rx: Int, ry: Int) {
+    let rx2 = (rx * rx).max(1);
+    let ry2 = (ry * ry).max(1);
+    let mut dy = -ry;
+    while dy <= ry {
+        let mut dx = -rx;
+        let yy = y + dy;
+        while dx <= rx {
+            let xx = x + dx;
+            if dx * dx * ry2 + dy * dy * rx2 <= rx2 * ry2 && xx >= 0 && yy >= 0 && xx < sw() && yy < sh() {
+                let p = yy * sw() + xx;
+                g.c.pixels.set(p, (g.c.pixels.get(p) >> 1) & 0x7f7f7f);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// ---- sprites
+
+// a picture: w x h pixels, each -1 (nothing), a color (0 to 127, lit by
+// the light it's in), or 128 + n, the emissive color n (unlit: eyes, lenses)
+pub struct Sprite { w: Int, h: Int, px: Array<Int> }
+
+// a sprite from rows of text: each character the color of `keys` at the
+// same place in `colors`, and anything else nothing
+pub fn sprite(rows: List<String>, keys: String, colors: List<Int>) -> Sprite {
+    let h = rows.len();
+    let w = match rows { Cons(r, _) => r.len(), Nil => 0 };
+    let px = array(w * h, -1);
+    let table = Array::from_list(colors, -1);
+    let mut y = 0;
+    let mut rest = rows;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(r, tail) => {
+                let mut x = 0;
+                while x < w && x < r.len() {
+                    let ch = r.char_at(x);
+                    let mut k = 0;
+                    while k < keys.len() {
+                        if keys.char_at(k) == ch { px.set(y * w + x, table.get(k)) }
+                        k = k + 1;
+                    }
+                    x = x + 1;
+                }
+                y = y + 1;
+                rest = tail;
+            }
+        }
+    }
+    Sprite { w: w, h: h, px: px }
+}
+
+// a sprite with its middle at (cx, cy), lit by the light there (its
+// level); flipped left to right if flip; all white if flash
+pub fn draw_sprite(g: Gfx, s: Sprite, cx: Int, cy: Int, flip: Bool, level: Int, flash: Bool) {
+    let x0 = cx - s.w / 2;
+    let y0 = cy - s.h / 2;
+    let (w, h) = (sw(), sh());
+    let row_light = level << 7;
+    let px = g.c.pixels;
+    let mut y = 0;
+    while y < s.h {
+        let yy = y0 + y;
+        if yy >= 0 && yy < h {
+            let mut x = 0;
+            while x < s.w {
+                let xx = x0 + x;
+                if xx >= 0 && xx < w {
+                    let v = s.px.get(y * s.w + (if flip { s.w - 1 - x } else { x }));
+                    if v >= 0 {
+                        let color = if flash { 0xfff4e0 } else if v >= 128 { g.emit.get(v - 128) } else { g.shade.get(row_light + v) };
+                        px.set(yy * w + xx, color);
+                    }
+                }
+                x = x + 1;
+            }
+        }
+        y = y + 1;
+    }
+}
+
+// a sprite, as draw_sprite, `scale` times as big
+pub fn draw_big(g: Gfx, s: Sprite, cx: Int, cy: Int, flip: Bool, level: Int, flash: Bool, scale: Int) {
+    let x0 = cx - s.w * scale / 2;
+    let y0 = cy - s.h * scale / 2;
+    let row_light = level << 7;
+    let mut y = 0;
+    while y < s.h {
+        let mut x = 0;
+        while x < s.w {
+            let v = s.px.get(y * s.w + (if flip { s.w - 1 - x } else { x }));
+            if v >= 0 {
+                let color = if flash { 0xfff4e0 } else if v >= 128 { g.emit.get(v - 128) } else { g.shade.get(row_light + v) };
+                rect(g, x0 + x * scale, y0 + y * scale, scale, scale, color);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// a sprite drawn in its colors as they are, unlit, `scale` times as big,
+// with its top left at (x, y) (icons, portraits)
+pub fn draw_flat(g: Gfx, s: Sprite, x: Int, y: Int, scale: Int) {
+    let mut sy = 0;
+    while sy < s.h {
+        let mut sx = 0;
+        while sx < s.w {
+            let v = s.px.get(sy * s.w + sx);
+            if v >= 0 {
+                let color = if v >= 128 { g.emit.get(v - 128) } else { g.base.get(v) };
+                rect(g, x + sx * scale, y + sy * scale, scale, scale, color);
+            }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+}
+
+// ---- writing: a font of its own, 7 pixels high, letters of their own widths
+
+pub struct Font { rows: Array<Int>, widths: Array<Int> }
+
+// glyphs written as rows of # and ., split by spaces: "#.# ### #.#"
+pub fn font(glyphs: List<(String, String)>) -> Font {
+    let rows = array(128 * 7, 0);
+    let widths = array(128, 0);
+    widths.set(32, 3);
+    glyphs.each(|gl| {
+        let (ch, art) = gl;
+        let code = ch.char_at(0);
+        let mut row = 0;
+        let mut bits = 0;
+        let mut w = 0;
+        let mut col = 0;
+        let mut i = 0;
+        while i <= art.len() {
+            let c = if i < art.len() { art.char_at(i) } else { 32 };
+            if c == 32 {
+                rows.set(code * 7 + row, bits);
+                w = w.max(col);
+                row = row + 1;
+                bits = 0;
+                col = 0;
+            } else {
+                bits = bits * 2 + (if c == 35 { 1 } else { 0 });
+                col = col + 1;
+            }
+            i = i + 1;
+        }
+        widths.set(code, w);
+    });
+    Font { rows: rows, widths: widths }
+}
+
+fn glyph_code(ch: Int) -> Int {
+    if ch >= 97 && ch <= 122 { ch - 32 } else if ch < 0 || ch > 127 { 63 } else { ch }
+}
+
+// how wide s is, at a scale
+pub fn text_w(g: Gfx, s: String, scale: Int) -> Int {
+    let mut w = 0;
+    let mut i = 0;
+    while i < s.len() {
+        w = w + (g.font.widths.get(glyph_code(s.char_at(i))) + 1) * scale;
+        i = i + 1;
+    }
+    (w - scale).max(0)
+}
+
+// s with its top left at (x, y)
+pub fn text(g: Gfx, s: String, x: Int, y: Int, scale: Int, color: Int) {
+    let mut cx = x;
+    let mut i = 0;
+    while i < s.len() {
+        let code = glyph_code(s.char_at(i));
+        let w = g.font.widths.get(code);
+        let mut row = 0;
+        while row < 7 {
+            let bits = g.font.rows.get(code * 7 + row);
+            if bits != 0 {
+                let mut col = 0;
+                while col < w {
+                    if (bits >> (w - 1 - col)) & 1 == 1 {
+                        if scale == 1 { put(g, cx + col, y + row, color) } else { rect(g, cx + col * scale, y + row * scale, scale, scale, color) }
+                    }
+                    col = col + 1;
+                }
+            }
+            row = row + 1;
+        }
+        cx = cx + (w + 1) * scale;
+        i = i + 1;
+    }
+}
+
+// s, with a dark edge round it so it reads over anything
+pub fn say(g: Gfx, s: String, x: Int, y: Int, scale: Int, color: Int) {
+    let edge = 0x0a0610;
+    text(g, s, x - scale, y, scale, edge);
+    text(g, s, x + scale, y, scale, edge);
+    text(g, s, x, y - scale, scale, edge);
+    text(g, s, x, y + scale, scale, edge);
+    text(g, s, x + scale, y + scale, scale, edge);
+    text(g, s, x, y, scale, color);
+}
+
+// s centered on x
+pub fn say_at(g: Gfx, s: String, x: Int, y: Int, scale: Int, color: Int) {
+    say(g, s, x - text_w(g, s, scale) / 2, y, scale, color);
+}
+
+pub fn say_mid(g: Gfx, s: String, y: Int, scale: Int, color: Int) {
+    say_at(g, s, sw() / 2, y, scale, color);
+}
+
+// s drawn big, lit from above: each row of its pixels a color from top to
+// bottom, with a glow of a color (aura) behind it
+pub fn title(g: Gfx, s: String, x: Int, y: Int, scale: Int, top: Int, bottom: Int, aura: Int) {
+    let w = text_w(g, s, scale);
+    let mut gx = 0;
+    while gx <= w {
+        glow(g, x + gx, y + scale * 3, scale * 7, aura);
+        gx = gx + scale * 5;
+    }
+    text(g, s, x + scale, y + scale, scale, 0x140808);
+    let mut row = 0;
+    while row < 7 {
+        // (each row of the glyphs, in its own color)
+        let color = mix(top, bottom, row * 256 / 6);
+        let mut cx = x;
+        let mut i = 0;
+        while i < s.len() {
+            let code = glyph_code(s.char_at(i));
+            let gw = g.font.widths.get(code);
+            let bits = g.font.rows.get(code * 7 + row);
+            let mut col = 0;
+            while col < gw {
+                if (bits >> (gw - 1 - col)) & 1 == 1 { rect(g, cx + col * scale, y + row * scale, scale, scale, color) }
+                col = col + 1;
+            }
+            cx = cx + (gw + 1) * scale;
+            i = i + 1;
+        }
+        row = row + 1;
+    }
+}

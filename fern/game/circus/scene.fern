@@ -1,0 +1,525 @@
+// Drawing the big top. Back to front, each layer scrolling slower the
+// farther it is: the tent's canvas in red and cream stripes, darker up in
+// its peak; spotlights sweeping; strings of bunting; the crowd in its
+// tiers, bobbing, standing and throwing up their arms as the show gets
+// good. Then the act: striped pedestals with round tops, trapezes and
+// rings hanging on long ropes, hoops of ribbon, balloons, trampolines,
+// the safety net across the ring. Then Stella: a little figure drawn by
+// turning the points of a skeleton (so she hangs, flies, tucks into a
+// ball and lands in any pose), her scarf streaming behind, her rope.
+//
+// The camera follows her, leaning ahead the way she's going.
+
+use crate::math::{sin, cos, isqrt};
+use super::gfx::*;
+use super::acts::*;
+use super::body::*;
+use super::fx::*;
+
+pub struct View { cam: Int, cheer: Int, frame: Int }
+
+pub fn view() -> View { View { cam: 0, cheer: 0, frame: 0 } }
+
+// the camera after Stella: ahead of her, the way she's going
+pub fn follow(v: View, s: Stella, a: Act) {
+    let want = (s.x / 256 - 170 + (s.vx / 256) * 14).clamp(0, (a.len + 120 - sw()).max(0));
+    v.cam = v.cam + (want - v.cam) / 8;
+    v.frame = v.frame + 1;
+    if v.cheer > 0 { v.cheer = v.cheer - 1 }
+}
+
+// each tour's canvas colors: the stripes, and the light
+fn stripe_a(tour: Int) -> Int { if tour == 1 { 0x3a8ad8 } else if tour == 2 { 0x4a6ab8 } else { 0xd8323a } }
+fn stripe_b(tour: Int) -> Int { if tour == 1 { 0xf4f0e0 } else if tour == 2 { 0xe8f0f8 } else { 0xf6e8cc } }
+
+pub fn draw_tent(g: Gfx, v: View, tour: Int, sines: Array<Int>) {
+    let px = g.px;
+    let far = v.cam / 5;
+    // (the canvas held back: softer stripes, dimmer, so the act stands out)
+    let a = mix(stripe_a(tour), 0x5a4a5a, 90);
+    let b = mix(stripe_b(tour), 0x8a7a7a, 110);
+    let mut y = 0;
+    while y < sh() {
+        // (darker toward the peak; the stripes bulge, the canvas sagging between poles)
+        let dark = if y < 120 { 110 + y * 3 / 4 } else { 200 };
+        let sag = (sin(sines, y * 3) >> 14);
+        let mut x = 0;
+        while x < sw() {
+            let u = x + far + sag;
+            let k = (u / 26) % 2 == 0;
+            let edge = u % 26 == 0 || u % 26 == 25;
+            let c = if edge { scale(if k { a } else { b }, 200) } else if k { a } else { b };
+            px.set(y * sw() + x, scale(c, dark));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // tent poles, far
+    let mut p = 0;
+    while p < 4 {
+        let x = (p * 220 - far * 2).mod_floor(880) - 100;
+        rect(g, x, 0, 5, sh(), 0x5a3a2a);
+        rect(g, x + 1, 0, 1, sh(), 0x8a6a4a);
+        p = p + 1;
+    }
+    // spotlights sweeping (light added)
+    let mut l = 0;
+    while l < 3 {
+        let base = l * 160 + 80 - (v.cam / 3) % 160;
+        let sweep = sin(sines, v.frame * 2 + l * 300) >> 11;
+        beam(g, base + 40, -10, base + sweep, 240, if tour == 2 { 0x182838 } else { 0x2a2410 });
+        l = l + 1;
+    }
+    // bunting: strings of flags swagging between poles
+    bunting(g, v.cam * 3 / 5, 14, tour, v.frame, sines);
+    bunting(g, v.cam * 3 / 5 + 90, 34, tour, v.frame + 40, sines);
+    crowd(g, v, tour, sines);
+}
+
+// a cone of light, added: from a point up top to a pool below
+fn beam(g: Gfx, x0: Int, y0: Int, x1: Int, y1: Int, color: Int) {
+    let mut y = y0.max(0);
+    while y < y1.min(sh()) {
+        let t = (y - y0) * 256 / (y1 - y0).max(1);
+        let cx = x0 + (x1 - x0) * t / 256;
+        let half = 4 + t * 26 / 256;
+        let mut x = cx - half;
+        while x <= cx + half {
+            let edge = 256 - (x - cx).abs() * 256 / half.max(1);
+            add(g, x, y, scale(color, edge.max(0)));
+            x = x + 1;
+        }
+        y = y + 2;
+    }
+}
+
+fn bunting(g: Gfx, off: Int, y: Int, tour: Int, frame: Int, sines: Array<Int>) {
+    let colors = [0xe8402e, 0xffc820, 0x3aa0e8, 0x5ac04a, 0xff7ab0];
+    let span = 120;
+    let mut x = -(off % span) - span;
+    while x < sw() + span {
+        // (a rope sagging between two points, flags hanging off it)
+        let mut k = 0;
+        while k < 12 {
+            let t = k * 256 / 12;
+            let fx = x + span * k / 12;
+            let fy = y + (t * (256 - t) >> 11) + (sin(sines, frame * 3 + fx) >> 15);
+            put(g, fx, fy, 0x5a4030);
+            put(g, fx + 5, fy, 0x5a4030);
+            let c = colors.get(((x / span) + k).mod_floor(5)).unwrap_or(0xffffff);
+            let mut r = 0;
+            while r < 6 {
+                rect(g, fx + r / 2, fy + 1 + r, 6 - r, 1, c);
+                r = r + 1;
+            }
+            k = k + 1;
+        }
+        x = x + span;
+    }
+}
+
+// the crowd in their tiers: heads bobbing, standing to cheer
+fn crowd(g: Gfx, v: View, tour: Int, sines: Array<Int>) {
+    let off = v.cam / 2;
+    let excite = v.cheer;
+    // (the stands, in shadow under the lights)
+    rect(g, 0, 214, sw(), sh() - 214, 0x2a1a20);
+    let mut row = 0;
+    while row < 3 {
+        let y = 218 + row * 12;
+        // (the tier's front edge)
+        rect(g, 0, y + 7, sw(), 5, scale(0x4a2a28, 180 + row * 20));
+        let mut i = 0;
+        while i < 52 {
+            let x = i * 10 + (row % 2) * 5 - (off * (row + 2) / 4) % 10;
+            let who = hash3(i + (off * (row + 2) / 4) / 10, row);
+            let shade = 120 + excite.min(100);
+            let skin = scale(if who % 4 == 0 { 0x8a5a3a } else if who % 4 == 1 { 0xf0c8a0 } else if who % 4 == 2 { 0xc89070 } else { 0xe8b088 }, shade);
+            let shirt = scale([0xe8402e, 0x3a7ae8, 0xffc820, 0x5ab04a, 0x9a5ad0, 0xf4f0e8].get(who % 6).unwrap_or(0xffffff), shade);
+            // (bobbing; up on their feet when the show's good)
+            let bob = (sin(sines, v.frame * (6 + who % 4) + who * 37) * (1 + excite / 20)) >> 16;
+            let up = if excite > 30 && who % 3 != 0 { -3 } else { 0 };
+            let hy = y + bob + up;
+            rect(g, x - 3, hy + 3, 7, 5, scale(shirt, 200));
+            disc(g, x, hy, 2, skin);
+            if excite > 50 && who % 2 == 0 {
+                put(g, x - 3, hy - 2, skin);
+                put(g, x + 3, hy - 2, skin);
+                put(g, x - 3, hy - 1, skin);
+                put(g, x + 3, hy - 1, skin);
+            }
+            i = i + 1;
+        }
+        row = row + 1;
+    }
+}
+
+fn hash3(x: Int, y: Int) -> Int {
+    let h = (x + 999) * 374761393 + (y + 77) * 668265263;
+    ((h ^ (h >> 13)) * 1274126177 >> 16) & 0xffff
+}
+
+// ---- the act
+
+pub fn draw_act(g: Gfx, v: View, a: Act, s: Stella, t: Int, sines: Array<Int>, target: Int, taken: Array<Bool>) {
+    let cam = v.cam;
+    // the platforms: a striped pole up from the ring, a round top
+    let mut p = 0;
+    while p < a.n_plats {
+        let x0 = a.px0.get(p) - cam;
+        let x1 = a.px1.get(p) - cam;
+        let top = a.py.get(p);
+        let mid = (x0 + x1) / 2;
+        let mut yy = top + 6;
+        while yy < sh() {
+            let stripe = ((yy + mid) / 6) % 2 == 0;
+            rect(g, mid - 4, yy, 9, 1, if stripe { 0xe8402e } else { 0xf4ecdc });
+            put(g, mid - 4, yy, 0x6a2a20);
+            put(g, mid + 4, yy, 0x6a2a20);
+            yy = yy + 1;
+        }
+        round_rect(g, x0, top, x1 - x0, 7, 3, 0x6a3a1a);
+        round_rect(g, x0 + 1, top, x1 - x0 - 2, 5, 2, 0xc8823a);
+        rect(g, x0 + 2, top, x1 - x0 - 4, 1, 0xf0c070);
+        rect(g, x0 + 1, top + 5, x1 - x0 - 2, 1, 0xffd040);
+        if p == a.end {
+            // (the end: a little flag on a pole, and a star)
+            rect(g, x1 - 9, top - 24, 2, 24, 0xe8dcc0);
+            rect(g, x1 - 8, top - 24, 1, 24, 0x8a7a68);
+            disc(g, x1 - 8, top - 26, 2, 0xffd040);
+            let wave = sin(sines, t * 6) >> 15;
+            let mut r = 0;
+            while r < 6 {
+                rect(g, x1 - 7, top - 24 + r, 9 - r + wave, 1, 0xffc820);
+                r = r + 1;
+            }
+        }
+        p = p + 1;
+    }
+    // the bits
+    let mut b = 0;
+    while b < a.n_bits {
+        let k = a.bk.get(b);
+        let x = a.bx.get(b) - cam;
+        let y = a.by.get(b);
+        if x > -30 && x < sw() + 30 && !taken.get(b) {
+            if k == b_hoop() { hoop(g, x, y, t) }
+            else if k == b_balloon() { balloon(g, x, y, b, t, sines) }
+            else { tramp(g, x, y, t) }
+        }
+        b = b + 1;
+    }
+    // the hooks, on their ropes from up out of sight
+    let mut h = 0;
+    while h < a.n_hooks {
+        let x = hook_x(a, h, t, sines) - cam;
+        let y = hook_y(a, h, t, sines);
+        if x > -30 && x < sw() + 30 {
+            let lit = h == target;
+            let on = h == s.hook && s.state == s_swing();
+            // (each hangs from a rigging line: a swivel, and below it a hand
+            // ring or a trapeze bar; while she's swinging on it, it's in her
+            // hands, drawn with her)
+            line(g, x, -5, x, y - 3, 0x9a8a78, 256);
+            disc(g, x, y, 2, 0x5a4a3a);
+            put(g, x, y, if lit || on { 0xfff080 } else { 0xb89a50 });
+            if !on {
+                let c = if lit { 0xfff080 } else { 0xe8b840 };
+                if a.hk.get(h) == h_ring() {
+                    line(g, x, y + 2, x, y + 6, 0xe8dcc0, 256);
+                    ring(g, x, y + 10, 4, 2, 0x5a3a1a, 256);
+                    ring(g, x, y + 10, 4, 1, c, 256);
+                } else {
+                    line(g, x - 1, y + 2, x - 6, y + 12, 0xe8dcc0, 256);
+                    line(g, x + 1, y + 2, x + 6, y + 12, 0xe8dcc0, 256);
+                    rect(g, x - 8, y + 11, 17, 4, 0x3a2a1a);
+                    rect(g, x - 7, y + 12, 15, 2, c);
+                }
+            }
+            if lit {
+                let pulse = (sin(sines, t * 12) >> 14) + 6;
+                ring(g, x, y + 8, 7 + pulse / 2, 1, 0xfff4b0, 170);
+                glow(g, x, y + 8, 14, 0x302810);
+            }
+        }
+        h = h + 1;
+    }
+    // the safety net
+    net(g, cam);
+}
+
+fn hoop(g: Gfx, x: Int, y: Int, t: Int) {
+    // (an upright ring wound with ribbon, red and white)
+    let mut dy = -12;
+    while dy <= 12 {
+        let w = isqrt((144 - dy * dy) * 36 / 144);
+        let c = if ((dy + 12 + t / 4) / 3) % 2 == 0 { 0xe8402e } else { 0xf8f4ec };
+        put(g, x - w, y + dy, c);
+        put(g, x - w - 1, y + dy, scale(c, 180));
+        put(g, x + w, y + dy, c);
+        put(g, x + w + 1, y + dy, scale(c, 180));
+        dy = dy + 1;
+    }
+}
+
+fn balloon(g: Gfx, x: Int, y: Int, b: Int, t: Int, sines: Array<Int>) {
+    let c = [0xe8402e, 0x3a8ae8, 0xffc820, 0x5ac04a, 0xff7ab0].get(b % 5).unwrap_or(0xffffff);
+    let bob = sin(sines, t * 4 + b * 100) >> 14;
+    let yy = y + bob;
+    line(g, x, yy + 5, x + (sin(sines, t * 3 + b * 50) >> 15), yy + 14, 0xd8d0c0, 256);
+    disc(g, x, yy, 4, scale(c, 200));
+    disc(g, x, yy - 1, 3, c);
+    put(g, x - 1, yy - 3, 0xffffff);
+    put(g, x, yy + 5, scale(c, 160));
+}
+
+fn tramp(g: Gfx, x: Int, y: Int, t: Int) {
+    // (legs down to the ring, a red frame, a striped bed on springs, and
+    // chevrons over it, pulsing: bounce here)
+    rect(g, x - 17, y + 2, 3, 30, 0x4a4a5a);
+    rect(g, x + 15, y + 2, 3, 30, 0x4a4a5a);
+    rect(g, x - 20, y - 1, 41, 5, 0x5a0a10);
+    rect(g, x - 19, y, 39, 3, 0xe8402e);
+    let mut i = 0;
+    while i < 33 {
+        put(g, x - 16 + i, y - 1, if (i / 3) % 2 == 0 { 0x3a8ae8 } else { 0xf4f0e8 });
+        i = i + 1;
+    }
+    let lift = (t / 6) % 3;
+    let mut k = 0;
+    while k < 2 {
+        let cy = y - 8 - k * 5 - lift;
+        line(g, x - 4, cy + 3, x, cy, 0xfff4c0, 200);
+        line(g, x, cy, x + 4, cy + 3, 0xfff4c0, 200);
+        k = k + 1;
+    }
+}
+
+// the net: a mesh sagging across the ring, its knots catching the light
+fn net(g: Gfx, cam: Int) {
+    let ny = net_y() + 4;
+    let mut x = 0;
+    while x < sw() {
+        let u = x + cam;
+        let sag = ((u % 160) * (160 - u % 160)) / 1600;
+        let y = ny + sag;
+        put(g, x, y, 0xe8dcc0);
+        // (the mesh: diagonals down from the edge)
+        if (u % 8) == 0 {
+            let mut d = 1;
+            while d < 10 {
+                blend(g, x + d, y + d, 0xd8c8a8, 150);
+                blend(g, x - d, y + d, 0xd8c8a8, 150);
+                d = d + 1;
+            }
+        }
+        x = x + 1;
+    }
+}
+
+// ---- Stella
+
+// a point of her skeleton (dx, dy from her middle, pixels) turned by her angle
+fn turn(sines: Array<Int>, angle: Int, dx: Int, dy: Int, ox: Int) -> Int {
+    let c = cos(sines, angle);
+    let s = sin(sines, angle);
+    ox + ((dx * c - dy * s) >> 16)
+}
+fn turn_y(sines: Array<Int>, angle: Int, dx: Int, dy: Int, oy: Int) -> Int {
+    let c = cos(sines, angle);
+    let s = sin(sines, angle);
+    oy + ((dx * s + dy * c) >> 16)
+}
+
+pub fn draw_stella(g: Gfx, v: View, s: Stella, a: Act, t: Int, sines: Array<Int>) {
+    let x = s.x / 256 - v.cam;
+    let y = s.y / 256;
+    let ang = s.angle;
+    let st = s.state;
+    // the rope, from her hands to the hook
+    if st == s_swing() {
+        let hx = hook_x(a, s.hook, t, sines) - v.cam;
+        let hy = hook_y(a, s.hook, t, sines);
+        let hand_x = turn(sines, ang, 0, -88, x * 5) / 5;
+        let hand_y = turn_y(sines, ang, 0, -88, y * 5) / 5;
+        if a.hk.get(s.hook) == h_ring() {
+            // (a rope to the ring in her hands)
+            line(g, hand_x + 1, hand_y, hx + 1, hy, 0x5a3a1a, 256);
+            line(g, hand_x, hand_y, hx, hy, 0xf4e8c8, 256);
+            ring(g, hand_x, hand_y, 3, 1, 0xfff080, 256);
+        } else {
+            // (the trapeze: two ropes, the bar across her hands)
+            let px = turn(sines, ang, 30, 0, 0) / 5;
+            let py = turn_y(sines, ang, 30, 0, 0) / 5;
+            line(g, hand_x - px, hand_y - py, hx - 1, hy, 0xf4e8c8, 256);
+            line(g, hand_x + px, hand_y + py, hx + 1, hy, 0xf4e8c8, 256);
+            line(g, hand_x - px - 1, hand_y - py + 1, hand_x + px + 1, hand_y + py + 1, 0x3a2a1a, 256);
+            line(g, hand_x - px - 1, hand_y - py, hand_x + px + 1, hand_y + py, 0xfff080, 256);
+        }
+    }
+    // speed lines, when she's flying fast
+    let sp = speed(s);
+    if sp > 7 * 256 && st != s_stand() {
+        let mut k = 0;
+        while k < 4 {
+            let ox = (k * 5) % 9 - 4;
+            let oy = (k * 7) % 11 - 5;
+            line(g, x + ox, y + oy, x + ox - s.vx * 3 / 256, y + oy - s.vy * 3 / 256, 0xfff8e0, 90);
+            k = k + 1;
+        }
+    }
+    // the scarf, streaming
+    let mut i = 1;
+    while i < scarf_len() {
+        let x0 = s.sx.get(i - 1) / 256 - v.cam;
+        let y0 = s.sy.get(i - 1) / 256;
+        let x1 = s.sx.get(i) / 256 - v.cam;
+        let y1 = s.sy.get(i) / 256;
+        thick(g, x0, y0, x1, y1, if i % 2 == 0 { 0x4ae0d8 } else { 0x2ac0b8 }, 1);
+        line(g, x0, y0 + 2, x1, y1 + 2, 0x1a7a78, 256);
+        i = i + 1;
+    }
+    // the pose: where her limbs go, upright (dy up is negative), in
+    // fifths of a pixel (so she's drawn a bit bigger than she moves)
+    let tuck = s.tuck && st == s_air();
+    let squash = s.squash;
+    let (hx0, hy0, fx0, fy0, knee_x, knee_y) = if tuck { (16, -32, 16, 24, 32, 0) }
+        else if st == s_swing() { (0, -88, 0, 56, 0, 24) }
+        else if st == s_air() { (32, -64, -8, 56, 8, 24) }
+        else if squash > 0 { (24, -24, -16, 40, 24, 24) }
+        else { (16, 0, 8, 48, 8, 24) };
+    let head_y = if squash > 0 { -40 } else { -56 };
+    let leg = 0xf8f0f0;
+    let suit = 0xe8308a;
+    let skin = 0xf4caa0;
+    let hipx = turn(sines, ang, 0, 0, x * 5) / 5;
+    let hipy = turn_y(sines, ang, 0, 0, y * 5) / 5;
+    let kx = turn(sines, ang, knee_x, knee_y, x * 5) / 5;
+    let ky = turn_y(sines, ang, knee_x, knee_y, y * 5) / 5;
+    let fx = turn(sines, ang, fx0, fy0, x * 5) / 5;
+    let fy = turn_y(sines, ang, fx0, fy0, y * 5) / 5;
+    let shx = turn(sines, ang, 0, -40, x * 5) / 5;
+    let shy = turn_y(sines, ang, 0, -40, y * 5) / 5;
+    let hx = turn(sines, ang, hx0, hy0, x * 5) / 5;
+    let hy = turn_y(sines, ang, hx0, hy0, y * 5) / 5;
+    let hdx = turn(sines, ang, 0, head_y, x * 5) / 5;
+    let hdy = turn_y(sines, ang, 0, head_y, y * 5) / 5;
+    let bx = turn(sines, ang, -14, head_y - 14, x * 5) / 5;
+    let by = turn_y(sines, ang, -14, head_y - 14, y * 5) / 5;
+    // (a dark edge under everything first, so she reads against anything)
+    let edge = 0x2a0a1a;
+    thick(g, hipx, hipy, kx, ky, edge, 2);
+    thick(g, kx, ky, fx, fy, edge, 2);
+    thick(g, hipx, hipy, shx, shy, edge, 3);
+    thick(g, shx, shy, hx, hy, edge, 2);
+    disc(g, hdx, hdy, 4, edge);
+    // legs, body (a sparkly leotard), arms, head and her bun
+    thick(g, hipx, hipy, kx, ky, leg, 1);
+    thick(g, kx, ky, fx, fy, leg, 1);
+    thick(g, hipx, hipy, shx, shy, suit, 2);
+    line(g, hipx - 1, hipy, shx - 1, shy, mix(suit, 0xffffff, 80), 256);
+    if (t / 8) % 3 == 0 { put(g, (hipx + shx) / 2, (hipy + shy) / 2, 0xffffff) }
+    thick(g, shx, shy, hx, hy, skin, 1);
+    disc(g, hdx, hdy, 3, skin);
+    disc(g, bx, by, 2, 0xb83a1a);
+    put(g, hdx + (if s.vx >= 0 { 1 } else { -1 }), hdy - 1, 0x3a1a10);
+}
+
+// a line a few pixels thick (w: 1 two wide, 2 three wide)
+fn thick(g: Gfx, x0: Int, y0: Int, x1: Int, y1: Int, color: Int, w: Int) {
+    line(g, x0, y0, x1, y1, color, 256);
+    line(g, x0 + 1, y0, x1 + 1, y1, color, 256);
+    if w >= 2 {
+        line(g, x0, y0 + 1, x1, y1 + 1, color, 256);
+        line(g, x0 - 1, y0, x1 - 1, y1, color, 256);
+    }
+    if w >= 3 {
+        line(g, x0, y0 - 1, x1, y1 - 1, color, 256);
+        line(g, x0 + 1, y0 + 1, x1 + 1, y1 + 1, color, 256);
+    }
+}
+
+// ---- the flourishes: particles, words popping up
+
+pub fn draw_parts(g: Gfx, f: Fx) {
+    let mut i = 0;
+    while i < max_parts() {
+        let l = f.life.get(i);
+        if l > 0 {
+            let k = f.kind.get(i);
+            let x = (f.x.get(i) >> 8) + g.ox;
+            let y = (f.y.get(i) >> 8) + g.oy;
+            let c = f.color.get(i);
+            let fade = l * 256 / f.full.get(i);
+            if k == p_dot() {
+                put(g, x, y, c);
+            } else if k == p_spark() {
+                add(g, x, y, scale(c, fade));
+                add(g, x + 1, y, scale(c, fade / 2));
+            } else if k == p_confetti() {
+                rect(g, x, y, 2, if (l / 3) % 2 == 0 { 1 } else { 2 }, if (l / 4) % 2 == 0 { c } else { mix(c, 0x5ad0ff, 160) });
+            } else if k == p_ring() {
+                ring(g, x, y, (f.full.get(i) - l) + 3, 1, c, fade);
+            } else if k == p_dust() {
+                disc_blend(g, x, y, 1 + (f.full.get(i) - l) / 5, c, fade / 3);
+            } else if k == p_petal() {
+                put(g, x, y, c);
+                put(g, x + 1, y + (l / 8) % 2, scale(c, 220));
+            } else {
+                put(g, x, y, if l % 6 < 3 { c } else { 0xffffff });
+                if fade > 100 {
+                    blend(g, x - 1, y, c, 120);
+                    blend(g, x + 1, y, c, 120);
+                    blend(g, x, y - 1, c, 120);
+                    blend(g, x, y + 1, c, 120);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_pops() {
+        let l = f.pop_life.get(i);
+        if l > 0 && (l > 6 || (l / 2) % 2 == 0) {
+            let size = f.pop_size.get(i);
+            let age = (if size > 1 { 80 } else { 50 }) - l;
+            let k = if age < 4 { size + 1 } else { size };
+            say_mid(g, f.pop_text.get(i), f.pop_x.get(i) + g.ox, f.pop_y.get(i) + g.oy, k, f.pop_color.get(i), 0x2a0a1a);
+        }
+        i = i + 1;
+    }
+}
+
+// everything that's in screen space moved with the camera (by dx pixels)
+pub fn shift_parts(f: Fx, dx: Int) {
+    if dx != 0 {
+        let mut i = 0;
+        while i < max_parts() {
+            f.x.set(i, f.x.get(i) + dx * 256);
+            i = i + 1;
+        }
+        i = 0;
+        while i < max_pops() {
+            f.pop_x.set(i, f.pop_x.get(i) + dx);
+            i = i + 1;
+        }
+    }
+}
+
+// the angle from the middle to (dx, dy), 1024ths of a turn, clockwise from the right
+pub fn angle_of(t: Array<Int>, dx: Int, dy: Int) -> Int {
+    if dx == 0 && dy == 0 { 0 } else {
+        let ax = dx.abs();
+        let ay = dy.abs();
+        let lo = ax.min(ay);
+        let hi = ax.max(ay);
+        let mut a = 0;
+        let mut b = 128;
+        while b - a > 1 {
+            let m = (a + b) / 2;
+            if sin(t, m) * hi > cos(t, m) * lo { b = m } else { a = m }
+        }
+        let oct = if ax >= ay { a } else { 256 - a };
+        if dx >= 0 && dy >= 0 { oct } else if dx < 0 && dy >= 0 { 512 - oct } else if dx < 0 { 512 + oct } else { (1024 - oct) & 1023 }
+    }
+}

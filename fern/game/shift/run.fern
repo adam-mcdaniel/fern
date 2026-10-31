@@ -1,0 +1,507 @@
+// A shift: everything in it, and the bookkeeping the rest shares.
+//
+// What there are many of (creatures, shots, scrap on the floor, sparks)
+// is kept in pools: a column (an array) for each of their numbers, a row
+// for each one, the rows in use packed at the front. A row is added at the
+// end, and the dead are swept out at the end of each frame, the last row
+// moving into each one's place. Positions are in 16ths of a pixel.
+//
+// The shift's own numbers (where the robot is, how hurt, the time) are
+// the Run's fields, set as it goes: r.hp = r.hp - 16.
+
+use crate::math::{rng, random, sines, isqrt};
+use super::world::{World, size, cells, blocks, relay_count, occ_at};
+use super::light::{Still, still};
+
+// ---- pools
+
+// (its columns, how many rows are in use, and how many there can be)
+pub struct Pool { cols: Array<Array<Int>>, n: Int, cap: Int }
+
+pub fn pool(fields: Int, cap: Int) -> Pool {
+    let cols = array(fields, array(0, 0));
+    let mut i = 0;
+    while i < fields {
+        cols.set(i, array(cap, 0));
+        i = i + 1;
+    }
+    Pool { cols: cols, n: 0, cap: cap }
+}
+
+pub fn count(p: Pool) -> Int { p.n }
+pub fn col(p: Pool, f: Int) -> Array<Int> { p.cols.get(f) }
+pub fn clear(p: Pool) { p.n = 0 }
+
+// a new row, all zeros: its index, or -1 if the pool is full
+pub fn spawn(p: Pool) -> Int {
+    let i = count(p);
+    if i >= p.cap { -1 } else {
+        let mut f = 0;
+        while f < p.cols.len() {
+            p.cols.get(f).set(i, 0);
+            f = f + 1;
+        }
+        p.n = i + 1;
+        i
+    }
+}
+
+// the rows whose column `alive` is no longer above 0, gone
+pub fn sweep(p: Pool, alive: Int) {
+    let a = col(p, alive);
+    let fields = p.cols.len();
+    let mut n = count(p);
+    let mut i = 0;
+    while i < n {
+        if a.get(i) <= 0 {
+            n = n - 1;
+            if i < n {
+                let mut f = 0;
+                while f < fields {
+                    let c = p.cols.get(f);
+                    c.set(i, c.get(n));
+                    f = f + 1;
+                }
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    p.n = n;
+}
+
+// ---- the creatures
+
+pub struct Foes {
+    p: Pool,
+    x: Array<Int>, y: Array<Int>,
+    // knocked back: how fast, in 16ths of a pixel a frame
+    vx: Array<Int>, vy: Array<Int>,
+    hp: Array<Int>, max: Array<Int>, kind: Array<Int>,
+    // frames left of looking hit
+    flash: Array<Int>,
+    // a timer, and what it's doing (each kind its own)
+    t: Array<Int>, state: Array<Int>,
+    elite: Array<Int>,
+    // frames until the drones, a puddle or the laser can hurt it again
+    drone: Array<Int>, wet: Array<Int>, beam: Array<Int>,
+    // the last shockwave to hit it
+    ring: Array<Int>,
+    speed: Array<Int>, dmg: Array<Int>, r: Array<Int>, xp: Array<Int>,
+    // where it's headed (an angle, a relay, ...)
+    aim: Array<Int>,
+    id: Array<Int>,
+}
+
+pub fn foes(cap: Int) -> Foes {
+    let p = pool(21, cap);
+    Foes {
+        p: p, x: col(p, 0), y: col(p, 1), vx: col(p, 2), vy: col(p, 3), hp: col(p, 4), max: col(p, 5),
+        kind: col(p, 6), flash: col(p, 7), t: col(p, 8), state: col(p, 9), elite: col(p, 10),
+        drone: col(p, 11), wet: col(p, 12), beam: col(p, 13), ring: col(p, 14), speed: col(p, 15),
+        dmg: col(p, 16), r: col(p, 17), xp: col(p, 18), aim: col(p, 19), id: col(p, 20),
+    }
+}
+
+// the kinds
+pub fn sporeling() -> Int { 0 }
+pub fn flicker() -> Int { 1 }
+pub fn bloater() -> Int { 2 }
+pub fn drifter() -> Int { 3 }
+pub fn spitter() -> Int { 4 }
+pub fn chewer() -> Int { 5 }
+pub fn stalker() -> Int { 6 }
+pub fn boss() -> Int { 7 }
+
+// ---- the other pools' columns (by number)
+
+// shots: the player's
+pub fn sh_x() -> Int { 0 }
+pub fn sh_y() -> Int { 1 }
+pub fn sh_vx() -> Int { 2 }
+pub fn sh_vy() -> Int { 3 }
+pub fn sh_life() -> Int { 4 }
+pub fn sh_kind() -> Int { 5 }
+pub fn sh_dmg() -> Int { 6 }
+pub fn sh_pierce() -> Int { 7 }
+pub fn sh_r() -> Int { 8 }
+pub fn sh_hit() -> Int { 9 }
+pub fn sh_t() -> Int { 10 }
+
+// bolts: the creatures' shots at the player
+pub fn bo_x() -> Int { 0 }
+pub fn bo_y() -> Int { 1 }
+pub fn bo_vx() -> Int { 2 }
+pub fn bo_vy() -> Int { 3 }
+pub fn bo_life() -> Int { 4 }
+pub fn bo_dmg() -> Int { 5 }
+
+// drops: scrap (experience), and other things to pick up
+pub fn dr_x() -> Int { 0 }
+pub fn dr_y() -> Int { 1 }
+pub fn dr_kind() -> Int { 2 }
+pub fn dr_value() -> Int { 3 }
+pub fn dr_pull() -> Int { 4 }
+pub fn dr_t() -> Int { 5 }
+
+// sparks: x, y, vx, vy, life, max, color, kind
+pub fn sp_x() -> Int { 0 }
+pub fn sp_y() -> Int { 1 }
+pub fn sp_vx() -> Int { 2 }
+pub fn sp_vy() -> Int { 3 }
+pub fn sp_life() -> Int { 4 }
+pub fn sp_max() -> Int { 5 }
+pub fn sp_color() -> Int { 6 }
+pub fn sp_kind() -> Int { 7 }
+
+// numbers: how much a hit did, floating up
+pub fn nu_x() -> Int { 0 }
+pub fn nu_y() -> Int { 1 }
+pub fn nu_value() -> Int { 2 }
+pub fn nu_life() -> Int { 3 }
+pub fn nu_color() -> Int { 4 }
+
+// puddles of cleaner on the floor
+pub fn pu_x() -> Int { 0 }
+pub fn pu_y() -> Int { 1 }
+pub fn pu_life() -> Int { 2 }
+pub fn pu_r() -> Int { 3 }
+pub fn pu_dmg() -> Int { 4 }
+pub fn pu_max() -> Int { 5 }
+
+// rings: shockwaves spreading
+pub fn ri_x() -> Int { 0 }
+pub fn ri_y() -> Int { 1 }
+pub fn ri_r() -> Int { 2 }
+pub fn ri_max() -> Int { 3 }
+pub fn ri_dmg() -> Int { 4 }
+pub fn ri_id() -> Int { 5 }
+pub fn ri_life() -> Int { 6 }
+
+// zaps: lightning, a stroke each
+pub fn za_x0() -> Int { 0 }
+pub fn za_y0() -> Int { 1 }
+pub fn za_x1() -> Int { 2 }
+pub fn za_y1() -> Int { 3 }
+pub fn za_life() -> Int { 4 }
+pub fn za_seed() -> Int { 5 }
+
+// flashes: bursts of light (pixels)
+pub fn fl_x() -> Int { 0 }
+pub fn fl_y() -> Int { 1 }
+pub fn fl_r() -> Int { 2 }
+pub fn fl_life() -> Int { 3 }
+pub fn fl_max() -> Int { 4 }
+pub fn fl_lamp() -> Int { 5 }
+pub fn fl_bloom() -> Int { 6 }
+
+// ---- the shift
+
+pub struct Run {
+    w: World,
+    still: Still,
+    // each relay: lit (1) or not (0), and how near to catching it is
+    lit: Array<Int>,
+    heat: Array<Int>,
+    // what the light that stays was last worked out with
+    baked: Array<Int>,
+    foes: Foes,
+    shots: Pool, bolts: Pool, drops: Pool, sparks: Pool, nums: Pool,
+    puddles: Pool, rings: Pool, zaps: Pool, flashes: Pool,
+    // the robot: where (16ths of a pixel), its integrity (16ths), frames
+    // it can't be hurt for and has looked hurt for, which way it faces
+    // (1024ths of a turn), which way it last moved (256 long), whether it's
+    // moving, and the self-repair and the relays' repair counting up
+    x: Int, y: Int, hp: Int, iframes: Int, hurt: Int, face: Int,
+    mvx: Int, mvy: Int, moving: Int, regen: Int, heal_t: Int,
+    // how it's doing: scrap toward the next level, the level, levels and
+    // crates still to open, frames gone, creatures cleared, credits found,
+    // whether the backup cell has been used, whether it's down, and whether
+    // the boss is dead
+    xp: Int, level: Int, ups: Int, crates: Int, time: Int, frame: Int,
+    kills: Int, credits: Int, revives: Int, dead: Int, won: Int,
+    // the camera (pixels, and 16ths between frames), its shake, and frames
+    // the action is frozen for (a hit landing)
+    camx: Int, camy: Int, camfx: Int, camfy: Int, shake: Int, freeze: Int,
+    // the drones' and lasers' angles, and the last shockwave's number
+    drones: Int, beam: Int, shock: Int,
+    // the creatures' numbers so far, the boss's (-1 before it comes),
+    // frames left of its blackout, and how far the power's come back
+    ids: Int, boss: Int, dark: Int, power: Int,
+    // where, and who: the region and the robot
+    region: Int, char: Int,
+    // scrap gathered in a run, and when the last of it was
+    chain: Int, chain_t: Int,
+    // the sounds asked for this frame, and the banner and its frames left
+    nsounds: Int, banner: String, banner_t: Int,
+    // what the robot has: each upgrade's level (0 if not), each weapon's
+    // cooldown, whether it's evolved, and the damage it's done
+    lv: Array<Int>,
+    cd: Array<Int>,
+    evo: Array<Int>,
+    dealt: Array<Int>,
+    stat: Array<Int>,
+    table: Array<Int>,
+    dice: Array<Int>,
+    // the creatures by where they are, a cell of 16 pixels each: the
+    // first in each cell, and the next after each
+    head: Array<Int>,
+    next: Array<Int>,
+    near: Array<Int>,
+    // the way to the player from each tile (8 pixels) near: a direction
+    // (0 east, then round clockwise by eighths), or -1
+    pass: Array<Int>,
+    way: Array<Int>,
+    dist: Array<Int>,
+    queue: Array<Int>,
+    // which search last reached each tile, and how many there have been
+    seen: Array<Int>,
+    searches: Int,
+    // sounds to play: what, a number for it, and where (pan), three cells each
+    sounds: Array<Int>,
+    // the workshop's upgrades, bought between shifts (see save.fern)
+    meta: Array<Int>,
+}
+
+// the player's stats: percentages (100 is as it starts), or amounts
+pub fn st_might() -> Int { 0 }
+pub fn st_area() -> Int { 1 }
+pub fn st_speed() -> Int { 2 }
+pub fn st_haste() -> Int { 3 }
+pub fn st_magnet() -> Int { 4 }
+pub fn st_maxhp() -> Int { 5 }
+pub fn st_regen() -> Int { 6 }
+pub fn st_armor() -> Int { 7 }
+pub fn st_amount() -> Int { 8 }
+pub fn st_greed() -> Int { 9 }
+pub fn st_light() -> Int { 10 }
+pub fn st_choices() -> Int { 11 }
+
+pub fn stat(r: Run, s: Int) -> Int { r.stat.get(s) }
+
+pub fn grid() -> Int { 96 }
+pub fn tiles() -> Int { 192 }
+
+pub fn new_run(w: World, region: Int, character: Int, meta: Array<Int>, seed: Int) -> Run {
+    let foes_cap = 900;
+    let r = Run {
+        w: w,
+        still: still(),
+        lit: array(relay_count(w), 0),
+        heat: array(relay_count(w), 0),
+        baked: array(relay_count(w), -1),
+        foes: foes(foes_cap),
+        shots: pool(11, 500), bolts: pool(6, 300), drops: pool(6, 900), sparks: pool(8, 2400), nums: pool(5, 80),
+        puddles: pool(6, 80), rings: pool(7, 16), zaps: pool(6, 160), flashes: pool(7, 64),
+        x: w.start_x * 16, y: w.start_y * 16, hp: 0, iframes: 0, hurt: 0, face: 768,
+        mvx: 0, mvy: 0, moving: 0, regen: 0, heal_t: 0,
+        xp: 0, level: 1, ups: 0, crates: 0, time: 0, frame: 0,
+        kills: 0, credits: 0, revives: 0, dead: 0, won: 0,
+        camx: 0, camy: 0, camfx: 0, camfy: 0, shake: 0, freeze: 0,
+        drones: 0, beam: 0, shock: 0,
+        ids: 0, boss: -1, dark: 0, power: 0,
+        region: region, char: character,
+        chain: 0, chain_t: 0,
+        nsounds: 0, banner: "", banner_t: 0,
+        lv: array(14, 0),
+        cd: array(8, 0),
+        evo: array(8, 0),
+        dealt: array(8, 0),
+        stat: array(16, 0),
+        table: sines(),
+        dice: rng(seed),
+        head: array(grid() * grid(), -1),
+        next: array(foes_cap, -1),
+        near: array(1024, 0),
+        pass: array(tiles() * tiles(), 0),
+        way: array(tiles() * tiles(), -1),
+        dist: array(tiles() * tiles(), -1),
+        queue: array(tiles() * tiles(), 0),
+        seen: array(tiles() * tiles(), 0),
+        searches: 0,
+        sounds: array(3 * 64, 0),
+        meta: meta,
+    };
+    // (the first relay, the one in the middle, is on already)
+    r.lit.set(0, 1);
+    // which tiles can be walked through
+    let mut ty = 0;
+    while ty < tiles() {
+        let mut tx = 0;
+        while tx < tiles() {
+            let free = occ_at(w, tx * 8 + 1, ty * 8 + 1) < blocks() && occ_at(w, tx * 8 + 6, ty * 8 + 1) < blocks()
+                && occ_at(w, tx * 8 + 1, ty * 8 + 6) < blocks() && occ_at(w, tx * 8 + 6, ty * 8 + 6) < blocks();
+            r.pass.set(ty * tiles() + tx, if free { 1 } else { 0 });
+            tx = tx + 1;
+        }
+        ty = ty + 1;
+    }
+    r
+}
+
+pub fn roll(r: Run, n: Int) -> Int { random(r.dice, n.max(1)) }
+
+// a sound to play this frame, heard from where it is (x in 16ths of a pixel)
+pub fn sound(r: Run, what: Int, n: Int, x: Int) {
+    let k = r.nsounds;
+    if k < 64 {
+        r.sounds.set(k * 3, what);
+        r.sounds.set(k * 3 + 1, n);
+        let pan = ((x - r.x) / 16 * 100 / 260).clamp(-90, 90);
+        r.sounds.set(k * 3 + 2, pan);
+        r.nsounds = k + 1;
+    }
+}
+
+pub fn announce(r: Run, s: String) {
+    r.banner = s;
+    r.banner_t = 210;
+}
+
+pub fn minute(r: Run) -> Int { r.time / 3600 }
+
+// ---- where the creatures are
+
+// each creature put in its cell
+pub fn sort_foes(r: Run) {
+    let f = r.foes;
+    let n = count(f.p);
+    let g = grid();
+    let mut i = 0;
+    while i < g * g {
+        r.head.set(i, -1);
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        let c = ((f.y.get(i) >> 8).clamp(0, g - 1)) * g + (f.x.get(i) >> 8).clamp(0, g - 1);
+        r.next.set(i, r.head.get(c));
+        r.head.set(c, i);
+        i = i + 1;
+    }
+}
+
+// the creatures (still alive) whose middles are within `range` pixels of
+// (x, y) (in 16ths), into r.near; how many
+pub fn nearby(r: Run, x: Int, y: Int, range: Int) -> Int {
+    let f = r.foes;
+    let g = grid();
+    let (px, py) = (x >> 4, y >> 4);
+    let reach = range + 24;
+    let cx0 = ((px - reach) >> 4).max(0);
+    let cx1 = ((px + reach) >> 4).min(g - 1);
+    let cy1 = ((py + reach) >> 4).min(g - 1);
+    let r2 = range * range * 256;
+    let mut found = 0;
+    let mut cy = ((py - reach) >> 4).max(0);
+    while cy <= cy1 {
+        let mut cx = cx0;
+        while cx <= cx1 {
+            let mut i = r.head.get(cy * g + cx);
+            while i >= 0 {
+                let dx = f.x.get(i) - x;
+                let dy = f.y.get(i) - y;
+                if dx * dx + dy * dy <= r2 && f.hp.get(i) > 0 && found < 1024 {
+                    r.near.set(found, i);
+                    found = found + 1;
+                }
+                i = r.next.get(i);
+            }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    found
+}
+
+// the nearest creature to (x, y) within range pixels, or -1
+pub fn nearest(r: Run, x: Int, y: Int, range: Int) -> Int {
+    let n = nearby(r, x, y, range);
+    let f = r.foes;
+    let mut best = -1;
+    let mut best_d = 1 << 60;
+    let mut i = 0;
+    while i < n {
+        let j = r.near.get(i);
+        let dx = f.x.get(j) - x;
+        let dy = f.y.get(j) - y;
+        if dx * dx + dy * dy < best_d {
+            best_d = dx * dx + dy * dy;
+            best = j;
+        }
+        i = i + 1;
+    }
+    best
+}
+
+// ---- the way to the player
+
+pub fn dir_x(d: Int) -> Int { if d == 0 { 256 } else if d == 1 || d == 7 { 181 } else if d == 3 || d == 5 { -181 } else if d == 4 { -256 } else { 0 } }
+pub fn dir_y(d: Int) -> Int { if d == 2 { 256 } else if d == 1 || d == 3 { 181 } else if d == 5 || d == 7 { -181 } else if d == 6 { -256 } else { 0 } }
+
+// a breadth-first search out from the robot's tile, as far as 56 tiles:
+// each tile it reaches is told the way back, the opposite of the way the
+// search came into it. (Not diagonally past a corner.) A tile's way and
+// distance are this search's if it's marked with this search's number, so
+// nothing needs clearing first.
+pub fn find_ways(r: Run) {
+    let t = tiles();
+    r.searches = r.searches + 1;
+    let mark = r.searches;
+    let (seen, dist, way, queue, pass) = (r.seen, r.dist, r.way, r.queue, r.pass);
+    let start = ((r.y >> 7).clamp(0, t - 1)) * t + (r.x >> 7).clamp(0, t - 1);
+    seen.set(start, mark);
+    dist.set(start, 0);
+    way.set(start, -1);
+    queue.set(0, start);
+    let mut head = 0;
+    let mut tail = 1;
+    while head < tail {
+        let c = queue.get(head);
+        head = head + 1;
+        let d = dist.get(c);
+        if d < 56 {
+            let (cx, cy) = (c % t, c / t);
+            let mut k = 0;
+            while k < 8 {
+                let dx = if k == 0 || k == 1 || k == 7 { 1 } else if k >= 3 && k <= 5 { -1 } else { 0 };
+                let dy = if k >= 1 && k <= 3 { 1 } else if k >= 5 { -1 } else { 0 };
+                let nx = cx + dx;
+                let ny = cy + dy;
+                if nx >= 0 && ny >= 0 && nx < t && ny < t {
+                    let nb = ny * t + nx;
+                    if seen.get(nb) != mark && pass.get(nb) == 1 && (dx == 0 || dy == 0 || (pass.get(cy * t + nx) == 1 && pass.get(ny * t + cx) == 1)) {
+                        seen.set(nb, mark);
+                        dist.set(nb, d + 1);
+                        way.set(nb, (k + 4) % 8);
+                        queue.set(tail, nb);
+                        tail = tail + 1;
+                    }
+                }
+                k = k + 1;
+            }
+        }
+    }
+}
+
+// the way toward the player from (x, y) (16ths): a direction, or -1
+pub fn way_at(r: Run, x: Int, y: Int) -> Int {
+    let t = tiles();
+    let (tx, ty) = (x >> 7, y >> 7);
+    if tx < 0 || ty < 0 || tx >= t || ty >= t || r.seen.get(ty * t + tx) != r.searches { -1 } else { r.way.get(ty * t + tx) }
+}
+
+// a length, near enough: the longer side and a bit of the shorter (for
+// pushing creatures apart, where a square root each would cost too much)
+pub fn length(dx: Int, dy: Int) -> Int {
+    let (a, b) = (dx.abs(), dy.abs());
+    if a > b { a + b * 3 / 8 } else { b + a * 3 / 8 }
+}
+
+pub fn dist(dx: Int, dy: Int) -> Int { isqrt(dx * dx + dy * dy) }
+
+// whether a pixel (in 16ths) is somewhere a walker can be
+pub fn walkable16(r: Run, x: Int, y: Int) -> Bool { occ_at(r.w, x >> 4, y >> 4) < blocks() }
+
+// whether a point (16ths) is on the deck, inside its edge
+pub fn inside(x: Int, y: Int) -> Bool { x > 48 * 16 && y > 48 * 16 && x < (size() - 48) * 16 && y < (size() - 48) * 16 }

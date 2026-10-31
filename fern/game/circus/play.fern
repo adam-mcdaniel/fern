@@ -1,0 +1,213 @@
+// An act in play: Stella's run, the clock, and the style she shows.
+//
+// Style is scored for the crowd: a full flip in the air (tucking spins
+// her faster), a hoop flown through, a balloon popped, a release at a
+// fine angle and speed, and a landing on her feet; each worth more in a
+// combo, which grows with every hook caught soon after the last and ends
+// when she lands or falls. A fall is into the net, and back to the start
+// (the clock keeps running). Landing on the far platform ends the act:
+// a star for finishing, one for beating the time, one for the style.
+//
+// Pure, like BUMPER CROP's week: it asks fx for flourishes and sounds.
+
+use super::acts::*;
+use super::body::*;
+use super::fx::*;
+use super::scene::*;
+
+pub struct Show {
+    a: Act,
+    s: Stella,
+    v: View,
+    fx: Fx,
+    sines: Array<Int>,
+    t: Int,
+    clock: Int,
+    style: Int,
+    combo: Int,
+    falls: Int,
+    flips: Int,
+    // since she last let go (for chains), and the hoops and balloons taken
+    air: Int,
+    taken: Array<Bool>,
+    done: Bool,
+    done_t: Int,
+    stars: Int,
+    // the button as it was
+    was_held: Bool,
+    // after a fall: frames till she's back on the start
+    respawn: Int,
+    // the platform she starts again from after a fall (the last she rested on)
+    check: Int,
+}
+
+pub fn show_act(a: Act, f: Fx, sines: Array<Int>) -> Show {
+    Show {
+        a: a, s: stella(a), v: view(), fx: f, sines: sines,
+        t: 0, clock: 0, style: 0, combo: 0, falls: 0, flips: 0, air: 0,
+        taken: array(max_bits(), false), done: false, done_t: 0, stars: 0, was_held: false, respawn: 0, check: 0,
+    }
+}
+
+fn sx(sh: Show) -> Int { sh.s.x / 256 - sh.v.cam }
+fn sy(sh: Show) -> Int { sh.s.y / 256 }
+
+// style points, in the combo, with a word for them
+fn score(sh: Show, points: Int, word: String, color: Int) {
+    let mult = 1 + sh.combo;
+    sh.style = sh.style + points * mult;
+    let label = if mult > 1 { word ++ " x" ++ mult.show() } else { word };
+    pop(sh.fx, label, sx(sh), sy(sh) - 18, color, 1);
+    sh.v.cheer = (sh.v.cheer + 25).min(90);
+}
+
+// a frame of the act, with the button held or not
+pub fn step_show(sh: Show, held: Bool) {
+    let f = sh.fx;
+    tick_fx(f);
+    sh.t = sh.t + 1;
+    let s = sh.s;
+    let a = sh.a;
+    if sh.respawn > 0 {
+        sh.respawn = sh.respawn - 1;
+        if sh.respawn == 0 {
+            let fresh = stella_on(a, sh.check);
+            s.x = fresh.x;
+            s.y = fresh.y;
+            s.vx = 0;
+            s.vy = 0;
+            s.state = s_stand();
+            s.hook = -1;
+            s.plat = sh.check;
+            s.angle = 0;
+            s.t = 0;
+            sh.combo = 0;
+        }
+    } else if !sh.done {
+        // (the clock starts when she leaps)
+        if sh.clock > 0 || s.state != s_stand() { sh.clock = sh.clock + 1 }
+        let pressed = held && !sh.was_held;
+        let before = s.state;
+        let ev = move_stella(s, a, held, pressed, sh.t, sh.sines);
+        if s.state == s_air() { sh.air = sh.air + 1 }
+        if ev == e_leap() {
+            // (a catch from a leap off a platform isn't a chain)
+            sh.air = 1000;
+            sound(f, sn_whoosh(), 0, 0);
+        } else if ev == e_grab() {
+            // a catch soon after letting go keeps the chain going
+            if sh.air > 0 && sh.air < 70 && before == s_air() {
+                sh.combo = (sh.combo + 1).min(9);
+                // (a catch in a chain: a little style, quietly)
+                sh.style = sh.style + 20 * sh.combo;
+            }
+            sh.air = 0;
+            sound(f, sn_grab(), sh.combo, pan(sh));
+            // (past a platform to rest on counts as resting on it)
+            let mut p = sh.check + 1;
+            while p < a.n_plats && p != a.end {
+                if a.px1.get(p) < s.x / 256 { sh.check = p }
+                p = p + 1;
+            }
+            burst(f, p_star(), sx(sh), sy(sh) - 10, 4, 160, 14, 0xfff4c0);
+        } else if ev == e_release() {
+            sh.air = 1;
+            sound(f, sn_release(), speed(s) / 256, pan(sh));
+            // a fine release: fast, and going up at a good angle
+            if speed(s) > 6 * 256 && s.vy < 0 && -s.vy * 3 > s.vx.abs() && -s.vy < s.vx.abs() * 3 {
+                score(sh, 50, "NICE RELEASE", 0x9af0ff);
+                sound(f, sn_perfect(), 0, pan(sh));
+            }
+        } else if ev == e_land() {
+            let upright = s.angle < 180 || s.angle > 844;
+            if s.state == s_done() {
+                sh.done = true;
+                sh.done_t = 0;
+                if upright { score(sh, 200, "NAILED IT!", 0xffe04a) } else { score(sh, 50, "WOBBLY...", 0xd8c8b0) }
+                stars(sh);
+                burst(f, p_confetti(), sx(sh), sy(sh) - 20, 60, 700, 80, 0xff6a5a);
+                burst(f, p_confetti(), sx(sh), sy(sh) - 20, 40, 600, 80, 0x5ad0ff);
+                sound(f, sn_cheer(), 2, 0);
+                sh.v.cheer = 120;
+            } else {
+                if upright { score(sh, 60, "STEADY", 0xfff0c0) }
+                sound(f, sn_land(), 0, pan(sh));
+                if s.plat > sh.check {
+                    sh.check = s.plat;
+                    pop(f, "a breather", sx(sh), sy(sh) - 34, 0xd8f0ff, 1);
+                }
+            }
+            sh.combo = 0;
+            s.angle = 0;
+            burst(f, p_dust(), sx(sh), sy(sh) + 6, 6, 120, 20, 0xd8c8a0);
+        } else if ev == e_bounce() {
+            score(sh, 40, "BOING", 0x9ad0ff);
+            sound(f, sn_boing(), 0, pan(sh));
+        } else if ev == e_fall() {
+            sh.falls = sh.falls + 1;
+            sh.combo = 0;
+            sh.respawn = 70;
+            pop(f, "Oops!", sx(sh), net_y() - 20, 0xffd0c0, 2);
+            sound(f, sn_net(), 0, pan(sh));
+            sh.v.cheer = 0;
+        }
+        // flips: a whole turn in the air
+        if s.state == s_air() && s.turned >= 1024 {
+            s.turned = s.turned - 1024;
+            sh.flips = sh.flips + 1;
+            score(sh, 100, "FLIP!", 0xffb0e0);
+            sound(f, sn_flip(), sh.combo, pan(sh));
+        }
+        bits(sh);
+    } else {
+        sh.done_t = sh.done_t + 1;
+    }
+    sh.was_held = held;
+    let before_cam = sh.v.cam;
+    follow(sh.v, s, a);
+    shift_parts(f, before_cam - sh.v.cam);
+}
+
+fn pan(sh: Show) -> Int { (sx(sh) - 240) * 100 / 240 }
+
+// hoops flown through, balloons popped
+fn bits(sh: Show) {
+    let a = sh.a;
+    let s = sh.s;
+    let px = s.x / 256;
+    let py = s.y / 256;
+    let mut b = 0;
+    while b < a.n_bits {
+        if !sh.taken.get(b) {
+            let dx = px - a.bx.get(b);
+            let dy = py - a.by.get(b);
+            let k = a.bk.get(b);
+            if k == b_hoop() && dx.abs() < 7 && dy.abs() < 11 {
+                sh.taken.set(b, true);
+                score(sh, 150, "HOOP!", 0xff9a7a);
+                sound(sh.fx, sn_hoop(), 0, pan(sh));
+                burst(sh.fx, p_spark(), a.bx.get(b) - sh.v.cam, a.by.get(b), 16, 400, 20, 0xffe0a0);
+            } else if k == b_balloon() && dx * dx + dy * dy < 64 {
+                sh.taken.set(b, true);
+                score(sh, 100, "POP!", 0xffe04a);
+                sound(sh.fx, sn_pop(), 0, pan(sh));
+                burst(sh.fx, p_confetti(), a.bx.get(b) - sh.v.cam, a.by.get(b), 18, 400, 40, 0xffc820);
+            }
+        }
+        b = b + 1;
+    }
+}
+
+// the act's stars: one for finishing, one for the time, one for the style
+fn stars(sh: Show) {
+    let mut n = 1;
+    if sh.clock <= sh.a.par { n = n + 1 }
+    if sh.style >= sh.a.style_goal { n = n + 1 }
+    sh.stars = n;
+}
+
+pub fn time_ok(sh: Show) -> Bool { sh.clock <= sh.a.par }
+pub fn style_ok(sh: Show) -> Bool { sh.style >= sh.a.style_goal }
+
+// whether a balloon or hoop's been taken (for drawing)
+pub fn taken(sh: Show, b: Int) -> Bool { sh.taken.get(b) }

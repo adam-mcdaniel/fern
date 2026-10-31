@@ -1,0 +1,61 @@
+// Structs: a struct is a block of cells, one per field. A struct value is
+// its address, like an array's: `new` makes one on the heap, `let p: T;` on
+// the stack, and p.field reads or writes a field (C's p->field).
+struct Point { x, y }
+struct Node { value, next }
+
+fn length2(p) {
+    return p.x * p.x + p.y * p.y;
+}
+
+// a new node in front of `list`: the new list
+fn push(list, value) {
+    let n = new Node;
+    n.value = value;
+    n.next = list;
+    return n;
+}
+
+fn sum(list) {
+    let s = 0;
+    while list != 0 {
+        s = s + list.value;
+        list = list.next;
+    }
+    return s;
+}
+
+fn main() {
+    let p = new Point;
+    p.x = 3;
+    p.y = 4;
+    print(length2(p), "\n");                    // 25
+
+    let q: Point;                               // on the stack
+    q.x = 1;
+    q.y = 2;
+    let px = &q.x;                              // a field's address
+    *px = 10;
+    print(length2(q), "\n");                    // 104
+
+    let list = 0;                               // a linked list of 1..10
+    let i = 1;
+    while i <= 10 {
+        list = push(list, i);
+        i = i + 1;
+    }
+    print(sum(list), " ", list.value, " ", list.next.value, "\n");  // 55 10 9
+
+    // an array of structs: n structs' worth of cells, and the i-th struct at
+    // &points[i * sizeof(Point)]
+    let points = array(3 * sizeof(Point));
+    let k = 0;
+    while k < 3 {
+        let pt = &points[k * sizeof(Point)];
+        pt.x = k;
+        pt.y = k * k;
+        k = k + 1;
+    }
+    let last = &points[2 * sizeof(Point)];
+    print(last.x, " ", last.y, "\n");           // 2 4
+}

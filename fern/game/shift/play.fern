@@ -1,0 +1,449 @@
+// A frame of the shift: the robot moves, its weapons fire, the creatures
+// come; relays come back online, scrap is gathered, levels are gained; and
+// what happened is told to whoever's running it (a level to choose, a crate, the
+// end).
+
+use crate::math::{sin, cos};
+use super::run::*;
+use super::arms::*;
+use super::foes::*;
+use super::world::{relay_count, occ_at, slow};
+use super::light::{relay_reach};
+use super::gfx::{rgb};
+
+pub fn nothing() -> Int { 0 }
+pub fn level_up() -> Int { 1 }
+pub fn crate_found() -> Int { 2 }
+pub fn died() -> Int { 3 }
+pub fn won() -> Int { 4 }
+
+// how far the robot's headlamp reaches (pixels): less as its integrity does
+pub fn light_radius(r: Run) -> Int {
+    let max = stat(r, st_maxhp()) * 16;
+    let base = (62 + 62 * r.hp.max(0) / max.max(1)) * stat(r, st_light()) / 100;
+    if r.dark > 0 { base * 2 / 5 } else { base }
+}
+
+pub fn start(r: Run) {
+    restat(r);
+    r.hp = stat(r, st_maxhp()) * 16;
+    take(r, first_weapon(r.char));
+    r.camx = (r.x >> 4) - 240;
+    r.camy = (r.y >> 4) - 135;
+    announce(r, "HOLD OUT. FIND WHAT'S DOING THIS.");
+}
+
+// a frame, the robot moved by (mx, my) (each -256 to 256): what happened
+pub fn step(r: Run, mx: Int, my: Int) -> Int {
+    r.nsounds = 0;
+    if r.freeze > 0 {
+        r.freeze = r.freeze - 1;
+        nothing()
+    } else if r.won > 0 {
+        power_up(r)
+    } else {
+        r.time = r.time + 1;
+        r.frame = r.frame + 1;
+        walk(r, mx, my);
+        if r.time % 8 == 0 { find_ways(r) }
+        sort_foes(r);
+        direct(r);
+        move_foes(r);
+        run_weapons(r);
+        move_shots(r);
+        spread_rings(r);
+        corrode(r);
+        let bolt_dmg = move_bolts(r);
+        touch(r, bolt_dmg);
+        relays(r);
+        gather(r);
+        effects(r);
+        sweep(r.foes.p, 4);
+        follow(r);
+        if r.hp <= 0 { fall(r) }
+        else if r.won > 0 { won() }
+        else if r.crates > 0 { crate_found() }
+        else if r.ups > 0 { level_up() }
+        else { nothing() }
+    }
+}
+
+// ---- the robot
+
+fn walk(r: Run, mx: Int, my: Int) {
+    let len = length(mx, my);
+    let moving = len > 40;
+    r.moving = if moving { 1 } else { 0 };
+    if moving {
+        let (ux, uy) = if len > 256 { (mx * 256 / len, my * 256 / len) } else { (mx, my) };
+        let wading = occ_at(r.w, r.x >> 4, r.y >> 4) == slow();
+        let speed = 21 * stat(r, st_speed()) / 100 * (if wading { 2 } else { 3 }) / 3;
+        let dx = ux * speed / 256;
+        let dy = uy * speed / 256;
+        let (x, y) = (r.x, r.y);
+        if fits(r, x + dx, y) { r.x = x + dx }
+        if fits(r, r.x, y + dy) { r.y = y + dy }
+        r.mvx = ux;
+        r.mvy = uy;
+        // which way it faces (and its headlamp points): turning toward
+        // where it's going, quickly but not at once
+        let want = angle(r, ux, uy);
+        let turn = ((want - r.face + 512) & 1023) - 512;
+        r.face = (r.face + turn.clamp(-48, 48)) & 1023;
+    }
+    r.iframes = r.iframes - 1;
+}
+
+// the angle (1024ths of a turn) of a direction 256 long
+pub fn angle(r: Run, ux: Int, uy: Int) -> Int {
+    let mut best = 0;
+    let mut best_d = 1 << 40;
+    let mut a = 0;
+    while a < 1024 {
+        let dx = (cos(r.table, a) >> 8) - ux;
+        let dy = (sin(r.table, a) >> 8) - uy;
+        if dx * dx + dy * dy < best_d {
+            best_d = dx * dx + dy * dy;
+            best = a;
+        }
+        a = a + 16;
+    }
+    best
+}
+
+// whether the robot fits at (x, y): its four corners on open ground
+fn fits(r: Run, x: Int, y: Int) -> Bool {
+    walkable16(r, x - 64, y - 48) && walkable16(r, x + 64, y - 48) && walkable16(r, x - 64, y + 64) && walkable16(r, x + 64, y + 64) && inside(x, y)
+}
+
+// what hurts the robot: creatures touching it, and their bolts
+fn touch(r: Run, bolt_dmg: Int) {
+    let f = r.foes;
+    let (px, py) = (r.x, r.y);
+    let found = nearby(r, px, py, 32);
+    let mut worst = bolt_dmg;
+    let mut j = 0;
+    while j < found {
+        let i = r.near.get(j);
+        let reach = f.r.get(i) + 5;
+        let dx = f.x.get(i) - px;
+        let dy = f.y.get(i) - py;
+        if dx * dx + dy * dy < reach * reach * 256 { worst = worst.max(f.dmg.get(i)) }
+        j = j + 1;
+    }
+    if worst > 0 && r.iframes <= 0 {
+        let d = (worst - stat(r, st_armor())).max(1);
+        r.hp = r.hp + (-d * 16);
+        r.iframes = 30;
+        r.hurt = 12;
+        shake(r, 4);
+        sound(r, s_hurt(), 0, px);
+        burst(r, px, py, 10, rgb(255, 220, 120), 50, 16);
+    }
+    r.hurt = r.hurt - 1;
+    // self-repair (Plating): regen is integrity each ten seconds
+    let regen = stat(r, st_regen());
+    if regen > 0 {
+        r.regen = r.regen + (regen * 16);
+        if r.regen >= 600 {
+            r.regen = r.regen - 600;
+            r.hp = (r.hp + 1).min(stat(r, st_maxhp()) * 16);
+        }
+    }
+}
+
+// down: unless the workshop's backup cell brings it back, once
+fn fall(r: Run) -> Int {
+    if r.meta.get(9) > 0 && r.revives == 0 {
+        r.revives = 1;
+        r.hp = stat(r, st_maxhp()) * 8;
+        r.iframes = 120;
+        let (px, py) = (r.x, r.y);
+        let found = nearby(r, px, py, 160);
+        let mut j = 0;
+        while j < found {
+            let i = r.near.get(j);
+            let (ux, uy) = unit(r.foes.x.get(i) - px, r.foes.y.get(i) - py);
+            hurt(r, i, 400, ux / 3, uy / 3, -1);
+            j = j + 1;
+        }
+        flash(r, px, py, 200, 60, 255, 0);
+        burst(r, px, py, 60, rgb(180, 240, 255), 90, 30);
+        shake(r, 12);
+        sound(r, s_big(), 0, px);
+        announce(r, "BACKUP CELL: BACK ONLINE!");
+        nothing()
+    } else {
+        r.dead = 1;
+        died()
+    }
+}
+
+// ---- relays
+
+// standing by a relay that's down reboots it; one that's on repairs the
+// robot near it, and its light sears the weakest of the bloom
+fn relays(r: Run) {
+    let (px, py) = (r.x >> 4, r.y >> 4);
+    let mut b = 0;
+    while b < relay_count(r.w) {
+        let (bx, by) = (r.w.relays.get(b * 2), r.w.relays.get(b * 2 + 1));
+        let (dx, dy) = (px - bx, py - by);
+        let d2 = dx * dx + dy * dy;
+        if r.lit.get(b) == 0 {
+            if d2 < 34 * 34 {
+                let h = r.heat.get(b) + 1;
+                r.heat.set(b, h);
+                if h % 6 == 0 { motes(r, bx * 16, by * 16 - 64, 2, rgb(150, 230, 255)) }
+                if h >= 80 { reboot(r, b) }
+            } else {
+                r.heat.set(b, (r.heat.get(b) - 2).max(0));
+            }
+        } else {
+            if roll(r, 40) == 0 { burst(r, (bx + roll(r, 9) - 4) * 16, (by - 10) * 16, 3, rgb(200, 240, 255), 30, 10) }
+            if d2 < 60 * 60 {
+                r.heal_t = r.heal_t + 1;
+                if r.heal_t % 20 == 0 { r.hp = (r.hp + 16).min(stat(r, st_maxhp()) * 16) }
+            }
+            if r.time % 30 == b % 30 {
+                let found = nearby(r, bx * 16, by * 16, 80);
+                let mut j = 0;
+                while j < found {
+                    let i = r.near.get(j);
+                    let k = r.foes.kind.get(i);
+                    if (k == sporeling() || k == flicker()) && r.foes.elite.get(i) == 0 { hurt(r, i, 5, 0, 0, -1) }
+                    j = j + 1;
+                }
+            }
+        }
+        b = b + 1;
+    }
+}
+
+fn reboot(r: Run, b: Int) {
+    let (bx, by) = (r.w.relays.get(b * 2) * 16, r.w.relays.get(b * 2 + 1) * 16);
+    r.lit.set(b, 1);
+    r.heat.set(b, 0);
+    flash(r, bx, by, 160, 40, 255, 0);
+    burst(r, bx, by - 64, 40, rgb(190, 240, 255), 70, 30);
+    motes(r, bx, by, 24, rgb(140, 220, 255));
+    shake(r, 3);
+    sound(r, s_reboot(), 0, bx);
+    // (the surge as it comes on fries what's near)
+    let found = nearby(r, bx, by, relay_reach() * 2 / 3);
+    let mut j = 0;
+    while j < found {
+        let i = r.near.get(j);
+        let (ux, uy) = unit(r.foes.x.get(i) - bx, r.foes.y.get(i) - by);
+        hurt(r, i, 60 + minute(r) * 20, ux / 4, uy / 4, -1);
+        j = j + 1;
+    }
+    let lit = online_count(r);
+    if lit == relay_count(r.w) { announce(r, "EVERY RELAY ONLINE!") }
+    else { announce(r, "RELAY ONLINE  " ++ lit.show() ++ "/" ++ relay_count(r.w).show()) }
+}
+
+pub fn online_count(r: Run) -> Int {
+    let mut n = 0;
+    let mut b = 0;
+    while b < relay_count(r.w) {
+        n = n + r.lit.get(b);
+        b = b + 1;
+    }
+    n
+}
+
+// ---- what's on the ground
+
+fn gather(r: Run) {
+    let p = r.drops;
+    let (xs, ys, kinds, values, pulls) = (col(p, dr_x()), col(p, dr_y()), col(p, dr_kind()), col(p, dr_value()), col(p, dr_pull()));
+    let (px, py) = (r.x, r.y);
+    let reach = 34 * stat(r, st_magnet()) / 100;
+    let reach2 = reach * reach * 256;
+    let n = count(p);
+    let mut magnet = false;
+    let mut i = 0;
+    while i < n {
+        let dx = px - xs.get(i);
+        let dy = py - ys.get(i);
+        let d2 = dx * dx + dy * dy;
+        let pull = pulls.get(i);
+        let kind = kinds.get(i);
+        if pull == 0 && d2 < reach2 && kind != 3 { pulls.set(i, 1) }
+        if pull > 0 {
+            // (flying in, faster and faster)
+            let s = (8 + pull * 2).min(90);
+            let d = length(dx, dy).max(1);
+            xs.set(i, xs.get(i) + dx * s / d);
+            ys.set(i, ys.get(i) + dy * s / d);
+            pulls.set(i, pull + 1);
+        }
+        if d2 < 10 * 10 * 256 {
+            let v = values.get(i);
+            if kind == 0 {
+                r.xp = r.xp + v;
+                chime(r);
+            } else if kind == 1 {
+                r.hp = (r.hp + v * 16).min(stat(r, st_maxhp()) * 16);
+                sound(r, s_heal(), 0, px);
+                burst(r, px, py, 14, rgb(120, 255, 160), 40, 20);
+            } else if kind == 2 {
+                magnet = true;
+                sound(r, s_crate(), 1, px);
+            } else if kind == 3 {
+                r.crates = r.crates + 1;
+            } else {
+                r.credits = r.credits + v;
+                sound(r, s_coin(), 0, px);
+            }
+            values.set(i, 0);
+        }
+        col(p, dr_t()).set(i, col(p, dr_t()).get(i) + 1);
+        i = i + 1;
+    }
+    // (a crate is walked onto, not pulled in)
+    i = 0;
+    while i < n {
+        if kinds.get(i) == 3 && values.get(i) > 0 {
+            let dx = px - xs.get(i);
+            let dy = py - ys.get(i);
+            if dx * dx + dy * dy < 14 * 14 * 256 {
+                r.crates = r.crates + 1;
+                values.set(i, 0);
+            }
+        }
+        i = i + 1;
+    }
+    if magnet {
+        let mut k = 0;
+        while k < n {
+            if kinds.get(k) == 0 { pulls.set(k, pulls.get(k).max(1)) }
+            k = k + 1;
+        }
+        announce(r, "SCRAP MAGNET!");
+    }
+    sweep(p, dr_value());
+    // levels: as many as the scrap gathered makes
+    let mut need = needed(r.level);
+    while r.xp >= need {
+        r.xp = r.xp - need;
+        r.level = r.level + 1;
+        r.ups = r.ups + 1;
+        need = needed(r.level);
+    }
+}
+
+// scrap gathered: a note, higher each time while it comes quickly
+fn chime(r: Run) {
+    let t = r.time;
+    if t - r.chain_t < 40 { r.chain = (r.chain + 1).min(14) } else { r.chain = 0 }
+    r.chain_t = t;
+    sound(r, s_scrap(), r.chain, r.x);
+}
+
+// ---- sparks and the rest that just fade
+
+fn effects(r: Run) {
+    let s = r.sparks;
+    let (xs, ys, vxs, vys, life, kind) = (col(s, sp_x()), col(s, sp_y()), col(s, sp_vx()), col(s, sp_vy()), col(s, sp_life()), col(s, sp_kind()));
+    let n = count(s);
+    let mut i = 0;
+    while i < n {
+        xs.set(i, xs.get(i) + vxs.get(i));
+        ys.set(i, ys.get(i) + vys.get(i));
+        if kind.get(i) == 0 {
+            // (sparks slow down)
+            vxs.set(i, vxs.get(i) * 7 / 8);
+            vys.set(i, vys.get(i) * 7 / 8);
+        } else {
+            // (motes drift)
+            vxs.set(i, vxs.get(i) + roll(r, 3) - 1);
+        }
+        life.set(i, life.get(i) - 1);
+        i = i + 1;
+    }
+    sweep(s, sp_life());
+    let nu = r.nums;
+    i = 0;
+    while i < count(nu) {
+        col(nu, nu_y()).set(i, col(nu, nu_y()).get(i) - 8);
+        col(nu, nu_life()).set(i, col(nu, nu_life()).get(i) - 1);
+        i = i + 1;
+    }
+    sweep(nu, nu_life());
+    let z = r.zaps;
+    i = 0;
+    while i < count(z) {
+        col(z, za_life()).set(i, col(z, za_life()).get(i) - 1);
+        i = i + 1;
+    }
+    sweep(z, za_life());
+    let fl = r.flashes;
+    i = 0;
+    while i < count(fl) {
+        col(fl, fl_life()).set(i, col(fl, fl_life()).get(i) - 1);
+        i = i + 1;
+    }
+    sweep(fl, fl_life());
+    r.shake = (r.shake * 7 / 8 - 0).max(0);
+    r.dark = (r.dark - 1).max(0);
+    r.banner_t = (r.banner_t - 1).max(0);
+}
+
+// the camera: after the robot, a little ahead of where it's going
+fn follow(r: Run) {
+    let tx = (r.x >> 4) + r.mvx * 30 / 256 - 240;
+    let ty = (r.y >> 4) + r.mvy * 22 / 256 - 135;
+    let cx = r.camx * 16;
+    let cy = r.camy * 16;
+    // (kept in 16ths in between, so it eases smoothly)
+    let nx = r.camfx + (tx * 16 - cx) / 10;
+    let ny = r.camfy + (ty * 16 - cy) / 10;
+    r.camx = (cx + nx) >> 4;
+    r.camy = (cy + ny) >> 4;
+    r.camfx = (cx + nx) & 15;
+    r.camfy = (cy + ny) & 15;
+}
+
+// ---- the power back on
+
+// the boss is dead and the station's power comes back: what's left of
+// the bloom withers in the light, a few at a time
+fn power_up(r: Run) -> Int {
+    r.power = r.power + 1;
+    r.frame = r.frame + 1;
+    let d = r.power;
+    let f = r.foes;
+    sort_foes(r);
+    let n = count(f.p);
+    let mut i = 0;
+    while i < n {
+        if (i + d) % 9 == 0 && d > 30 { hurt(r, i, 100000, 0, 0, -1) }
+        i = i + 1;
+    }
+    gather_all(r);
+    effects(r);
+    sweep(f.p, 4);
+    follow(r);
+    nothing()
+}
+
+// with the power on, all the scrap on the floor comes to the robot
+fn gather_all(r: Run) {
+    let p = r.drops;
+    let mut i = 0;
+    while i < count(p) {
+        if col(p, dr_kind()).get(i) != 3 { col(p, dr_pull()).set(i, col(p, dr_pull()).get(i).max(1)) }
+        i = i + 1;
+    }
+    gather(r);
+}
+
+// the title's deck: nothing comes; the relays hum and the motes drift
+pub fn ambience(r: Run) {
+    r.nsounds = 0;
+    r.frame = r.frame + 1;
+    relays(r);
+    effects(r);
+}

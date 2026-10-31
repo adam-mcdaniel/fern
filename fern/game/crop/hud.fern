@@ -1,0 +1,185 @@
+// The panels either side of the table, on the picnic cloth: paper cards.
+// On the left, the week (its season, its rent and what's banked toward
+// it, the basket and its multiplier, the balls left, the money); on the
+// right, the tools in the shed, each jiggling when it does something,
+// and the fair's rule when there is one.
+
+use crate::math::{sin, cos};
+use super::gfx::*;
+use super::play::*;
+use super::run::*;
+use super::tools::*;
+use super::art::{season_name};
+use super::icons::{tool_icon, fair_icon};
+
+pub fn ink() -> Int { 0x3a2a1a }
+pub fn paper() -> Int { 0xfbf3e0 }
+pub fn faint() -> Int { 0x9a8a70 }
+pub fn tomato() -> Int { 0xd8402e }
+pub fn leaf() -> Int { 0x3a9a3a }
+pub fn gold() -> Int { 0xe8a018 }
+pub fn sky() -> Int { 0x2a8ad8 }
+
+// a paper card, with a soft shadow on the cloth
+pub fn card(g: Gfx, x: Int, y: Int, w: Int, h: Int) {
+    round_blend(g, x + 2, y + 3, w, h, 4, 0x4a2010, 70);
+    round_rect(g, x, y, w, h, 4, 0xd8c8a8);
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 3, paper());
+    rect(g, x + 3, y + h - 3, w - 6, 1, 0xefe4cc);
+}
+
+// a card in a color (a button, a tag)
+pub fn tag_card(g: Gfx, x: Int, y: Int, w: Int, h: Int, color: Int) {
+    round_blend(g, x + 1, y + 2, w, h, 3, 0x4a2010, 70);
+    round_rect(g, x, y, w, h, 3, scale(color, 180));
+    round_rect(g, x + 1, y + 1, w - 2, h - 2, 2, color);
+    rect(g, x + 3, y + 1, w - 6, 1, mix(color, 0xffffff, 90));
+}
+
+pub fn draw_hud(g: Gfx, w: Week) {
+    left_panel(g, w);
+    right_panel(g, w);
+}
+
+fn left_panel(g: Gfx, w: Week) {
+    let r = w.run;
+    let x = 6;
+    // the week
+    card(g, x, 5, 100, 34);
+    print(g, season_name(r.season), x + 6, 9, 2, if is_fair(r) { tomato() } else { leaf() }, 0xe8dcc0);
+    let wk = if is_fair(r) { "The Fair" } else { "Week " ++ (r.week + 1).show() };
+    text(g, wk ++ (if r.year > 0 { "  Yr " ++ (r.year + 1).show() } else { "" }), x + 6, 27, 1, faint());
+    // the rent
+    card(g, x, 43, 100, 44);
+    text(g, "RENT", x + 6, 47, 1, faint());
+    num_right(g, w.rent, x + 94, 47, 1, ink());
+    let frac = if w.rent > 0 { (w.shown_banked * 256 / w.rent).min(256) } else { 256 };
+    round_rect(g, x + 6, 58, 88, 9, 3, 0xe4d8bc);
+    if frac > 0 { round_rect(g, x + 6, 58, (88 * frac / 256).max(6), 9, 3, if w.paid { leaf() } else { mix(0xe8a018, 0x5ab04a, frac) }) }
+    rect(g, x + 8, 59, (84 * frac / 256).max(1), 1, 0xfff8e0);
+    text(g, "banked", x + 6, 72, 1, faint());
+    if w.paid {
+        let wob = sin(w.sines, w.frame * 4) >> 15;
+        say(g, "PAID!", x + 64, 71 + wob, 1, 0xffffff, leaf());
+    } else {
+        num_right(g, w.shown_banked, x + 94, 72, 1, ink());
+    }
+    // the basket and its mult, and what banking them now would make
+    card(g, x, 91, 100, 86);
+    text(g, "BASKET", x + 6, 95, 1, faint());
+    let bounce = if w.fx.arrived > 0 { 2 } else { 0 };
+    let bk = w.shown_basket;
+    num_mid(g, bk, x + 50, 107 - bounce, 3, ink());
+    let mx = x + 50;
+    let mw = text_w(g, "@", 2) + num_w(g, w.mult, 2) + 2;
+    tag_card(g, mx - mw / 2 - 6, 132, mw + 12, 20, 0x3a8ad8);
+    text(g, "@", mx - mw / 2, 135, 2, 0xffffff);
+    num(g, w.mult, mx - mw / 2 + text_w(g, "@", 2) + 2, 135, 2, 0xffffff);
+    if w.hot > 0 { say(g, "HOT x2", x + 58, 95, 1, 0xffd0a0, tomato()) }
+    let stake = w.basket * w.mult;
+    let big = stake * 3 >= w.rent && stake > 0;
+    text(g, "bank", x + 6, 160, 1, faint());
+    if big && (w.frame / 12) % 2 == 0 { num_right(g, stake, x + 94, 160, 1, tomato()) } else { num_right(g, stake, x + 94, 160, 1, ink()) }
+    // the balls
+    card(g, x, 181, 100, 26);
+    text(g, "BALLS", x + 6, 185, 1, faint());
+    let mut b = 0;
+    while b < w.balls_left {
+        let bx = x + 52 + b * 11;
+        disc(g, bx, 189, 4, 0x6a7080);
+        disc(g, bx, 189, 3, 0xd8e0e8);
+        put(g, bx - 1, 188, 0xffffff);
+        b = b + 1;
+    }
+    if w.save > 0 && (w.frame / 10) % 2 == 0 { text(g, "SAVE", x + 6, 196, 1, sky()) }
+    // the money
+    card(g, x, 211, 100, 22);
+    text(g, "$", x + 6, 218, 1, gold());
+    num(g, r.money, x + 16, 218, 1, ink());
+    text_right(g, "coins", x + 94, 218, 1, faint());
+    // what to do, while it's worth doing
+    if big {
+        let wob = sin(w.sines, w.frame * 8) >> 15;
+        tag_card(g, x, 238 + wob, 100, 24, tomato());
+        text_mid(g, "Bank it!", x + 50, 242 + wob, 1, 0xffffff);
+        text_mid(g, "The barn's right }", x + 50, 251 + wob, 1, 0xffe0d0);
+    }
+}
+
+fn right_panel(g: Gfx, w: Week) {
+    let r = w.run;
+    let x = 374;
+    card(g, x, 5, 100, 16);
+    text_mid(g, "THE SHED", x + 50, 9, 1, faint());
+    let mut i = 0;
+    while i < max_tools() {
+        let y = 25 + i * 34;
+        let t = r.tools.get(i);
+        let since = w.frame - w.tool_fire.get(i);
+        let jig = if since < 20 { sin(w.sines, since * 60) * (20 - since) >> 18 } else { 0 };
+        if t >= 0 {
+            card(g, x + jig, y - (if since < 10 { 2 } else { 0 }), 100, 30);
+            tool_icon(g, t, x + 4 + jig, y + 3);
+            text(g, tool_name(t), x + 30 + jig, y + 5, 1, ink());
+            if t == recipe() {
+                text(g, "+" ++ r.tool_val.get(i).show(), x + 30 + jig, y + 16, 1, gold());
+            } else if t == barn_cat() {
+                text(g, if w.cat_used { "asleep" } else { "awake" }, x + 30 + jig, y + 16, 1, faint());
+            }
+            if since < 12 { glow(g, x + 16 + jig, y + 15, 18, scale(0x403010, (12 - since) * 20)) }
+        } else {
+            round_blend(g, x, y, 100, 30, 4, 0xffffff, 60);
+            text_mid(g, "empty", x + 50, y + 11, 1, 0xc8a898);
+        }
+        i = i + 1;
+    }
+    // the fair: this week's rule, or who's coming
+    card(g, x, 197, 100, 68);
+    let now = is_fair(r);
+    text(g, if now { "THE FAIR!" } else { "IN " ++ (2 - r.week).show() ++ (if r.week == 1 { " WEEK" } else { " WEEKS" }) }, x + 6, 201, 1, if now { tomato() } else { faint() });
+    fair_icon(g, r.fair, x + 72, 199);
+    print(g, fair_name(r.fair), x + 6, 223, 1, ink(), 0xe8dcc0);
+    wrap_text(g, fair_text(r.fair), x + 6, 234, 88, 1, faint());
+}
+
+// words wrapped into lines no wider than width; where the next line would go
+pub fn wrap_text(g: Gfx, s: String, x: Int, y: Int, width: Int, k: Int, color: Int) -> Int {
+    let n = s.len();
+    let mut start = 0;
+    let mut yy = y;
+    let mut last = -1;
+    let mut i = 0;
+    while i <= n {
+        if i == n || s.char_at(i) == 32 {
+            if text_w_range(g, s, start, i, k) > width && last > start {
+                text_range(g, s, start, last, x, yy, k, color);
+                yy = yy + 10 * k;
+                start = last + 1;
+            }
+            last = i;
+        }
+        i = i + 1;
+    }
+    if start < n { text_range(g, s, start, n, x, yy, k, color) }
+    yy + 10 * k
+}
+
+// how many lines wrap_text would take
+pub fn wrap_lines(g: Gfx, s: String, width: Int, k: Int) -> Int {
+    let n = s.len();
+    let mut start = 0;
+    let mut lines = 1;
+    let mut last = -1;
+    let mut i = 0;
+    while i <= n {
+        if i == n || s.char_at(i) == 32 {
+            if text_w_range(g, s, start, i, k) > width && last > start {
+                lines = lines + 1;
+                start = last + 1;
+            }
+            last = i;
+        }
+        i = i + 1;
+    }
+    lines
+}

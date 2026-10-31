@@ -1,0 +1,566 @@
+// TUNNEL VISION. An ant farm: a cross-section of a garden behind glass,
+// the soil in bright layers like sand art. Food turns up on the surface
+// and buried in the soil (seeds, leaves, honeydew from aphids), and each
+// kind has to go to a chamber of its kind: the granary, the fungus
+// garden, the nursery. You dig the tunnels; the ants do the rest,
+// hundreds of them, each finding its own way, and you watch the traffic
+// form. Uphill is slow, crowded tunnels jam, rain floods the low ones,
+// clay is hard work and rock can't be dug at all. A pile of food left
+// too long spoils, and if one spoils right through, the colony moves out.
+//
+// Each week brings more dig points and a choice of three: a new chamber
+// to place, stronger jaws, quicker feet, room for more, a brood of ants.
+// Four maps (the backyard, the beach, the woods, the desert), each opened
+// by doing well on the one before; best scores saved.
+//
+// Dig: drag with the left button (or hold Enter or Z and steer with the
+// arrows); fill in: the right button (or X). Space pauses (you can dig
+// while it's paused); 1, 2 and 3 set the speed; Escape for the menu; F11
+// fills the screen. A controller works too: the stick moves the pointer,
+// A digs, B fills, X pauses, Start is the menu.
+//
+// It's made of the parts in tunnel/: the soil and the colony's rooms and
+// food (world), the ants at work (colony), digging (dig), rain (water),
+// the week's choices (upgrades), the pictures (gfx, font, art, scene,
+// hud, ui), the flourishes (fx), the sound (sound), what's kept (save),
+// and the autopilot that digs on the title screen (bot); and a little C
+// of its own for the keyboard and the right mouse button:
+//
+// links: tunnel/platform.c
+
+mod screen;
+mod draw;
+mod math;
+mod tunnel;
+
+use screen::*;
+use math::{sines, sin};
+use tunnel::gfx::*;
+use tunnel::font::{letters};
+use tunnel::world::*;
+use tunnel::colony::*;
+use tunnel::dig::*;
+use tunnel::water::*;
+use tunnel::upgrades::*;
+use tunnel::art::*;
+use tunnel::scene::*;
+use tunnel::hud::*;
+use tunnel::fx::*;
+use tunnel::sound::*;
+use tunnel::ui::*;
+use tunnel::bot::*;
+use tunnel::beetles::*;
+use tunnel::save;
+
+extern fn scan_down(code: Int) -> Bool;
+extern fn right_held() -> Bool;
+
+#[derive(Eq)]
+enum Scene { Title, Maps, Play, Cards, Place, Pause, Options, Howto, Lost }
+
+struct Input {
+    mx: Int, my: Int, moved: Bool, click: Bool, held: Bool, right: Bool,
+    up: Bool, down: Bool, west: Bool, east: Bool, ok: Bool, back: Bool,
+    space: Bool, full: Bool, speed: Int,
+    // the keyboard's (or controller's) digging: held, and filling
+    kdig: Bool, kfill: Bool,
+}
+
+struct Pointer { x: Int, y: Int, last_mx: Int, last_my: Int, keys: Bool, stick: Int }
+
+fn read_input(p: Pointer) -> Input with Io {
+    let mx = mouse_x();
+    let my = mouse_y();
+    let moved = mx != p.last_mx || my != p.last_my;
+    p.last_mx = mx;
+    p.last_my = my;
+    let ax = pad_axis(0);
+    let ay = pad_axis(1);
+    let dir = if ay < -16000 { 1 } else if ay > 16000 { 2 } else if ax < -16000 { 3 } else if ax > 16000 { 4 } else { 0 };
+    let fresh = dir != p.stick;
+    p.stick = dir;
+    Input {
+        mx: mx, my: my, moved: moved, click: mouse_clicked(), held: mouse_down(), right: right_held(),
+        up: key_pressed(key_up()) || key_pressed(key("w")) || pad_pressed(11) || (fresh && dir == 1),
+        down: key_pressed(key_down_arrow()) || key_pressed(key("s")) || pad_pressed(12) || (fresh && dir == 2),
+        west: key_pressed(key_left()) || key_pressed(key("a")) || pad_pressed(13) || (fresh && dir == 3),
+        east: key_pressed(key_right()) || key_pressed(key("d")) || pad_pressed(14) || (fresh && dir == 4),
+        ok: key_pressed(key_enter()) || pad_pressed(0),
+        back: key_pressed(key_escape()) || key_pressed(key_backspace()) || pad_pressed(1) || pad_pressed(6),
+        space: key_pressed(key_space()) || pad_pressed(2),
+        full: key_pressed(key_f11()),
+        speed: if key_pressed(key("1")) { 1 } else if key_pressed(key("2")) { 2 } else if key_pressed(key("3")) { 3 } else { 0 },
+        kdig: scan_down(40) || scan_down(29) || pad_down(0),
+        kfill: scan_down(27) || pad_down(1),
+    }
+}
+
+// the pointer's cell, from the mouse or from keys and stick (which move
+// it a cell at a time, holding to repeat)
+fn steer(p: Pointer, inp: Input, frame: Int) with Io {
+    if inp.moved {
+        p.keys = false;
+        p.x = inp.mx / cell();
+        p.y = (inp.my - y0()).div_floor(cell());
+    } else {
+        let ax = pad_axis(0);
+        let ay = pad_axis(1);
+        let l = key_down(key_left()) || key_down(key("a")) || ax < -12000;
+        let r = key_down(key_right()) || key_down(key("d")) || ax > 12000;
+        let u = key_down(key_up()) || key_down(key("w")) || ay < -12000;
+        let d = key_down(key_down_arrow()) || key_down(key("s")) || ay > 12000;
+        if (l || r || u || d) && frame % 4 == 0 {
+            p.keys = true;
+            if l { p.x = p.x - 1 }
+            if r { p.x = p.x + 1 }
+            if u { p.y = p.y - 1 }
+            if d { p.y = p.y + 1 }
+        }
+    }
+    p.x = p.x.clamp(0, gw() - 1);
+    p.y = p.y.clamp(0, gh() - 1);
+}
+
+// how near anything is to spoiling (0 to 3), for the music
+fn tension(c: Colony) -> Int {
+    let w = c.w;
+    let mut worst = 0;
+    let mut s = 0;
+    while s < max_sources() {
+        if w.src_alive.get(s) { worst = worst.max(w.src_rot.get(s)) }
+        s = s + 1;
+    }
+    let limit = spoil_for(c);
+    if worst * 2 > limit { 3 } else if worst * 4 > limit { 2 } else if worst > 0 { 1 } else { 0 }
+}
+
+// the flourishes for what happened this step
+fn flourish(c: Colony, f: Fx, combo: Array<Int>) {
+    let w = c.w;
+    let mut k = 0;
+    while k < c.n_delivered {
+        let i = c.ev_delivered.get(k);
+        let x = (i % gw()) * cell() + cell() / 2;
+        let y = (i / gw()) * cell() + cell() / 2 + y0();
+        part(f, p_star(), x, y - 2, 0, -40, 18, 0xfff4c0);
+        fly(f, x, y, 258, 12, 1, 0xf0c850, 0);
+        combo.set(0, combo.get(0) + 1);
+        combo.set(1, 90);
+        sound(f, sn_deliver(), combo.get(0), pan_at(x));
+        k = k + 1;
+    }
+    if combo.get(1) > 0 { combo.set(1, combo.get(1) - 1) } else { combo.set(0, 0) }
+    if c.ev_hatched > 0 {
+        let q = 0;
+        let x = (w.ch_x.get(q) + w.ch_w.get(q) / 2) * cell();
+        let y = (w.ch_y.get(q) + 1) * cell() + y0();
+        burst(f, p_star(), x, y, 4, 120, 20, 0xfff8e0);
+        sound(f, sn_hatch(), 0, pan_at(x));
+    }
+    if c.ev_new_src >= 0 {
+        let s = c.ev_new_src;
+        let x = w.src_x.get(s) * cell() + cell() / 2;
+        let y = w.src_y.get(s) * cell() + cell() / 2 + y0();
+        part(f, p_ring(), x, y, 0, 0, 20, food_color(w.src_kind.get(s)));
+        pop(f, if w.src_buried.get(s) { "buried food!" } else { "food!" }, x, y - 14, food_color(w.src_kind.get(s)), 1);
+        sound(f, sn_food(), 0, pan_at(x));
+    }
+    if c.ev_warn > 0 {
+        sound(f, sn_warn(), 0, 0);
+        shake(f, 2);
+    }
+    if c.ev_beetle >= 0 {
+        let b = c.ev_beetle;
+        let i = c.be_cell.get(b);
+        let x = (i % gw()) * cell() + cell() / 2;
+        pop(f, "A beetle!", x.clamp(30, 450), y0() + 2, 0xff8a6a, 1);
+        sound(f, sn_beetle(), 0, pan_at(x));
+    }
+    if c.ev_beaten >= 0 {
+        let i = c.ev_beaten;
+        let x = (i % gw()) * cell() + cell() / 2;
+        let y = (i / gw()) * cell() + cell() / 2 + y0();
+        pop(f, "beetle beaten! +15", x, y - 12, 0xffe04a, 1);
+        burst(f, p_dot(), x, y, 14, 300, 30, 0x2a2a5a);
+        burst(f, p_star(), x, y, 8, 240, 24, 0xfff4c0);
+        sound(f, sn_fight(), 1, pan_at(x));
+        shake(f, 2);
+    }
+    if c.ev_eaten > 0 { sound(f, sn_fight(), 0, 0) }
+    if c.ev_gone >= 0 {
+        let s = c.ev_gone;
+        let x = w.src_x.get(s) * cell() + cell() / 2;
+        let y = w.src_y.get(s) * cell() + cell() / 2 + y0();
+        pop(f, "all gone", x, y - 10, 0xd8d0c0, 1);
+        burst(f, p_petal(), x, y - 6, 6, 120, 60, food_color(w.src_kind.get(s)));
+    }
+}
+
+// a tip, the first time something happens (k: which), for a new player
+fn teach(d: Array<Int>, f: Fx, k: Int, s: String) with Io {
+    if (save::get(d, save::sv_tips()) >> k) & 1 == 0 && f.tip_t < 0 {
+        save::set(d, save::sv_tips(), save::get(d, save::sv_tips()) | (1 << k));
+        save::store(d);
+        tip(f, s);
+    }
+}
+
+// what's happening that a new player should be told about
+fn lessons(c: Colony, d: Array<Int>, f: Fx) with Io {
+    let w = c.w;
+    if c.frame > 120 { teach(d, f, 0, "Ants bring food from the surface to its own chamber: seeds to the granary, leaves to the fungus garden.") }
+    let mut s = 0;
+    let mut buried = false;
+    let mut full = false;
+    while s < max_sources() {
+        if w.src_alive.get(s) && w.src_buried.get(s) && !connected(w, s) { buried = true }
+        if w.src_alive.get(s) && w.src_rot.get(s) > 0 { full = true }
+        s = s + 1;
+    }
+    if buried { teach(d, f, 1, "Buried food! Drag from a tunnel to dig one to it.") }
+    if full { teach(d, f, 2, "A full pile spoils, a ring filling round it. Get ants there faster: a shorter tunnel, or a chamber nearby.") }
+    if c.dig < 10 && c.frame > 600 { teach(d, f, 3, "Low on dig points? Fill in tunnels you don't need (the right button) to get some back.") }
+    if rainy_week(c) && c.week_t > rain_at() - 60 * 12 { teach(d, f, 4, "Rain's coming. It runs in at the entrances and pools in low tunnels; ants can't wade.") }
+    let mut b = 0;
+    while b < max_beetles() {
+        if c.be_state.get(b) == 1 { teach(d, f, 5, "A beetle! It comes in where a tunnel meets the surface. Fill that one in (right button) to shut it out, or let your soldiers see it off.") }
+        b = b + 1;
+    }
+}
+
+// the week's opening banner, and what to expect
+fn week_banner(c: Colony, f: Fx) {
+    banner(f, "Week " ++ (c.week + 1).show(), if rainy_week(c) { "rain due mid-week" } else { "fair weather" }, 0xfff0c0);
+}
+
+fn kind_word(k: Int) -> String { if k == f_seed() { "seeds" } else if k == f_leaf() { "leaves" } else { "honeydew" } }
+
+fn main() {
+    if !screen_open(sw(), sh(), 3, "TUNNEL VISION") {
+        panic("couldn't open a window\n");
+    }
+    let data = save::load();
+    volumes(save::get(data, save::sv_music()), save::get(data, save::sv_sfx()));
+    if save::get(data, save::sv_full()) > 0 { screen_full(true) }
+    let tab = sines();
+    let g = gfx(letters());
+    let m = music();
+    let f = fx();
+    // the title screen's colony, dug by the bot
+    let mut demo = colony(world(0, 777), 30);
+    let demo_bot = bot();
+    let a = art();
+    bake(a, demo.w);
+    let mut c = demo;
+    let dg = digger();
+    let cards = array(3, 0);
+    let combo = array(2, 0);
+    let mut scene = Title;
+    let mut back_to = Title;
+    let mut sel = 0;
+    let mut anim = 0;
+    let mut frame = 0;
+    let mut speed = 1;
+    let mut paused = false;
+    let mut map = 0;
+    let mut placing = 0;
+    let mut howto_page = 0;
+    let mut opened = -1;
+    let mut was_held = false;
+    let mut quit = false;
+    let ptr = Pointer { x: 40, y: 12, last_mx: 0, last_my: 0, keys: false, stick: 0 };
+    loop {
+        let inp = read_input(ptr);
+        frame = frame + 1;
+        anim = anim + 1;
+        if inp.full {
+            save::set(data, save::sv_full(), 1 - save::get(data, save::sv_full()));
+            screen_full(save::get(data, save::sv_full()) > 0);
+            save::store(data);
+        }
+        g.ox = if f.shake > 0 && save::get(data, save::sv_shake()) > 0 { rand(f, f.shake * 2 + 1) - f.shake } else { 0 };
+        g.oy = 0;
+        match scene {
+            Title => {
+                play(demo_bot, demo);
+                step_colony(demo);
+                step_beetles(demo);
+                step_colony(demo);
+                step_beetles(demo);
+                water_step(demo);
+                if demo.week_t >= week_len() { next_week(demo); demo.dig = demo.dig + 60; }
+                if demo.lost >= 0 || demo.week >= 6 {
+                    demo = colony(world(0, 777 + frame), 30);
+                    bake(a, demo.w);
+                }
+                touch_up(a, demo.w);
+                tick_fx(f);
+                draw_colony(g, a, demo, tab);
+                draw_title(g, data, frame, tab);
+                let over = menu(g, ["Dig in", "How to play", "Options", "Quit"], [true, true, true, true], sel, 185, 128, frame, inp.mx, inp.my, tab);
+                if inp.moved && over >= 0 && over != sel { sel = over; effect(m, sn_tick(), 0, 0); }
+                if inp.up { sel = (sel + 3) % 4; effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = (sel + 1) % 4; effect(m, sn_tick(), 0, 0); }
+                if inp.ok || inp.space || (inp.click && over >= 0) {
+                    effect(m, sn_pick(), 0, 0);
+                    if sel == 0 { scene = Maps; sel = map; }
+                    else if sel == 1 { scene = Howto; howto_page = 0; back_to = Title; }
+                    else if sel == 2 { scene = Options; back_to = Title; sel = 0; }
+                    else { quit = true }
+                }
+                if inp.back { quit = true }
+                tick(m, s_title(), 0, 0);
+            }
+            Maps => {
+                draw_colony(g, a, demo, tab);
+                let over = draw_maps(g, data, sel, frame, tab, inp.mx, inp.my);
+                if inp.moved && over >= 0 && over != sel { sel = over; effect(m, sn_tick(), 0, 0); }
+                if inp.west { sel = (sel + map_count() - 1) % map_count(); effect(m, sn_tick(), 0, 0); }
+                if inp.east { sel = (sel + 1) % map_count(); effect(m, sn_tick(), 0, 0); }
+                if inp.ok || inp.space || (inp.click && over >= 0) {
+                    if save::map_open(data, sel) {
+                        map = sel;
+                        effect(m, sn_pick(), 0, 0);
+                        c = colony(world(map, screen_ticks() * 7919 + frame), 12);
+                        bake(a, c.w);
+                        week_banner(c, f);
+                        speed = 1;
+                        paused = false;
+                        if save::get(data, save::sv_taught()) == 0 {
+                            scene = Howto;
+                            howto_page = 0;
+                            back_to = Play;
+                        } else { scene = Play }
+                    } else { effect(m, sn_no(), 0, 0) }
+                }
+                if inp.back { scene = Title; sel = 0; }
+                tick(m, s_title(), 0, 0);
+            }
+            Play => {
+                steer(ptr, inp, frame);
+                // digging and filling, at the pointer
+                // (the strip across the top is for the buttons there, not digging)
+                let in_bar = inp.my < 26 && !ptr.keys;
+                if inp.click && in_bar && inp.mx >= 410 {
+                    if inp.mx >= 456 { paused = !paused } else { speed = ((inp.mx - 414) / 13 + 1).clamp(1, 3); paused = false; }
+                    effect(m, sn_tick(), 2, 0);
+                }
+                let digging = ((inp.held && !ptr.keys && !in_bar) || inp.kdig);
+                if digging {
+                    if !was_held {
+                        if start_dig(dg, c, ptr.x, ptr.y) { dg.found = -1 }
+                    }
+                    let before = c.dig;
+                    dig_toward(dg, c, ptr.x, ptr.y);
+                    let mut k = 0;
+                    while k < dg.n_fresh {
+                        let i = dg.fresh.get(k);
+                        burst(f, p_dot(), (i % gw()) * cell() + cell() / 2, (i / gw()) * cell() + cell() / 2 + y0(), 3, 160, 18, 0xa87848);
+                        k = k + 1;
+                    }
+                    if dg.n_fresh > 0 { sound(f, sn_dig(), if before - c.dig > dg.n_fresh { 1 } else { 0 }, pan_at(ptr.x * cell())) }
+                    if dg.blocked > 0 && frame % 20 == 0 {
+                        sound(f, sn_blocked(), 0, pan_at(ptr.x * cell()));
+                        if dg.blocked == 2 { pop(f, "out of dig points", ptr.x * cell(), ptr.y * cell() + y0() - 8, 0xffb0a0, 1) }
+                        dg.blocked = 0;
+                    }
+                    if dg.found >= 0 {
+                        let what = c.w.tr_what.get(dg.found);
+                        pop(f, "Found " ++ trinket_name(what) ++ "! +" ++ trinket_points(what).show(), ptr.x * cell(), ptr.y * cell() + y0() - 10, 0xffe04a, 1);
+                        sound(f, sn_trinket(), 0, pan_at(ptr.x * cell()));
+                        dg.found = -1;
+                    }
+                } else {
+                    stop_dig(dg);
+                }
+                was_held = digging;
+                if inp.kfill || inp.right {
+                    if fill(dg, c, ptr.x, ptr.y) {
+                        sound(f, sn_fill(), 0, pan_at(ptr.x * cell()));
+                        burst(f, p_dust(), ptr.x * cell() + 2, ptr.y * cell() + 2 + y0(), 2, 80, 20, 0xc8a878);
+                    }
+                }
+                if inp.space { paused = !paused; effect(m, sn_tick(), 2, 0); }
+                if inp.speed > 0 { speed = inp.speed; paused = false; effect(m, sn_tick(), inp.speed, 0); }
+                // the colony, at the speed asked
+                let steps = if paused { 0 } else { speed };
+                let mut k = 0;
+                while k < steps && c.lost < 0 && scene == Play {
+                    let raining = c.rain > 0;
+                    step_colony(c);
+                    step_beetles(c);
+                    water_step(c);
+                    if !raining && c.rain > 0 { sound(f, sn_rain(), 0, 0) }
+                    flourish(c, f, combo);
+                    if c.week_t >= week_len() {
+                        next_week(c);
+                        c.dig = c.dig + 30;
+                        deal(c, cards);
+                        scene = Cards;
+                        sel = 0;
+                        anim = 0;
+                        effect(m, sn_week(), 0, 0);
+                    }
+                    k = k + 1;
+                }
+                if c.lost >= 0 && scene == Play {
+                    opened = save::record(data, map, c.delivered, c.week);
+                    save::store(data);
+                    effect(m, sn_lost(), 0, 0);
+                    scene = Lost;
+                    sel = 0;
+                    anim = 0;
+                }
+                lessons(c, data, f);
+                touch_up(a, c.w);
+                tick_fx(f);
+                effects(m, f);
+                draw_colony(g, a, c, tab);
+                draw_pointer(g, c.w, ptr.x, ptr.y, digging, frame);
+                draw_parts(g, f);
+                draw_hud(g, c, speed, paused, tab);
+                draw_tip(g, f);
+                draw_banner(g, f);
+                if inp.back { scene = Pause; sel = 0; }
+                tick(m, s_play(), map, tension(c));
+            }
+            Cards => {
+                draw_colony(g, a, c, tab);
+                draw_hud(g, c, speed, false, tab);
+                draw_cards(g, c, cards, sel, anim, tab);
+                let over = if inp.my >= card_y() && inp.my < card_y() + 130 { if inp.mx >= card_x(0) && inp.mx < card_x(0) + 100 { 0 } else if inp.mx >= card_x(1) && inp.mx < card_x(1) + 100 { 1 } else if inp.mx >= card_x(2) && inp.mx < card_x(2) + 100 { 2 } else { -1 } } else { -1 };
+                if inp.moved && over >= 0 && over != sel { sel = over; effect(m, sn_tick(), 0, 0); }
+                if inp.west { sel = (sel + 2) % 3; effect(m, sn_tick(), 0, 0); }
+                if inp.east { sel = (sel + 1) % 3; effect(m, sn_tick(), 0, 0); }
+                if anim > 20 && (inp.ok || inp.space || (inp.click && over >= 0)) {
+                    let u = cards.get(sel);
+                    effect(m, sn_pick(), 0, 0);
+                    if up_places(u) {
+                        placing = u;
+                        scene = Place;
+                    } else {
+                        apply(c, u);
+                        week_banner(c, f);
+                        scene = Play;
+                    }
+                    was_held = true;
+                }
+                tick(m, s_cards(), map, 0);
+            }
+            Place => {
+                steer(ptr, inp, frame);
+                let cw = if up_kind(placing) == k_sump() || up_kind(placing) == k_guard() { 4 } else { 5 };
+                let px0 = (ptr.x - cw / 2).clamp(0, gw() - cw);
+                let py0 = (ptr.y - 1).clamp(0, gh() - 3);
+                tick_fx(f);
+                draw_colony(g, a, c, tab);
+                draw_hud(g, c, speed, false, tab);
+                draw_ghost(g, c.w, placing, px0, py0, frame);
+                if inp.click || inp.ok || inp.space || inp.kdig && frame % 10 == 0 {
+                    if place(c, placing, px0, py0) {
+                        effect(m, sn_place(), 0, pan_at(ptr.x * cell()));
+                        burst(f, p_dot(), ptr.x * cell(), ptr.y * cell() + y0(), 20, 300, 30, 0xa87848);
+                        touch_up(a, c.w);
+                        week_banner(c, f);
+                        scene = Play;
+                        was_held = true;
+                    } else {
+                        effect(m, sn_no(), 0, 0);
+                    }
+                }
+                tick(m, s_cards(), map, 0);
+            }
+            Pause => {
+                draw_colony(g, a, c, tab);
+                draw_hud(g, c, speed, true, tab);
+                let over = draw_pause(g, sel, frame, tab, inp.mx, inp.my);
+                if inp.moved && over >= 0 { sel = over }
+                if inp.up { sel = (sel + 3) % 4; effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = (sel + 1) % 4; effect(m, sn_tick(), 0, 0); }
+                if inp.back { scene = Play }
+                else if inp.ok || inp.space || (inp.click && over >= 0) {
+                    effect(m, sn_pick(), 0, 0);
+                    if sel == 0 { scene = Play }
+                    else if sel == 1 { scene = Options; back_to = Pause; sel = 0; }
+                    else if sel == 2 { scene = Howto; howto_page = 0; back_to = Pause; }
+                    else {
+                        c.lost = 0;
+                        opened = save::record(data, map, c.delivered, c.week);
+                        save::store(data);
+                        scene = Lost;
+                        sel = 0;
+                        anim = 0;
+                    }
+                }
+                tick(m, s_silence(), map, 0);
+            }
+            Options => {
+                if back_to == Pause { draw_colony(g, a, c, tab) } else { draw_colony(g, a, demo, tab) }
+                let over = draw_options(g, data, sel, inp.mx, inp.my);
+                if inp.moved && over >= 0 { sel = over }
+                if inp.up { sel = (sel + option_count() - 1) % option_count(); effect(m, sn_tick(), 0, 0); }
+                if inp.down { sel = (sel + 1) % option_count(); effect(m, sn_tick(), 0, 0); }
+                let delta = if inp.west { -1 } else if inp.east || inp.ok || inp.space || (inp.click && over >= 0) { 1 } else { 0 };
+                if delta != 0 && sel < 4 {
+                    if sel == 0 { save::set(data, save::sv_music(), (save::get(data, save::sv_music()) + delta * 10).clamp(0, 100)) }
+                    else if sel == 1 { save::set(data, save::sv_sfx(), (save::get(data, save::sv_sfx()) + delta * 10).clamp(0, 100)) }
+                    else if sel == 2 {
+                        save::set(data, save::sv_full(), 1 - save::get(data, save::sv_full()));
+                        screen_full(save::get(data, save::sv_full()) > 0);
+                    } else { save::set(data, save::sv_shake(), 1 - save::get(data, save::sv_shake())) }
+                    volumes(save::get(data, save::sv_music()), save::get(data, save::sv_sfx()));
+                    effect(m, sn_tick(), 2, 0);
+                    save::store(data);
+                }
+                if inp.back || ((inp.ok || inp.space || (inp.click && over >= 0)) && sel == 4) {
+                    scene = back_to;
+                    sel = if back_to == Pause { 1 } else { 2 };
+                }
+                tick(m, if back_to == Pause { s_silence() } else { s_title() }, map, 0);
+            }
+            Howto => {
+                if back_to == Title { draw_colony(g, a, demo, tab) } else { draw_colony(g, a, c, tab) }
+                draw_howto(g, howto_page, frame);
+                if inp.ok || inp.space || inp.click || inp.back {
+                    effect(m, sn_tick(), 1, 0);
+                    if howto_page == 0 && !inp.back { howto_page = 1 } else {
+                        save::set(data, save::sv_taught(), 1);
+                        save::store(data);
+                        scene = back_to;
+                        sel = if back_to == Title { 1 } else { 2 };
+                        if back_to == Play { paused = true }
+                    }
+                }
+                tick(m, if back_to == Title { s_title() } else { s_silence() }, map, 0);
+            }
+            Lost => {
+                tick_fx(f);
+                draw_colony(g, a, c, tab);
+                let lost_pile = c.lost.clamp(0, max_sources() - 1);
+                let why = if c.w.src_alive.get(lost_pile) && c.w.src_rot.get(lost_pile) > 0 { "A pile of " ++ kind_word(c.w.src_kind.get(lost_pile)) ++ " spoiled." } else { "The colony gave up the nest." };
+                draw_lost(g, data, map, c.delivered, c.week, c.n_ants, opened, why, anim, sel);
+                if inp.west || inp.east { sel = 1 - sel; effect(m, sn_tick(), 0, 0); }
+                let over = if inp.my >= 184 && inp.my < 202 { if inp.mx >= 154 && inp.mx < 236 { 0 } else if inp.mx >= 244 && inp.mx < 326 { 1 } else { -1 } } else { -1 };
+                if inp.moved && over >= 0 { sel = over }
+                if anim > 30 && (inp.ok || inp.space || (inp.click && over >= 0)) {
+                    effect(m, sn_pick(), 0, 0);
+                    if sel == 0 {
+                        c = colony(world(map, screen_ticks() * 31 + frame), 12);
+                        bake(a, c.w);
+                        week_banner(c, f);
+                        speed = 1;
+                        paused = false;
+                        scene = Play;
+                    } else {
+                        bake(a, demo.w);
+                        scene = Title;
+                        sel = 0;
+                    }
+                }
+                tick(m, s_lost(), map, 0);
+            }
+        }
+        if quit { break; }
+        if !screen_show(g.px) { break; }
+    }
+}

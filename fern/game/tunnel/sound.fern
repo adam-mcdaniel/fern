@@ -1,0 +1,218 @@
+// The sound: soft effects for the colony's work, and music made up as it
+// plays: a wooden marimba walking through the chords, a kalimba picking
+// out a tune over it in short phrases that answer each other, a round
+// bass, and a shaker. Each map has its key and its pace (the backyard
+// easy in F, the beach in G, the woods in D minor, the desert in E
+// Phrygian, with its bent second); as piles start to spoil, the band
+// plays a little faster and fuller, so you hear the trouble coming.
+
+use crate::screen::{note, note_swept, sound_clock, sound_volume, sound_stop};
+use super::fx::*;
+
+pub struct Music { freqs: Array<Int>, song: Int, map: Int, next: Int, step: Int, tune: Int }
+
+pub fn music() -> Music {
+    let ratios = [1000, 1059, 1122, 1189, 1260, 1335, 1414, 1498, 1587, 1682, 1782, 1888];
+    let r = Array::from_list(ratios, 0);
+    let freqs = array(128, 0);
+    let mut n = 0;
+    while n < 128 {
+        let base = 4186 * r.get(n % 12) / 1000;
+        let oct = n / 12 - 5;
+        freqs.set(n, if oct >= 0 { base << oct } else { base >> (-oct) });
+        n = n + 1;
+    }
+    Music { freqs: freqs, song: -1, map: 0, next: 0, step: 0, tune: 3 }
+}
+
+pub fn s_title() -> Int { 0 }
+pub fn s_play() -> Int { 1 }
+pub fn s_cards() -> Int { 2 }
+pub fn s_lost() -> Int { 3 }
+pub fn s_silence() -> Int { 4 }
+
+fn hz(m: Music, n: Int) -> Int { m.freqs.get(n.clamp(0, 127)) }
+
+fn play(wave: Int, f: Int, f_end: Int, at: Int, attack: Int, length: Int, vol: Int, pan: Int, cutoff: Int, reverb: Int, bus: Int) with Io {
+    note(wave, f, f_end, at, attack, length, vol, pan, cutoff, reverb, bus);
+}
+
+fn swept(wave: Int, f: Int, f_end: Int, at: Int, attack: Int, length: Int, vol: Int, pan: Int, cutoff: Int, cutoff_end: Int, reverb: Int, bus: Int) with Io {
+    note_swept(wave, f, f_end, at, attack, length, vol, pan, cutoff, cutoff_end, reverb, bus);
+}
+
+// a degree of a scale as semitones: 0 major, 1 minor, 2 phrygian
+fn degree(scale: Int, d: Int) -> Int {
+    let steps = if scale == 0 { [0, 2, 4, 5, 7, 9, 11] } else if scale == 1 { [0, 2, 3, 5, 7, 8, 10] } else { [0, 1, 4, 5, 7, 8, 10] };
+    steps.get(d.mod_floor(7)).unwrap_or(0) + d.div_floor(7) * 12
+}
+
+fn mhash(a: Int, b: Int, c: Int) -> Int {
+    let mut h = a * 374761393 + b * 668265263 + c * 1274126177;
+    h = (h ^ (h >> 13)) * 1274126177;
+    (h ^ (h >> 16)) & 0xffff
+}
+
+// keeps the music going (tension 0 to 3: how near something is to spoiling)
+pub fn tick(m: Music, song: Int, map: Int, tension: Int) with Io {
+    let now = sound_clock();
+    if m.song != song || m.map != map {
+        sound_stop(0);
+        m.song = song;
+        m.map = map;
+        m.next = now + 100;
+        m.step = 0;
+        m.tune = mhash(now, song, map) % 89;
+    }
+    if song != s_silence() {
+        let base = if song == s_title() { 150 } else if song == s_cards() { 170 } else if song == s_lost() { 240 }
+            else if map == 0 { 150 } else if map == 1 { 140 } else if map == 2 { 160 } else { 145 };
+        let sl = base - tension * 8;
+        let mut next = m.next;
+        if next < now - 500 { next = now + 50 }
+        while next < now + 260 {
+            beat(m, song, map, m.step, next, sl, tension);
+            m.step = m.step + 1;
+            next = next + sl;
+        }
+        m.next = next;
+    }
+}
+
+fn beat(m: Music, song: Int, map: Int, step: Int, at: Int, sl: Int, tension: Int) with Io {
+    let s = step % 16;
+    let bar = step / 16;
+    let key = if map == 1 { 55 } else if map == 2 { 50 } else if map == 3 { 52 } else { 53 };
+    let scale = if song == s_lost() { 1 } else if map == 2 { 1 } else if map == 3 { 2 } else { 0 };
+    let prog = if song == s_lost() { [0, 5, 3, 4] } else if map == 2 { [0, 5, 2, 6] } else if map == 3 { [0, 1, 0, 6] } else { [0, 3, 4, 3, 0, 5, 3, 4] };
+    let chord = prog.get(bar % prog.len()).unwrap_or(0);
+    let tone = |d: Int| key + degree(scale, chord + d);
+    let soft = song == s_cards() || song == s_lost();
+    // the marimba: the chord walked in eighths, every other note up an octave
+    if s % 2 == 0 {
+        let walk = [0, 2, 4, 2, 0, 4, 2, 4];
+        let d = walk.get((s / 2) % 8).unwrap_or(0);
+        let n = tone(d) + (if (s / 2) % 2 == 1 { 12 } else { 0 });
+        let vol = if s % 8 == 0 { 120 } else { 80 };
+        swept(1, hz(m, n), hz(m, n), at, 1, sl * 3, if soft { vol / 2 } else { vol }, if s % 4 == 0 { -30 } else { 30 }, 4000, 900, 70, 0);
+        play(0, hz(m, n + 24), hz(m, n + 24), at, 1, 60, 20, 0, 6000, 40, 0);
+    }
+    // the bass, round, on the beats
+    if s % 8 == 0 && song != s_lost() {
+        play(0, hz(m, tone(0) - 12), hz(m, tone(0) - 12), at, 8, sl * 6, 150, 0, 800, 20, 0);
+    }
+    if s == 12 && song != s_lost() && tension >= 1 {
+        play(0, hz(m, tone(4) - 12), hz(m, tone(4) - 12), at, 8, sl * 3, 120, 0, 800, 20, 0);
+    }
+    // the shaker
+    if !soft && (s % 2 == 1 || tension >= 2) {
+        play(4, 9000 * 16, 9000 * 16, at, 3, 40, if s % 4 == 3 { 18 } else { 10 }, 40, 9000, 30, 0);
+    }
+    if tension >= 3 && s % 4 == 0 {
+        play(0, 120 * 16, 50 * 16, at, 1, 150, 150, 0, 1200, 10, 0);
+    }
+    // the kalimba's tune: a phrase of two bars, then its answer
+    let phrase = (bar / 2) % 4;
+    let line = if phrase == 1 || phrase == 3 { 1 } else { 0 };
+    let in_bar = (bar % 2) * 16 + s;
+    let r = mhash(m.tune, line, in_bar) % 100;
+    let plays = song != s_cards() && in_bar % 2 == 0 && r < (if song == s_title() { 50 } else { 38 + tension * 6 }) && (song != s_play() || bar % 8 >= 2);
+    if plays {
+        let d = (mhash(m.tune + 7, line, in_bar) % 6) - 1 + (if phrase == 3 && in_bar > 24 { -1 } else { 0 });
+        let n = key + 24 + degree(scale, chord + d);
+        play(5, hz(m, n), hz(m, n), at, 1, sl * 4, 80, 20, 5000, 150, 0);
+        play(5, hz(m, n), hz(m, n), at + sl * 3, 1, sl * 3, 24, -30, 4000, 200, 0);
+    }
+    if song == s_lost() && s % 4 == 0 {
+        let d = [4, 3, 2, 0].get((s / 4) % 4).unwrap_or(0);
+        play(5, hz(m, tone(d) + 12), hz(m, tone(d) + 12), at, 1, sl * 8, 90, 0, 3000, 180, 0);
+    }
+}
+
+pub fn volumes(music_vol: Int, sfx_vol: Int) with Io { sound_volume(music_vol, sfx_vol) }
+
+pub fn effects(m: Music, f: Fx) with Io {
+    let seen = array(32, 0);
+    let mut i = 0;
+    while i < f.n_sounds {
+        let what = f.sounds.get(i * 3);
+        let k = f.sounds.get(i * 3 + 1);
+        let pan = f.sounds.get(i * 3 + 2);
+        let most = if what == sn_deliver() || what == sn_dig() { 2 } else { 1 };
+        if what >= 0 && what < 32 && seen.get(what) < most {
+            seen.set(what, seen.get(what) + 1);
+            effect(m, what, k, pan);
+        }
+        i = i + 1;
+    }
+    f.n_sounds = 0;
+}
+
+pub fn effect(m: Music, what: Int, k: Int, pan: Int) with Io {
+    let now = sound_clock();
+    let jit = (now * 7919) % 300;
+    if what == sn_dig() {
+        // a scrape of earth (clay grittier)
+        swept(4, (900 + jit) * 16, 300 * 16, 0, 1, 70, 60 + k * 20, pan, 2000 + jit * 4, 600, 20, 1);
+        play(1, (140 + jit / 4) * 16, 90 * 16, 0, 1, 50, 50, pan, 1500, 10, 1);
+    } else if what == sn_fill() {
+        swept(4, 500 * 16, 200 * 16, 0, 1, 90, 60, pan, 1200, 400, 20, 1);
+    } else if what == sn_deliver() {
+        // a crumb put away: a soft wooden tock, higher with each in a row
+        let penta = [0, 2, 4, 7, 9];
+        let n = 72 + penta.get(k % 5).unwrap_or(0) + ((k / 5) % 3) * 12;
+        play(1, hz(m, n), hz(m, n), 0, 1, 120, 50, pan, 5000, 60, 1);
+    } else if what == sn_hatch() {
+        play(0, hz(m, 96), hz(m, 100), 0, 1, 80, 40, pan, 8000, 120, 1);
+        play(0, hz(m, 103), hz(m, 103), now + 60, 1, 80, 30, pan, 8000, 140, 1);
+    } else if what == sn_food() {
+        // new food: a little chime
+        play(5, hz(m, 84), hz(m, 84), 0, 1, 500, 80, pan, 6000, 150, 1);
+        play(5, hz(m, 91), hz(m, 91), now + 90, 1, 600, 70, pan, 6000, 170, 1);
+    } else if what == sn_warn() {
+        // a pile spoiling: two low notes, wavering
+        swept(7, 330 * 16, 300 * 16, 0, 10, 220, 70, pan, 1800, 900, 60, 1);
+        swept(7, 280 * 16, 250 * 16, now + 240, 10, 320, 70, pan, 1800, 900, 60, 1);
+    } else if what == sn_week() {
+        let mut i = 0;
+        while i < 5 {
+            play(5, hz(m, 65 + degree(0, i * 2)), hz(m, 65 + degree(0, i * 2)), now + i * 70, 1, 900, 90, (i - 2) * 30, 6000, 170, 1);
+            i = i + 1;
+        }
+    } else if what == sn_pick() {
+        play(1, hz(m, 79), hz(m, 79), 0, 1, 200, 80, 0, 6000, 120, 1);
+        play(1, hz(m, 86), hz(m, 86), now + 80, 1, 400, 80, 0, 6000, 150, 1);
+    } else if what == sn_tick() {
+        play(1, (1800 + k * 300) * 16, (1600 + k * 300) * 16, 0, 1, 30, 30, pan, 6000, 30, 1);
+    } else if what == sn_blocked() {
+        play(2, 160 * 16, 120 * 16, 0, 1, 90, 50, pan, 900, 20, 1);
+    } else if what == sn_trinket() {
+        let mut i = 0;
+        while i < 4 {
+            play(0, hz(m, 84 + degree(0, i * 2)), hz(m, 84 + degree(0, i * 2)), now + i * 50, 1, 300, 60, pan, 9000, 180, 1);
+            i = i + 1;
+        }
+    } else if what == sn_rain() {
+        swept(4, 4000 * 16, 4000 * 16, 0, 2000, 6000, 40, 0, 1500, 3500, 120, 1);
+    } else if what == sn_lost() {
+        swept(3, 300 * 16, 90 * 16, 0, 10, 1400, 90, 0, 2000, 300, 160, 1);
+    } else if what == sn_place() {
+        swept(4, 1200 * 16, 300 * 16, 0, 1, 300, 80, pan, 3000, 500, 60, 1);
+        play(5, hz(m, 72), hz(m, 72), now + 200, 1, 600, 80, pan, 6000, 160, 1);
+    } else if what == sn_beetle() {
+        // a beetle: a low creaking click, twice
+        swept(3, 90 * 16, 70 * 16, 0, 5, 260, 90, pan, 600, 300, 60, 1);
+        play(4, 400 * 16, 200 * 16, now + 120, 1, 80, 60, pan, 1200, 40, 1);
+        swept(3, 85 * 16, 65 * 16, now + 300, 5, 260, 80, pan, 600, 300, 60, 1);
+    } else if what == sn_fight() {
+        if k == 0 { play(4, 2000 * 16, 800 * 16, 0, 1, 50, 50, pan, 3000, 20, 1) } else {
+            let mut i = 0;
+            while i < 4 {
+                play(5, hz(m, 72 + degree(0, i * 2)), hz(m, 72 + degree(0, i * 2)), now + i * 60, 1, 400, 80, pan, 6000, 160, 1);
+                i = i + 1;
+            }
+        }
+    } else if what == sn_no() {
+        swept(2, hz(m, 62), hz(m, 57), 0, 1, 140, 40, 0, 2500, 600, 60, 1);
+    }
+}

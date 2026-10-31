@@ -1,0 +1,912 @@
+// WILD LINKS: golf across wild country. Nine holes, each cut through a new
+// landscape: a mown fairway, a green with a flag, bunkers by it, and
+// whatever the land puts in the way: lakes, forest, mountains. The round
+// starts in the afternoon and ends at sunset.
+//
+// The ball flies (the wind pushes it), then bounces and rolls down the
+// slopes: fast on the green, slower on the fairway, hardly at all in the
+// rough and trees, and not at all in sand, which are hard to hit out of
+// too. In the water, it's a stroke's penalty and the shot again from where
+// you were.
+//
+// Left and right aim, up and down choose a club, and space swings: hold it
+// to fill the power meter, and let go. Stuck somewhere? D drops the ball on
+// the nearest fairway, for a stroke. The dotted line is where a full
+// shot with the club goes (without wind); with the putter, it's how the
+// putt starts to roll, so you can read the green.
+
+mod screen;
+mod draw;
+mod math;
+mod terrain;
+mod voxel;
+
+use screen::*;
+use draw::{Canvas, canvas, show, text, text_width, fill_rect};
+use math::{sines, sin, cos, rng, random};
+use terrain::{Terrain, make, ground};
+use voxel::{Eye, Frame, wrap, draw_land, draw_sky, to_screen, dot, glow, light};
+
+fn width() -> Int { 320 }
+fn height() -> Int { 200 }
+// height units to a cell, upward (as voxel.fern draws them)
+fn units() -> Int { 7 }
+fn holes() -> Int { 9 }
+
+// ---- the course
+
+// what's at each cell, which says how a ball behaves there
+fn water() -> Int { 0 }
+fn sand() -> Int { 1 }
+fn rough() -> Int { 2 }
+fn trees() -> Int { 3 }
+fn rock() -> Int { 4 }
+fn fairway() -> Int { 5 }
+fn green() -> Int { 6 }
+
+fn surface_name(s: Int) -> String {
+    if s == water() { "WATER" } else if s == sand() { "SAND" } else if s == rough() { "ROUGH" } else if s == trees() { "TREES" }
+    else if s == rock() { "ROCK" } else if s == fairway() { "FAIRWAY" } else { "GREEN" }
+}
+
+// a hole: the land, what's at each cell, the tee and the pin (256ths of a
+// cell), its par, and the wind (256ths of a cell a second, each second)
+struct Hole { land: Terrain, surface: Array<Int>, tee: (Int, Int), pin: (Int, Int), par: Int, wind: (Int, Int) }
+
+fn cell(x: Int, y: Int) -> Int { ((y >> 8) & 255) * 256 + ((x >> 8) & 255) }
+
+fn surface_at(h: Hole, x: Int, y: Int) -> Int { array_get(h.surface, cell(x, y)) }
+
+// a cell's color, lit as its slope faces the sun (as terrain.fern's are)
+fn shaded(t: Terrain, i: Int, r: Int, g: Int, b: Int) -> Int {
+    let (x, y) = (i % 256, i / 256);
+    let hgt = |cx: Int, cy: Int| array_get(t.height, (cy & 255) * 256 + (cx & 255));
+    let shade = (210 + (hgt(x + 1, y) - hgt(x - 1, y)) * 7 + (hgt(x, y + 1) - hgt(x, y - 1)) * 3).clamp(80, 340);
+    let ch = |c: Int| (c * shade / 256).clamp(0, 255);
+    ch(r) * 65536 + ch(g) * 256 + ch(b)
+}
+
+// each cell within radius r of (x, y) (in cells)
+fn each_round(x: Int, y: Int, r: Int, f: fn(Int) -> ()) {
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            if dx * dx + dy * dy <= r * r { f(((y + dy) & 255) * 256 + ((x + dx) & 255)) }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+}
+
+// hole n of course `seed`: the land; a tee and a pin on grass a good way
+// apart, the pin on gentle, dry ground, and a way between them that can be
+// played (no more water across it than a long shot carries, and dry land
+// short of the green); then the green, the fairway, the tee box, and two
+// bunkers by the green
+// what's at each cell of the land, from its height
+fn surfaces(land: Terrain) -> Array<Int> {
+    let w = land.water;
+    let surface = array(65536, 0);
+    let mut i = 0;
+    while i < 65536 {
+        let v = array_get(land.height, i);
+        array_set(surface, i, if v <= w { water() } else if v < w + 5 { sand() } else if v < 110 { rough() } else if v < 155 { trees() } else { rock() });
+        i = i + 1;
+    }
+    surface
+}
+
+// a tee and a pin for hole n on this land, if it has a good pair: both on
+// grass a good way apart, the pin on gentle, dry ground, and a way between
+// them that can be played (no more water across it than a long shot
+// carries, and dry land short of the green)
+fn layout(land: Terrain, surface: Array<Int>, r: Array<Int>, n: Int, table: Array<Int>) -> Option<((Int, Int), (Int, Int))> {
+    let hs = land.height;
+    let at = |x: Int, y: Int| array_get(surface, (y & 255) * 256 + (x & 255));
+    let dry_round = |x: Int, y: Int| {
+        let mut ok = true;
+        let mut dy = -7;
+        while dy <= 7 {
+            let mut dx = -7;
+            while dx <= 7 {
+                let s = at(x + dx, y + dy);
+                if s == water() || s == rock() { ok = false }
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+        ok
+    };
+    let gentle = |x: Int, y: Int| {
+        let mut lo = 1000;
+        let mut hi = 0;
+        each_round(x, y, 7, |ci| {
+            let v = array_get(hs, ci);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        });
+        hi - lo <= 14
+    };
+    let playable = |tx: Int, ty: Int, px: Int, py: Int| {
+        let (dx, dy) = (wrap((px - tx) * 256) >> 8, wrap((py - ty) * 256) >> 8);
+        let steps = isqrt(dx * dx + dy * dy).max(1);
+        let mut run = 0;
+        let mut longest = 0;
+        let mut near_dry = true;
+        let mut i = 0;
+        while i <= steps {
+            let s = at(tx + dx * i / steps, ty + dy * i / steps);
+            run = if s == water() { run + 1 } else { 0 };
+            longest = longest.max(run);
+            if s == water() && steps - i < 20 { near_dry = false }
+            i = i + 1;
+        }
+        longest < 45 && near_dry
+    };
+    // (a short hole, a middling one and a long one, by turns)
+    let (shortest, longest) = if n % 3 == 0 { (50, 75) } else if n % 3 == 1 { (85, 130) } else { (135, 175) };
+    let mut found = None;
+    let mut tries = 0;
+    while found.is_none() && tries < 2500 {
+        let (tx, ty) = (random(r, 256), random(r, 256));
+        let a = random(r, 1024);
+        let d = shortest + random(r, longest - shortest + 1);
+        let px = (tx + (d * cos(table, a) >> 16)) & 255;
+        let py = (ty + (d * sin(table, a) >> 16)) & 255;
+        if at(tx, ty) == rough() && at(px, py) == rough() && dry_round(px, py) && gentle(px, py) && playable(tx, ty, px, py) {
+            found = Some(((tx * 256 + 128, ty * 256 + 128), (px * 256 + 128, py * 256 + 128)));
+        }
+        tries = tries + 1;
+    }
+    found
+}
+
+// hole n of course `seed`: a land with a good tee and pin (the next land,
+// if one has none), then the green, the fairway between them, the tee box,
+// and two bunkers by the green
+fn new_hole(seed: Int, n: Int, table: Array<Int>) -> Hole {
+    let r = rng(seed * 131 + n);
+    let mut variant = 0;
+    let mut land = make(seed * 31 + n * 7);
+    let mut surface = surfaces(land);
+    let mut spots = layout(land, surface, r, n, table);
+    while spots.is_none() {
+        variant = variant + 1;
+        land = make(seed * 31 + n * 7 + variant * 7919);
+        surface = surfaces(land);
+        spots = layout(land, surface, r, n, table);
+    }
+    let (tee, pin) = spots.unwrap();
+    let w = land.water;
+    let hs = land.height;
+    let (tx, ty) = tee;
+    let (px, py) = pin;
+    let (dx, dy) = (wrap(px - tx) >> 8, wrap(py - ty) >> 8);
+    let length = isqrt(dx * dx + dy * dy);
+    let par = if length < 80 { 3 } else if length < 135 { 4 } else { 5 };
+    // the fairway: grass and forest within 5 cells of the line from tee to
+    // pin, mown in stripes
+    let (ax, ay) = (tx >> 8, ty >> 8);
+    let len2 = (dx * dx + dy * dy).max(1);
+    let mut oy = dy.min(0) - 8;
+    while oy <= dy.max(0) + 8 {
+        let mut ox = dx.min(0) - 8;
+        while ox <= dx.max(0) + 8 {
+            let along = ((ox * dx + oy * dy) * 256 / len2).clamp(0, 256);
+            let (cx, cy) = (ox - dx * along / 256, oy - dy * along / 256);
+            let ci = ((ay + oy) & 255) * 256 + ((ax + ox) & 255);
+            let s = array_get(surface, ci);
+            if cx * cx + cy * cy <= 25 && (s == rough() || s == trees()) {
+                array_set(surface, ci, fairway());
+                let stripe = ((ax + ox) / 3 + (ay + oy) / 3) % 2 == 0;
+                array_set(land.color, ci, if stripe { shaded(land, ci, 105, 190, 80) } else { shaded(land, ci, 88, 168, 68) });
+            }
+            ox = ox + 1;
+        }
+        oy = oy + 1;
+    }
+    // the tee box
+    each_round(ax, ay, 2, |ci| {
+        array_set(surface, ci, fairway());
+        array_set(land.color, ci, shaded(land, ci, 125, 205, 95));
+    });
+    // the green: smoothed (but still sloping a little), and bright
+    let (gx, gy) = (px >> 8, py >> 8);
+    let mut total = 0;
+    let mut count = 0;
+    each_round(gx, gy, 6, |ci| {
+        total = total + array_get(hs, ci);
+        count = count + 1;
+    });
+    let level = total / count.max(1);
+    each_round(gx, gy, 6, |ci| {
+        array_set(hs, ci, ((array_get(hs, ci) + 3 * level) / 4).max(w + 2));
+        array_set(surface, ci, green());
+    });
+    each_round(gx, gy, 6, |ci| array_set(land.color, ci, shaded(land, ci, 95, 215, 95)));
+    // two bunkers, just off the green
+    let mut b = 0;
+    while b < 2 {
+        let a = random(r, 1024);
+        let (bx, by) = (gx + (9 * cos(table, a) >> 16), gy + (9 * sin(table, a) >> 16));
+        each_round(bx, by, 2 + random(r, 2), |ci| {
+            let s = array_get(surface, ci);
+            if s != green() && s != water() {
+                array_set(surface, ci, sand());
+                array_set(hs, ci, (array_get(hs, ci) - 1).max(w + 1));
+                array_set(land.color, ci, shaded(land, ci, 225, 210, 150));
+            }
+        });
+        b = b + 1;
+    }
+    let wa = random(r, 1024);
+    let ws = random(r, 4) * 100;
+    Hole { land: land, surface: surface, tee: tee, pin: pin, par: par, wind: (cos(table, wa) * ws >> 16, sin(table, wa) * ws >> 16) }
+}
+
+fn isqrt(n: Int) -> Int {
+    if n < 2 {
+        n.max(0)
+    } else {
+        let mut x = 1;
+        let mut m = n;
+        while m > 0 {
+            m = m >> 2;
+            x = x << 1;
+        }
+        let mut y = (x + n / x) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
+    }
+}
+
+// how far (x, y) is from the pin, in cells
+fn to_pin(h: Hole, x: Int, y: Int) -> Int {
+    let (px, py) = h.pin;
+    let (dx, dy) = (wrap(px - x) >> 4, wrap(py - y) >> 4);
+    isqrt(dx * dx + dy * dy) / 16
+}
+
+// ---- the ball
+
+// where it is (x, y in 256ths of a cell, alt in 256ths of a unit), how
+// fast it's going (256ths of a cell a second; up, too), and what it's doing
+struct Ball { x: Int, y: Int, alt: Int, vx: Int, vy: Int, vz: Int, state: Int }
+
+fn flying() -> Int { 0 }
+fn rolling() -> Int { 1 }
+fn stopped() -> Int { 2 }
+fn wet() -> Int { 3 }
+fn holed() -> Int { 4 }
+
+fn resting(h: Hole, x: Int, y: Int) -> Ball {
+    Ball { x: x, y: y, alt: ground(h.land, x, y), vx: 0, vy: 0, vz: 0, state: stopped() }
+}
+
+// gravity, in 256ths of a cell a second, each second
+fn gravity() -> Int { 16 * 256 }
+
+// how each surface takes the ball: how much of its fall it bounces back,
+// and how much of its speed along the ground it keeps, in 256ths, when it
+// lands; and how hard it slows a rolling ball
+fn bounce(s: Int) -> Int { if s == green() { 64 } else if s == fairway() { 77 } else if s == rough() { 40 } else if s == trees() { 20 } else if s == sand() { 5 } else { 140 } }
+fn keep(s: Int) -> Int { if s == green() { 150 } else if s == fairway() { 140 } else if s == rough() { 90 } else if s == trees() { 50 } else if s == sand() { 25 } else { 200 } }
+fn drag(s: Int) -> Int { if s == green() { 3 * 256 } else if s == fairway() { 6 * 256 } else if s == rough() { 14 * 256 } else if s == trees() { 28 * 256 } else if s == sand() { 50 * 256 } else { 4 * 256 } }
+
+// the ground's slope at (x, y): how much it rises a cell east and a cell
+// south, in 256ths of a cell
+fn slope(t: Terrain, x: Int, y: Int) -> (Int, Int) {
+    let east = ground(t, x + 128, y) - ground(t, x - 128, y);
+    let south = ground(t, x, y + 128) - ground(t, x, y - 128);
+    (east / units(), south / units())
+}
+
+fn near_pin(h: Hole, x: Int, y: Int, r: Int) -> Bool {
+    let (px, py) = h.pin;
+    let (dx, dy) = (wrap(x - px), wrap(y - py));
+    dx * dx + dy * dy < r * r
+}
+
+// a frame of the ball's flight or roll, in four steps
+fn step_ball(b0: Ball, h: Hole) -> Ball {
+    let mut b = b0;
+    let mut k = 0;
+    while k < 4 && b.state < stopped() {
+        b = if b.state == flying() { fly_step(b, h) } else { roll_step(b, h) };
+        k = k + 1;
+    }
+    b
+}
+
+// (a 240th of a second each)
+fn fly_step(b: Ball, h: Hole) -> Ball {
+    let (wx, wy) = h.wind;
+    let vx = b.vx + wx / 240 - b.vx / 1600;
+    let vy = b.vy + wy / 240 - b.vy / 1600;
+    let vz = b.vz - gravity() / 240;
+    let (x, y) = ((b.x + vx / 240) & 65535, (b.y + vy / 240) & 65535);
+    let alt = b.alt + vz * units() / 240;
+    let floor = ground(h.land, x, y);
+    if alt > floor {
+        Ball { x: x, y: y, alt: alt, vx: vx, vy: vy, vz: vz, state: flying() }
+    } else if near_pin(h, x, y, 64) {
+        Ball { x: x, y: y, alt: floor, vx: 0, vy: 0, vz: 0, state: holed() }
+    } else if surface_at(h, x, y) == water() {
+        Ball { x: x, y: y, alt: floor, vx: 0, vy: 0, vz: 0, state: wet() }
+    } else {
+        // a bounce: it gives back some of its fall, keeps some of its
+        // speed, and is pushed a little down the slope
+        let s = surface_at(h, x, y);
+        let (sx, sy) = slope(h.land, x, y);
+        let up = -vz * bounce(s) / 256;
+        let nvx = (vx - sx * -vz / 512) * keep(s) / 256;
+        let nvy = (vy - sy * -vz / 512) * keep(s) / 256;
+        if up < 384 {
+            Ball { x: x, y: y, alt: floor, vx: nvx, vy: nvy, vz: 0, state: rolling() }
+        } else {
+            Ball { x: x, y: y, alt: floor + 1, vx: nvx, vy: nvy, vz: up, state: flying() }
+        }
+    }
+}
+
+fn roll_step(b: Ball, h: Hole) -> Ball {
+    let s = surface_at(h, b.x, b.y);
+    let (sx, sy) = slope(h.land, b.x, b.y);
+    // down the slope (a rolling ball feels five sevenths of it), less the
+    // surface's drag
+    let pull = gravity() * 5 / 7;
+    let vx = b.vx - (sx * pull >> 8) / 240;
+    let vy = b.vy - (sy * pull >> 8) / 240;
+    let speed = isqrt(vx * vx + vy * vy);
+    let slow = drag(s) / 240;
+    let (vx, vy) = if speed <= slow { (0, 0) } else { (vx - vx * slow / speed, vy - vy * slow / speed) };
+    let (x, y) = ((b.x + vx / 240) & 65535, (b.y + vy / 240) & 65535);
+    let floor = ground(h.land, x, y);
+    if surface_at(h, x, y) == water() {
+        Ball { x: x, y: y, alt: floor, vx: 0, vy: 0, vz: 0, state: wet() }
+    } else if near_pin(h, x, y, 64) && speed < 5 * 256 {
+        Ball { x: x, y: y, alt: floor, vx: 0, vy: 0, vz: 0, state: holed() }
+    } else if speed < 48 && (isqrt(sx * sx + sy * sy) * pull >> 8) < drag(s) {
+        Ball { x: x, y: y, alt: floor, vx: 0, vy: 0, vz: 0, state: stopped() }
+    } else if floor < b.alt - 512 {
+        // (off a drop: flying again)
+        Ball { x: x, y: y, alt: b.alt, vx: vx, vy: vy, vz: 0, state: flying() }
+    } else {
+        Ball { x: x, y: y, alt: floor, vx: vx, vy: vy, vz: 0, state: rolling() }
+    }
+}
+
+// where a ball comes to rest (or not: in the water, or the hole), and the
+// way it went (where it was every `every` frames)
+fn follow(b0: Ball, h: Hole, frames: Int, every: Int) -> (Ball, List<(Int, Int, Int)>) {
+    let mut b = b0;
+    let mut path = [];
+    let mut n = 0;
+    while n < frames && b.state < stopped() {
+        b = step_ball(b, h);
+        if n % every == 0 { path = Cons((b.x, b.y, b.alt), path) }
+        n = n + 1;
+    }
+    let end = if b.state < stopped() { Ball { x: b.x, y: b.y, alt: b.alt, vx: 0, vy: 0, vz: 0, state: stopped() } } else { b };
+    (end, path.reverse())
+}
+
+// the nearest fairway to a ball (where it's dropped, for a stroke's
+// penalty, from a lie it can't be played out of), or else the tee
+fn drop_spot(h: Hole, b: Ball) -> Ball {
+    let (cx, cy) = (b.x >> 8, b.y >> 8);
+    let mut best = h.tee;
+    let mut best_d = 1 << 30;
+    let mut dy = -60;
+    while dy <= 60 {
+        let mut dx = -60;
+        while dx <= 60 {
+            let d = dx * dx + dy * dy;
+            if d < best_d && array_get(h.surface, ((cy + dy) & 255) * 256 + ((cx + dx) & 255)) == fairway() {
+                best_d = d;
+                best = (((cx + dx) & 255) * 256 + 128, ((cy + dy) & 255) * 256 + 128);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    let (x, y) = best;
+    resting(h, x, y)
+}
+
+// whether a ball lies where it may be dropped from
+fn droppable(h: Hole, b: Ball) -> Bool {
+    let s = surface_at(h, b.x, b.y);
+    s != fairway() && s != green()
+}
+
+// ---- the clubs
+
+// its name, how fast it sends the ball at full power (256ths of a cell a
+// second), how steeply (1024ths of a turn), and how far a full shot carries
+// on level ground, roughly (cells)
+struct Club { name: String, speed: Int, angle: Int, carry: Int }
+
+fn clubs() -> List<Club> {
+    [Club { name: "DRIVER", speed: 62 * 256, angle: 44, carry: 125 },
+     Club { name: "IRON", speed: 41 * 256, angle: 72, carry: 85 },
+     Club { name: "WEDGE", speed: 28 * 256, angle: 120, carry: 50 },
+     Club { name: "PUTTER", speed: 10 * 256, angle: 0, carry: 14 }]
+}
+
+fn club(k: Int) -> Club { clubs().drop(k).head().unwrap() }
+
+// how much of a club's power a lie lets through (a wedge gets out of sand)
+fn lie_power(s: Int, k: Int) -> Int {
+    if s == sand() { if k == 2 { 85 } else { 45 } } else if s == trees() { 55 } else if s == rough() { 85 } else { 100 }
+}
+
+// the club for a ball this far from the pin, lying on this (out of sand,
+// the wedge)
+fn pick_club(s: Int, far: Int) -> Int {
+    if s == green() { 3 } else if s == sand() { 2 } else if far > 105 && s == fairway() { 0 } else if far > 60 { 1 } else { 2 }
+}
+
+// a ball hit with club k at `power` percent, toward yaw
+fn hit(b: Ball, h: Hole, k: Int, power: Int, yaw: Int, table: Array<Int>) -> Ball {
+    let c = club(k);
+    let v = c.speed * power / 100 * lie_power(surface_at(h, b.x, b.y), k) / 100;
+    let along = v * cos(table, c.angle) >> 16;
+    let up = v * sin(table, c.angle) >> 16;
+    let vx = along * cos(table, yaw) >> 16;
+    let vy = along * sin(table, yaw) >> 16;
+    Ball { x: b.x, y: b.y, alt: b.alt + 1, vx: vx, vy: vy, vz: up, state: if up > 0 { flying() } else { rolling() } }
+}
+
+fn yaw_to(x: Int, y: Int, tx: Int, ty: Int) -> Int {
+    // (the angle whose direction is nearest: by a search of the turn)
+    let (dx, dy) = (wrap(tx - x), wrap(ty - y));
+    let mut best = 0;
+    let mut best_dot = -(1 << 62);
+    let mut a = 0;
+    while a < 1024 {
+        let d = dx * sine_of(a + 256) + dy * sine_of(a);
+        if d > best_dot {
+            best_dot = d;
+            best = a;
+        }
+        a = a + 4;
+    }
+    best
+}
+
+// sin in thousandths, without the table (a parabola a half turn): to point
+// one way or another, good enough
+fn sine_of(a: Int) -> Int {
+    let t = a & 1023;
+    let h = t & 511;
+    let v = 4000 * h * (512 - h) / (512 * 512);
+    if t < 512 { v } else { -v }
+}
+
+// ---- seeing
+
+// the eye, `back` behind the ball (256ths of a cell) and `up` above it
+// (256ths of a unit), looking along yaw, and never in the ground
+fn behind(h: Hole, x: Int, y: Int, alt: Int, yaw: Int, back: Int, up: Int, table: Array<Int>) -> Eye {
+    let ex = (x - (cos(table, yaw) * back >> 16)) & 65535;
+    let ey = (y - (sin(table, yaw) * back >> 16)) & 65535;
+    let floor = ground(h.land, ex, ey);
+    Eye { x: ex, y: ey, alt: (alt + up).max(floor + 3 * 256), yaw: yaw, pitch: -70, bank: 0 }
+}
+
+// an eye moved part of the way to another
+fn toward(a: Eye, b: Eye, part: Int) -> Eye {
+    Eye { x: (a.x + wrap(b.x - a.x) * part / 256) & 65535, y: (a.y + wrap(b.y - a.y) * part / 256) & 65535, alt: a.alt + (b.alt - a.alt) * part / 256, yaw: b.yaw, pitch: b.pitch, bank: 0 }
+}
+
+// the flag: a white pole and a red flag that flaps
+fn draw_flag(f: Frame, e: Eye, h: Hole, table: Array<Int>, frame: Int) {
+    let (px, py) = h.pin;
+    let base = ground(h.land, px, py);
+    match (to_screen(f, e, table, px, py, base), to_screen(f, e, table, px, py, base + 16 * 256)) {
+        (Some((x, y0, z)), Some((_, y1, _))) => {
+            let mut y = y1.max(0);
+            while y <= y0.min(height() - 1) {
+                dot(f, x, y, z, rgb(240, 240, 240));
+                y = y + 1;
+            }
+            let size = (8 * 256 * 3 / z).clamp(2, 14);
+            let mut k = 0;
+            while k < size {
+                let wave = sin(table, frame * 16 + k * 60) * size / (65536 * 6);
+                let mut j = 0;
+                while j < (size - k) / 2 + 1 {
+                    dot(f, x + 1 + k, y1 + j + wave, z - 1, rgb(230, 40, 40));
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            dot(f, x, y0, z - 1, rgb(20, 20, 20));
+        }
+        _ => {}
+    }
+}
+
+// the ball, and while it's in the air, its shadow
+fn draw_ball(f: Frame, e: Eye, h: Hole, b: Ball, table: Array<Int>) {
+    let floor = ground(h.land, b.x, b.y);
+    if b.alt > floor + 64 {
+        match to_screen(f, e, table, b.x, b.y, floor) {
+            Some((x, y, z)) => dot(f, x, y, z, rgb(30, 50, 30)),
+            None => {}
+        }
+    }
+    match to_screen(f, e, table, b.x, b.y, b.alt + 40) {
+        Some((x, y, z)) => {
+            let white = rgb(255, 255, 255);
+            dot(f, x, y, z - 1, white);
+            if z < 12 * 256 {
+                dot(f, x + 1, y, z - 1, white);
+                dot(f, x, y - 1, z - 1, white);
+                dot(f, x + 1, y - 1, z - 1, white);
+            }
+        }
+        None => {}
+    }
+}
+
+// dots on the ground, fading as they go
+fn draw_dots(f: Frame, e: Eye, points: List<(Int, Int, Int)>, table: Array<Int>, r: Int, g: Int, b: Int) {
+    let n = points.len().max(1);
+    let mut k = 0;
+    points.each(|p| {
+        let (x, y, alt) = p;
+        // (a little above the ground, which far off is drawn a cell at a
+        // time, not smoothly)
+        match to_screen(f, e, table, x, y, alt + 160) {
+            Some((sx, sy, z)) => glow(f, sx, sy, z, r, g, b, 255 - 200 * k / n),
+            None => {}
+        }
+        k = k + 1;
+    });
+}
+
+// where a full shot with club k goes, straight along yaw: a dot every few
+// cells on the ground
+fn aim_line(h: Hole, b: Ball, k: Int, yaw: Int, table: Array<Int>) -> List<(Int, Int, Int)> {
+    let carry = club(k).carry * lie_power(surface_at(h, b.x, b.y), k) / 100;
+    (1..carry / 4 + 1).to_list().map(|i| {
+        let d = i * 4 * 256;
+        let x = (b.x + (cos(table, yaw) * d >> 16)) & 65535;
+        let y = (b.y + (sin(table, yaw) * d >> 16)) & 65535;
+        (x, y, ground(h.land, x, y))
+    })
+}
+
+// ---- the instruments
+
+fn label(c: Canvas, s: String, x: Int, y: Int, color: Int) {
+    text(c, s, x + 1, y + 1, 1, rgb(15, 20, 15));
+    text(c, s, x, y, 1, color);
+}
+
+fn centered(c: Canvas, s: String, y: Int, size: Int, color: Int) {
+    let x = (width() - text_width(s, size)) / 2;
+    text(c, s, x + 1, y + 1, size, rgb(15, 20, 15));
+    text(c, s, x, y, size, color);
+}
+
+// the hole from above, in the top right: the land, the tee, the pin, the
+// ball and which way it's aimed
+fn hole_map(c: Canvas, h: Hole, b: Ball, yaw: Int, table: Array<Int>) {
+    let size = 64;
+    let (left, top) = (width() - size - 4, 4);
+    let (tx, ty) = h.tee;
+    let (px, py) = h.pin;
+    let (mx, my) = ((tx + wrap(px - tx) / 2) & 65535, (ty + wrap(py - ty) / 2) & 65535);
+    let span = (wrap(px - tx).abs().max(wrap(py - ty).abs()) + 40 * 256) / size;
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            let cx = (mx + (x - size / 2) * span) & 65535;
+            let cy = (my + (y - size / 2) * span) & 65535;
+            array_set(c.pixels, (top + y) * width() + left + x, array_get(h.land.color, cell(cx, cy)) & 0xffffff);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let spot = |x: Int, y: Int, color: Int, r: Int| {
+        let (sx, sy) = (left + size / 2 + wrap(x - mx) / span, top + size / 2 + wrap(y - my) / span);
+        if sx >= left && sy >= top && sx < left + size && sy < top + size { fill_rect(c, sx - r / 2, sy - r / 2, r, r, color) }
+    };
+    let mut d = 1;
+    while d < 8 {
+        spot(b.x + (cos(table, yaw) * d * span * 3 >> 16), b.y + (sin(table, yaw) * d * span * 3 >> 16), rgb(255, 230, 120), 1);
+        d = d + 1;
+    }
+    spot(tx, ty, rgb(200, 200, 255), 2);
+    spot(px, py, rgb(255, 50, 50), 3);
+    spot(b.x, b.y, rgb(255, 255, 255), 2);
+}
+
+fn hud(c: Canvas, h: Hole, n: Int, strokes: Int, b: Ball, k: Int, yaw: Int, power: Int, aiming: Bool, table: Array<Int>) {
+    let ink = rgb(240, 245, 240);
+    label(c, "HOLE " ++ (n + 1).show() ++ "   PAR " ++ h.par.show(), 4, 4, ink);
+    label(c, "STROKE " ++ (strokes + 1).show(), 4, 13, ink);
+    let s = surface_at(h, b.x, b.y);
+    label(c, "LIE " ++ surface_name(s), 4, 22, if s == sand() || s == trees() { rgb(255, 200, 120) } else { ink });
+    label(c, "TO PIN " ++ to_pin(h, b.x, b.y).show(), 4, 31, ink);
+    if aiming && droppable(h, b) { label(c, "D DROP (+1)", 4, height() - 9, rgb(170, 180, 170)) }
+    // the wind: an arrow, as it blows relative to where you're aiming
+    let (wx, wy) = h.wind;
+    let strength = isqrt(wx * wx + wy * wy);
+    label(c, "WIND " ++ (strength / 100).show(), 4, 44, ink);
+    if strength > 0 {
+        let (co, si) = (cos(table, yaw), sin(table, yaw));
+        let ahead = (wx * co + wy * si) >> 16;
+        let side = (wy * co - wx * si) >> 16;
+        let (cx, cy) = (46, 46);
+        let mut t = 0;
+        while t <= 8 {
+            fill_rect(c, cx + side * t / strength, cy - ahead * t / strength, 1, 1, rgb(160, 220, 255));
+            t = t + 1;
+        }
+        fill_rect(c, cx + side * 8 / strength - 1, cy - ahead * 8 / strength - 1, 3, 3, rgb(160, 220, 255));
+    }
+    // the club
+    let name = "< " ++ club(k).name ++ " >";
+    label(c, name, (width() - text_width(name, 1)) / 2, height() - 22, rgb(255, 235, 150));
+    // the power meter
+    let (mx, my, mw) = (width() / 2 - 50, height() - 12, 100);
+    fill_rect(c, mx - 1, my - 1, mw + 2, 7, rgb(20, 25, 20));
+    if power > 0 {
+        let color = if power > 90 { rgb(255, 90, 60) } else if power > 60 { rgb(255, 210, 80) } else { rgb(120, 230, 120) };
+        fill_rect(c, mx, my, power * mw / 100, 5, color);
+    }
+    hole_map(c, h, b, yaw, table);
+}
+
+// the scorecard: each hole's par and strokes so far, and the totals
+fn scorecard(c: Canvas, pars: List<Int>, scores: List<Int>) {
+    let (left, top) = (24, 70);
+    fill_rect(c, left - 6, top - 8, width() - 2 * (left - 6), 56, rgb(240, 236, 220));
+    let ink = rgb(30, 40, 30);
+    text(c, "HOLE", left, top, 1, ink);
+    text(c, "PAR", left, top + 14, 1, ink);
+    text(c, "SCORE", left, top + 28, 1, ink);
+    let mut k = 0;
+    while k < holes() {
+        let x = left + 30 + k * 24;
+        text(c, (k + 1).show(), x, top, 1, ink);
+        match pars.drop(k).head() {
+            Some(p) => text(c, p.show(), x, top + 14, 1, ink),
+            None => {}
+        }
+        match (pars.drop(k).head(), scores.drop(k).head()) {
+            (Some(p), Some(s)) => text(c, s.show(), x, top + 28, 1, if s < p { rgb(200, 40, 40) } else if s == p { ink } else { rgb(40, 60, 160) }),
+            _ => {}
+        }
+        k = k + 1;
+    }
+    let played = scores.len();
+    let par_so_far = pars.take(played).sum();
+    let total = scores.sum();
+    let diff = total - par_so_far;
+    let rel = if diff == 0 { "EVEN" } else if diff > 0 { "+" ++ diff.show() } else { diff.show() };
+    text(c, "TOTAL " ++ total.show() ++ "  (" ++ rel ++ ")", left, top + 40, 1, ink);
+}
+
+fn verdict(strokes: Int, par: Int) -> String {
+    let d = strokes - par;
+    if strokes == 1 { "HOLE IN ONE!" } else if d <= -3 { "ALBATROSS!" } else if d == -2 { "EAGLE!" } else if d == -1 { "BIRDIE!" }
+    else if d == 0 { "PAR" } else if d == 1 { "BOGEY" } else if d == 2 { "DOUBLE BOGEY" } else { "+" ++ d.show() }
+}
+
+// ---- the game
+
+enum Phase { Title, Intro(Int), Aim, Swing(Int, Int), Moving(Int), Penalty(String, Int), Sunk(Int), Card, Final }
+
+fn main() {
+    if !screen_open(width(), height(), 3, "wild links") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let f = Frame { c: c, depth: array(width() * height(), 0), top: array(width(), 0) };
+    let table = sines();
+    let dice = rng(screen_ticks() + 9);
+    let mut seed = random(dice, 100000);
+    let mut n = 0;
+    let mut h = new_hole(seed, 0, table);
+    let (tx0, ty0) = h.tee;
+    let mut ball = resting(h, tx0, ty0);
+    let mut spot = ball;
+    let (px0, py0) = h.pin;
+    let mut yaw = yaw_to(tx0, ty0, px0, py0);
+    let mut eye = behind(h, ball.x, ball.y, ball.alt, yaw, 6 * 256, 40 * 256, table);
+    let mut k = 0;
+    let mut strokes = 0;
+    let mut pars = [];
+    let mut scores = [];
+    let mut phase = Title;
+    let mut frame = 0;
+    let mut beep = 0;
+    let mut title_turn = 0;
+    loop {
+        let ready = |hole: Hole, b: Ball| {
+            let s = surface_at(hole, b.x, b.y);
+            pick_club(s, to_pin(hole, b.x, b.y))
+        };
+        match phase {
+            Title => {
+                // circling the first green
+                title_turn = (title_turn + 1) & 1023;
+                let (px, py) = h.pin;
+                eye = behind(h, px, py, ground(h.land, px, py), title_turn, 30 * 256, 30 * 256, table);
+                if key_pressed(key_space()) {
+                    n = 0;
+                    pars = [];
+                    scores = [];
+                    phase = Intro(150);
+                }
+            }
+            Intro(t) => {
+                // from high over the tee, down behind the ball
+                if t == 150 {
+                    h = new_hole(seed, n, table);
+                    let (tx, ty) = h.tee;
+                    let (px, py) = h.pin;
+                    ball = resting(h, tx, ty);
+                    spot = ball;
+                    yaw = yaw_to(tx, ty, px, py);
+                    strokes = 0;
+                    k = ready(h, ball);
+                    eye = behind(h, ball.x, ball.y, ball.alt, yaw, 30 * 256, 70 * 256, table);
+                }
+                eye = toward(eye, behind(h, ball.x, ball.y, ball.alt, yaw, 8 * 256, 14 * 256, table), 12);
+                phase = if t <= 0 || key_pressed(key_space()) { Aim } else { Intro(t - 1) };
+            }
+            Aim => {
+                if key_down(key_left()) { yaw = (yaw - 3) & 1023 }
+                if key_down(key_right()) { yaw = (yaw + 3) & 1023 }
+                if key_pressed(key_up()) { k = (k + 3) % 4 }
+                if key_pressed(key_down_arrow()) { k = (k + 1) % 4 }
+                eye = toward(eye, behind(h, ball.x, ball.y, ball.alt, yaw, 8 * 256, 14 * 256, table), 64);
+                if key_pressed(key_space()) {
+                    phase = Swing(0, 1);
+                } else if key_pressed(key("d")) && droppable(h, ball) {
+                    strokes = strokes + 1;
+                    ball = drop_spot(h, ball);
+                    phase = Penalty("DROPPED ON THE FAIRWAY: A STROKE PENALTY", 90);
+                }
+            }
+            Swing(power, way) => {
+                if key_down(key_space()) {
+                    // (up to full, then back down, until let go)
+                    let p = power + 2 * way;
+                    phase = if p >= 100 { Swing(100, -1) } else if p <= 0 { Swing(0, 1) } else { Swing(p, way) };
+                } else {
+                    spot = ball;
+                    strokes = strokes + 1;
+                    ball = hit(ball, h, k, power.max(1), yaw, table);
+                    beep = 3;
+                    phase = Moving(0);
+                }
+            }
+            Moving(t) => {
+                ball = step_ball(ball, h);
+                eye = toward(eye, behind(h, ball.x, ball.y, ball.alt, yaw, 9 * 256, 14 * 256, table), 24);
+                if ball.state == holed() {
+                    beep = 20;
+                    phase = Sunk(150);
+                } else if ball.state == wet() {
+                    // a stroke's penalty, and again from where it was hit
+                    beep = 8;
+                    strokes = strokes + 1;
+                    ball = spot;
+                    phase = Penalty("IN THE WATER: A STROKE PENALTY", 100);
+                } else if ball.state == stopped() || t > 1500 {
+                    ball = resting(h, ball.x, ball.y);
+                    if strokes >= 10 {
+                        phase = Sunk(150);
+                    } else {
+                        let (px, py) = h.pin;
+                        yaw = yaw_to(ball.x, ball.y, px, py);
+                        k = ready(h, ball);
+                        phase = Aim;
+                    }
+                } else {
+                    phase = Moving(t + 1);
+                }
+            }
+            Penalty(why, t) => {
+                eye = toward(eye, behind(h, ball.x, ball.y, ball.alt, yaw, 8 * 256, 14 * 256, table), 24);
+                if t > 0 {
+                    phase = Penalty(why, t - 1);
+                } else if strokes >= 10 {
+                    phase = Sunk(150);
+                } else {
+                    let (px, py) = h.pin;
+                    yaw = yaw_to(ball.x, ball.y, px, py);
+                    k = ready(h, ball);
+                    phase = Aim;
+                }
+            }
+            Sunk(t) => {
+                if t <= 0 || key_pressed(key_space()) {
+                    pars = pars.append([h.par]);
+                    scores = scores.append([strokes]);
+                    phase = if n + 1 >= holes() { Final } else { Card };
+                } else {
+                    phase = Sunk(t - 1);
+                }
+            }
+            Card => {
+                if key_pressed(key_space()) {
+                    n = n + 1;
+                    phase = Intro(150);
+                }
+            }
+            Final => {
+                if key_pressed(key_space()) {
+                    seed = random(dice, 100000);
+                    h = new_hole(seed, 0, table);
+                    phase = Title;
+                }
+            }
+        }
+        beep = (beep - 1).max(0);
+        screen_beep(beep > 0);
+
+        // the picture: the afternoon getting on, hole by hole
+        let l = light(140 - n * 14);
+        draw_land(f, h.land, eye, l, table);
+        draw_sky(f, eye, l, table);
+        draw_flag(f, eye, h, table, frame);
+        match phase {
+            Aim => draw_dots(f, eye, if k == 3 { let (_, path) = follow(hit(ball, h, 3, 60, yaw, table), h, 240, 6); path.take(path.len() * 3 / 5) } else { aim_line(h, ball, k, yaw, table) }, table, 255, 240, 160),
+            _ => {}
+        }
+        match phase {
+            Title => {}
+            Sunk(_) => {}
+            _ => draw_ball(f, eye, h, ball, table),
+        }
+        match phase {
+            Title => {
+                centered(c, "WILD LINKS", 34, 4, rgb(255, 250, 230));
+                centered(c, "NINE HOLES ACROSS WILD COUNTRY", 70, 1, rgb(230, 240, 230));
+                centered(c, "LEFT RIGHT AIM   UP DOWN CLUB   HOLD SPACE TO SWING", 128, 1, rgb(255, 235, 160));
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 160, 2, rgb(255, 255, 255)) }
+            }
+            Intro(_) => {
+                centered(c, "HOLE " ++ (n + 1).show(), 40, 3, rgb(255, 250, 230));
+                centered(c, "PAR " ++ h.par.show() ++ "   " ++ to_pin(h, ball.x, ball.y).show() ++ " TO THE PIN", 70, 1, rgb(230, 240, 230));
+            }
+            Card => {
+                scorecard(c, pars, scores);
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE FOR HOLE " ++ (n + 2).show(), 150, 1, rgb(255, 255, 255)) }
+            }
+            Final => {
+                centered(c, "ROUND OVER", 30, 3, rgb(255, 250, 230));
+                scorecard(c, pars, scores);
+                if frame / 30 % 2 == 0 { centered(c, "PRESS SPACE", 160, 2, rgb(255, 255, 255)) }
+            }
+            Sunk(_) => {
+                centered(c, if strokes >= 10 && ball.state != holed() { "PICKED UP" } else { verdict(strokes, h.par) }, 60, 3, rgb(255, 250, 230));
+            }
+            Penalty(why, _) => {
+                hud(c, h, n, strokes, ball, k, yaw, 0, false, table);
+                centered(c, why, 70, 1, rgb(140, 200, 255));
+            }
+            Swing(power, _) => hud(c, h, n, strokes, ball, k, yaw, power, false, table),
+            Aim => hud(c, h, n, strokes, ball, k, yaw, 0, true, table),
+            _ => hud(c, h, n, strokes, ball, k, yaw, 0, false, table),
+        }
+        frame = frame + 1;
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}

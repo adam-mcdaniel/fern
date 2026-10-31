@@ -1,0 +1,1781 @@
+// The standard library. Everything public here is in every module (the
+// prelude), and is `std::name` from anywhere. A module's own items, and
+// what it `use`s, come before the prelude's of the same name.
+//
+// It's all fern, on the built-ins (printing, strings' lengths and
+// characters, arrays): nothing here needs anything else.
+//
+// What's about one type is that type's methods (`xs.take(3)`,
+// `m.insert(k, v)`, `Map::new()`); what isn't is a function.
+//
+// The sections: comparing and showing; functions; numbers and characters;
+// rational numbers; Option and Result; pairs; lists; strings; arrays; maps
+// and sets; effects.
+
+// ---- comparing and showing
+
+pub trait Eq {
+    fn eq(self, other: Self) -> Bool;
+    fn ne(self, other: Self) -> Bool { !self.eq(other) }
+}
+
+// cmp: negative, 0 or positive, as self is less than, equal to, or more
+// than other
+pub trait Ord: Eq {
+    fn cmp(self, other: Self) -> Int;
+    fn min(self, other: Self) -> Self { if self.cmp(other) <= 0 { self } else { other } }
+    fn max(self, other: Self) -> Self { if self.cmp(other) >= 0 { self } else { other } }
+}
+
+pub trait Show {
+    fn show(self) -> String;
+}
+
+impl Eq for Int {
+    fn eq(self, other: Int) -> Bool { int_eq(self, other) }
+}
+
+impl Ord for Int {
+    fn cmp(self, other: Int) -> Int {
+        if int_lt(self, other) { -1 } else if int_eq(self, other) { 0 } else { 1 }
+    }
+    // (its own, not the defaults, which go through Ord's dictionary: these
+    // are direct functions, see direct.rs)
+    fn min(self, other: Int) -> Int { if int_lt(other, self) { other } else { self } }
+    fn max(self, other: Int) -> Int { if int_lt(self, other) { other } else { self } }
+}
+
+impl Show for Int {
+    fn show(self) -> String { int_to_string(self) }
+}
+
+impl Eq for Bool {
+    fn eq(self, other: Bool) -> Bool { if self { other } else { !other } }
+}
+
+// false before true
+impl Ord for Bool {
+    fn cmp(self, other: Bool) -> Int { if self == other { 0 } else if self { 1 } else { -1 } }
+}
+
+impl Show for Bool {
+    fn show(self) -> String { if self { "true" } else { "false" } }
+}
+
+impl Eq for String {
+    fn eq(self, other: String) -> Bool { string_eq(self, other) }
+}
+
+impl Ord for String {
+    fn cmp(self, other: String) -> Int {
+        if string_lt(self, other) { -1 } else if string_eq(self, other) { 0 } else { 1 }
+    }
+}
+
+impl Show for String {
+    fn show(self) -> String { "\"" ++ self ++ "\"" }
+}
+
+impl Eq for () {
+    fn eq(self, other: ()) -> Bool { true }
+}
+
+impl Ord for () {
+    fn cmp(self, other: ()) -> Int { 0 }
+}
+
+impl Show for () {
+    fn show(self) -> String { "()" }
+}
+
+// (Eq, Ord and Show for tuples of 2 to 12 are written by the compiler: see
+// tuple_impls in derive.rs)
+
+// What + - * / % and negation mean: `a + b` is `a.add(b)`, for a type with
+// Add (and for an Int, the machine's own arithmetic). A trait each, so a
+// type has those that mean something for it: a vector has + and -, say,
+// but not /.
+pub trait Add { fn add(self, other: Self) -> Self; }
+pub trait Sub { fn sub(self, other: Self) -> Self; }
+pub trait Mul { fn mul(self, other: Self) -> Self; }
+pub trait Div { fn div(self, other: Self) -> Self; }
+pub trait Rem { fn rem(self, other: Self) -> Self; }
+pub trait Neg { fn neg(self) -> Self; }
+
+impl Add for Int { fn add(self, other: Int) -> Int { self + other } }
+impl Sub for Int { fn sub(self, other: Int) -> Int { self - other } }
+impl Mul for Int { fn mul(self, other: Int) -> Int { self * other } }
+// (both rounding toward 0)
+impl Div for Int { fn div(self, other: Int) -> Int { self / other } }
+impl Rem for Int { fn rem(self, other: Int) -> Int { self % other } }
+impl Neg for Int { fn neg(self) -> Int { -self } }
+
+// A number: a type with all of + - * / and negation (not %, which isn't
+// much use for fractions), for code that does arithmetic on any of them:
+// `fn lerp<T: Num>(a: T, b: T, t: T) -> T { a + (b - a) * t }`.
+pub trait Num: Add + Sub + Mul + Div + Neg {}
+
+impl Num for Int {}
+
+// the larger and smaller of two (as functions, not methods)
+pub fn max<T: Ord>(a: T, b: T) -> T { a.max(b) }
+pub fn min<T: Ord>(a: T, b: T) -> T { a.min(b) }
+
+// ---- functions
+
+pub fn id<T>(x: T) -> T { x }
+
+// f after g
+pub fn compose<A, B, C, 'e>(f: fn(B) -> C with 'e, g: fn(A) -> B with 'e) -> fn(A) -> C with 'e {
+    |x| f(g(x))
+}
+
+pub fn flip<A, B, C, 'e>(f: fn(A, B) -> C with 'e) -> fn(B, A) -> C with 'e {
+    |b, a| f(a, b)
+}
+
+// f applied n times: f(f(...f(x)))
+pub fn apply_n<T, 'e>(f: fn(T) -> T with 'e, n: Int, x: T) -> T with 'e {
+    let mut v = x;
+    let mut i = 0;
+    while i < n {
+        v = f(v);
+        i = i + 1;
+    }
+    v
+}
+
+// ---- numbers and characters
+
+impl Int {
+    pub fn abs(self) -> Int { if self < 0 { -self } else { self } }
+
+    // -1, 0 or 1
+    pub fn sign(self) -> Int { if self < 0 { -1 } else if self > 0 { 1 } else { 0 } }
+
+    pub fn clamp(self, lo: Int, hi: Int) -> Int { if self < lo { lo } else if self > hi { hi } else { self } }
+
+    pub fn is_even(self) -> Bool { self % 2 == 0 }
+    pub fn is_odd(self) -> Bool { self % 2 != 0 }
+
+    // self to the e (e at least 0), by squaring
+    pub fn pow(self, e: Int) -> Int {
+        let mut result = 1;
+        let mut base = self;
+        let mut k = e;
+        while k > 0 {
+            if k & 1 == 1 { result = result * base }
+            base = base * base;
+            k = k >> 1;
+        }
+        result
+    }
+
+    // the greatest common divisor (Euclid's), and least common multiple
+    pub fn gcd(self, other: Int) -> Int {
+        let mut x = self.abs();
+        let mut y = other.abs();
+        while y != 0 {
+            let t = x % y;
+            x = y;
+            y = t;
+        }
+        x
+    }
+
+    pub fn lcm(self, other: Int) -> Int {
+        if self == 0 || other == 0 { 0 } else { (self / self.gcd(other) * other).abs() }
+    }
+
+    // division rounding down, and the remainder that goes with it, which
+    // has the divisor's sign (`/` and `%` round toward 0: -7 / 2 is -3, but
+    // -7.div_floor(2) is -4, and -7.mod_floor(2) is 1)
+    pub fn div_floor(self, d: Int) -> Int {
+        let q = self / d;
+        if self % d != 0 && (self < 0) != (d < 0) { q - 1 } else { q }
+    }
+
+    pub fn mod_floor(self, d: Int) -> Int {
+        let r = self % d;
+        if r != 0 && (r < 0) != (d < 0) { r + d } else { r }
+    }
+
+    // the largest integer whose square is at most self (Newton's method)
+    pub fn isqrt(self) -> Int {
+        let n = self;
+        if n < 2 {
+            n.max(0)
+        } else {
+            // (from a power of two at least as big as the root)
+            let mut x = 1;
+            let mut m = n;
+            while m > 0 {
+                m = m >> 2;
+                x = x << 1;
+            }
+            let mut y = (x + n / x) / 2;
+            while y < x {
+                x = y;
+                y = (x + n / x) / 2;
+            }
+            x
+        }
+    }
+
+    // the largest k with 2^k at most self (self at least 1)
+    pub fn log2(self) -> Int {
+        let mut k = 0;
+        let mut m = self;
+        while m > 1 {
+            m = m >> 1;
+            k = k + 1;
+        }
+        k
+    }
+
+    // how many of its bits are 1
+    pub fn count_ones(self) -> Int {
+        let mut count = 0;
+        let mut m = self;
+        while m != 0 {
+            m = m & (m - 1);
+            count = count + 1;
+        }
+        count
+    }
+
+    // in base 2 to 36: 255.to_base(16) is "ff"
+    pub fn to_base(self, base: Int) -> String {
+        if self < 0 {
+            "-" ++ (-self).to_base(base)
+        } else {
+            let mut digits = Nil;
+            let mut m = self;
+            loop {
+                digits = Cons((m % base).digit_char(), digits);
+                m = m / base;
+                if m == 0 { break; }
+            }
+            String::from_chars(digits)
+        }
+    }
+
+    // A character is its code (char_at gives them):
+
+    pub fn is_digit(self) -> Bool { self >= 48 && self <= 57 }
+    pub fn is_upper(self) -> Bool { self >= 65 && self <= 90 }
+    pub fn is_lower(self) -> Bool { self >= 97 && self <= 122 }
+    pub fn is_alpha(self) -> Bool { self.is_upper() || self.is_lower() }
+    pub fn is_alphanumeric(self) -> Bool { self.is_alpha() || self.is_digit() }
+    // space, tab, newline, carriage return
+    pub fn is_space(self) -> Bool { self == 32 || self == 9 || self == 10 || self == 13 }
+    pub fn to_upper(self) -> Int { if self.is_lower() { self - 32 } else { self } }
+    pub fn to_lower(self) -> Int { if self.is_upper() { self + 32 } else { self } }
+
+    // the character as a string of one
+    pub fn to_char(self) -> String { char_to_string(self) }
+
+    // the character for the digit self, 0 to 35: 0-9, then a-z
+    fn digit_char(self) -> Int { if self < 10 { 48 + self } else { 87 + self } }
+
+    // what digit the character is, in base 2 to 36, if it's one
+    pub fn digit_value(self, base: Int) -> Option<Int> {
+        let d = if self.is_digit() { self - 48 } else if self.is_lower() { self - 87 } else if self.is_upper() { self - 55 } else { 99 };
+        if d < base { Some(d) } else { None }
+    }
+}
+
+
+// ---- rational numbers
+
+// A fraction n / d, exactly: arithmetic without rounding, in place of
+// floating point. `1.25` is one (`Rational::new(5, 4)`), and + - * /, ==,
+// < and the rest work on them. It's kept in lowest terms with d positive,
+// so equal numbers are equal values. (n and d are Ints, which a long
+// calculation can make overflow; `limit` keeps them small.)
+#[derive(Eq)]
+pub struct Rational { num: Int, den: Int }
+
+impl Rational {
+    // n / d (d not 0)
+    pub fn new(n: Int, d: Int) -> Rational {
+        if d == 0 { panic("a rational number over 0\n") }
+        let g = n.gcd(d);
+        let s = if d < 0 { -1 } else { 1 };
+        Rational { num: s * n / g, den: s * d / g }
+    }
+
+    pub fn from_int(n: Int) -> Rational { Rational { num: n, den: 1 } }
+
+    // n and d, in lowest terms (d positive)
+    pub fn numerator(self) -> Int { self.num }
+    pub fn denominator(self) -> Int { self.den }
+
+    pub fn is_integer(self) -> Bool { self.den == 1 }
+
+    // the integer at or below it, at or above it, nearest (halves up), and
+    // toward 0
+    pub fn floor(self) -> Int { self.num.div_floor(self.den) }
+    pub fn ceil(self) -> Int { -(-self.num).div_floor(self.den) }
+    pub fn round(self) -> Int { (2 * self.num + self.den).div_floor(2 * self.den) }
+    pub fn trunc(self) -> Int { self.num / self.den }
+
+    pub fn abs(self) -> Rational { Rational { num: self.num.abs(), den: self.den } }
+    pub fn sign(self) -> Int { self.num.sign() }
+
+    // 1 / it (it not 0)
+    pub fn recip(self) -> Rational { Rational::new(self.den, self.num) }
+
+    // it to the e (negative e too)
+    pub fn pow(self, e: Int) -> Rational {
+        if e < 0 { self.recip().pow(-e) } else { Rational { num: self.num.pow(e), den: self.den.pow(e) } }
+    }
+
+    // the nearest number with denominator at most max_den (by its continued
+    // fraction: the best there is that small)
+    pub fn limit(self, max_den: Int) -> Rational {
+        if self.den <= max_den {
+            self
+        } else {
+            let (p0, q0, p1, q1) = convergents(self.num.abs(), self.den, max_den, 0, 1, 1, 0);
+            // (the last convergent, or the one between the last two nearest)
+            let k = (max_den - q0) / q1;
+            let a = Rational::new(p0 + k * p1, q0 + k * q1);
+            let b = Rational::new(p1, q1);
+            let me = self.abs();
+            let best = if (a - me).abs() <= (b - me).abs() { a } else { b };
+            if self.num < 0 { -best } else { best }
+        }
+    }
+
+    // the square root (it not negative), to about 12 places: Newton's
+    // method, keeping each step's denominator to a million
+    pub fn sqrt(self) -> Rational {
+        if self.num < 0 { panic("the square root of a negative number\n") }
+        if self.num == 0 {
+            self
+        } else {
+            let mut x = Rational::new(self.num.isqrt().max(1), self.den.isqrt().max(1));
+            let mut i = 0;
+            while i < 40 {
+                let next = ((x + self / x) / Rational::from_int(2)).limit(1000000);
+                if next == x { i = 40 } else { x = next; i = i + 1; }
+            }
+            x
+        }
+    }
+
+    // in decimal, rounded to `places` places (halves away from 0):
+    // 1.25.to_decimal(1) is "1.3". By long division, a digit at a time, so
+    // nothing gets bigger than the denominator times 10.
+    pub fn to_decimal(self, places: Int) -> String {
+        let n = self.num.abs();
+        let mut whole = n / self.den;
+        let mut rem = n % self.den;
+        let mut digits = Nil;
+        let mut i = 0;
+        while i < places {
+            digits = Cons(rem * 10 / self.den, digits);
+            rem = rem * 10 % self.den;
+            i = i + 1;
+        }
+        // (rounding: a carry back through the digits, last first)
+        let mut carry = if 2 * rem >= self.den { 1 } else { 0 };
+        let mut rounded = Nil;
+        let mut rest = digits;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(d, more) => {
+                    let total = d + carry;
+                    rounded = Cons(total % 10, rounded);
+                    carry = total / 10;
+                    rest = more;
+                }
+            }
+        }
+        whole = whole + carry;
+        let zero = whole == 0 && rounded.all(|d| d == 0);
+        let sign = if self.num < 0 && !zero { "-" } else { "" };
+        let frac = String::from_chars(rounded.map(|d| d + 48));
+        if places <= 0 { sign ++ whole.show() } else { sign ++ whole.show() ++ "." ++ frac }
+    }
+
+    // the number s is written as: "3", "-7/2" or "1.25"
+    pub fn parse(s: String) -> Option<Rational> {
+        let t = s.trim();
+        match t.find("/") {
+            Some(at) => match (t.substring(0, at).parse_int(), t.substring(at + 1, t.len()).parse_int()) {
+                (Some(n), Some(d)) => if d == 0 { None } else { Some(Rational::new(n, d)) },
+                _ => None,
+            },
+            None => match t.find(".") {
+                None => t.parse_int().map(Rational::from_int),
+                Some(at) => {
+                    let whole = t.substring(0, at);
+                    let frac = t.substring(at + 1, t.len());
+                    let negative = whole.starts_with("-");
+                    let digits = if negative || whole.starts_with("+") { whole.substring(1, whole.len()) } else { whole };
+                    match ((digits ++ frac).parse_int(), frac.chars().all(|c| c.is_digit())) {
+                        (Some(n), true) => {
+                            let r = Rational::new(n, 10.pow(frac.len()));
+                            Some(if negative { -r } else { r })
+                        }
+                        _ => None,
+                    }
+                }
+            },
+        }
+    }
+}
+
+// the continued fraction's convergents of n / d (n, d positive) while their
+// denominators stay at most max_den: the last two, p0/q0 and p1/q1
+fn convergents(n: Int, d: Int, max_den: Int, p0: Int, q0: Int, p1: Int, q1: Int) -> (Int, Int, Int, Int) {
+    if d == 0 {
+        (p0, q0, p1, q1)
+    } else {
+        let a = n / d;
+        let q2 = q0 + a * q1;
+        if q2 > max_den { (p0, q0, p1, q1) } else { convergents(d, n - a * d, max_den, p1, q1, p0 + a * p1, q2) }
+    }
+}
+
+// Arithmetic, as cheaply as it can be exact: a result that's in lowest
+// terms already isn't reduced again (and subtracting and dividing don't
+// make the negation or the reciprocal first).
+impl Rational {
+    // it + n/d (n/d in lowest terms, d positive), Knuth's way (The Art of
+    // Computer Programming, 4.5.1): the sum's only common factors are the
+    // denominators' common ones
+    fn plus(self, n: Int, d: Int) -> Rational {
+        if self.den == d {
+            if d == 1 { Rational { num: self.num + n, den: 1 } } else { Rational::new(self.num + n, d) }
+        } else if d == 1 {
+            // (adding a whole number never makes it reducible)
+            Rational { num: self.num + n * self.den, den: self.den }
+        } else if self.den == 1 {
+            Rational { num: self.num * d + n, den: d }
+        } else {
+            let g = self.den.gcd(d);
+            if g == 1 {
+                Rational { num: self.num * d + n * self.den, den: self.den * d }
+            } else {
+                let t = self.num * (d / g) + n * (self.den / g);
+                if t == 0 {
+                    Rational { num: 0, den: 1 }
+                } else {
+                    let g2 = t.gcd(g);
+                    Rational { num: t / g2, den: self.den / g * (d / g2) }
+                }
+            }
+        }
+    }
+
+    // it * n/d (n/d in lowest terms, d positive): each side's numerator
+    // cancelled against the other's denominator first, after which it's in
+    // lowest terms
+    fn times(self, n: Int, d: Int) -> Rational {
+        if self.den == 1 && d == 1 {
+            Rational { num: self.num * n, den: 1 }
+        } else if self.num == 0 || n == 0 {
+            Rational { num: 0, den: 1 }
+        } else {
+            let g1 = self.num.gcd(d);
+            let g2 = n.gcd(self.den);
+            Rational { num: self.num / g1 * (n / g2), den: self.den / g2 * (d / g1) }
+        }
+    }
+}
+
+impl Add for Rational {
+    fn add(self, other: Rational) -> Rational { self.plus(other.num, other.den) }
+}
+
+impl Sub for Rational {
+    fn sub(self, other: Rational) -> Rational { self.plus(-other.num, other.den) }
+}
+
+impl Mul for Rational {
+    fn mul(self, other: Rational) -> Rational { self.times(other.num, other.den) }
+}
+
+impl Div for Rational {
+    fn div(self, other: Rational) -> Rational {
+        if other.num == 0 { panic("dividing by 0\n") }
+        // (by the reciprocal, its sign on top)
+        if other.num < 0 { self.times(-other.den, -other.num) } else { self.times(other.den, other.num) }
+    }
+}
+
+impl Neg for Rational {
+    fn neg(self) -> Rational { Rational { num: -self.num, den: self.den } }
+}
+
+impl Num for Rational {}
+
+// (by multiplying when that can't overflow, else without: see
+// compare_fractions)
+impl Ord for Rational {
+    fn cmp(self, other: Rational) -> Int {
+        if self.den == other.den {
+            self.num.cmp(other.num)
+        } else if self.num.abs() < 2147483648 && other.num.abs() < 2147483648 && self.den < 2147483648 && other.den < 2147483648 {
+            (self.num * other.den).cmp(other.num * self.den)
+        } else {
+            compare_fractions(self.num, self.den, other.num, other.den)
+        }
+    }
+}
+
+// a/b against c/d (b, d positive), the way Euclid's algorithm goes: the
+// integer parts, then if those are the same, the fractional parts' upside
+// downs, the other way round
+fn compare_fractions(a: Int, b: Int, c: Int, d: Int) -> Int {
+    let fa = a.div_floor(b);
+    let fc = c.div_floor(d);
+    if fa != fc {
+        fa.cmp(fc)
+    } else {
+        let ra = a - fa * b;
+        let rc = c - fc * d;
+        if ra == 0 || rc == 0 { ra.sign() - rc.sign() } else { compare_fractions(d, rc, b, ra) }
+    }
+}
+
+// "7/2", or "3" for a whole number (see to_decimal for decimals)
+impl Show for Rational {
+    fn show(self) -> String { if self.den == 1 { self.num.show() } else { self.num.show() ++ "/" ++ self.den.show() } }
+}
+
+// ---- ranges
+
+// The integers from start up to (not including) end: `a..b` makes one, and
+// `a..=b` one up to and including b. Nothing's made of its numbers until
+// something asks: `(1..11).map(f)` is f of each, and `choose(-5..=5)` picks
+// one.
+#[derive(Eq)]
+pub struct Range { start: Int, end: Int }
+
+impl Range {
+    pub fn new(start: Int, end: Int) -> Range { Range { start: start, end: end } }
+
+    pub fn len(self) -> Int { (self.end - self.start).max(0) }
+    pub fn is_empty(self) -> Bool { self.end <= self.start }
+    pub fn contains(self, n: Int) -> Bool { n >= self.start && n < self.end }
+
+    pub fn to_list(self) -> List<Int> { self.step_by(1) }
+
+    // every step-th, from the start: (0..10).step_by(3) is [0, 3, 6, 9]
+    pub fn step_by(self, step: Int) -> List<Int> {
+        let mut out = Nil;
+        let mut i = self.start;
+        while i < self.end {
+            out = Cons(i, out);
+            i = i + step.max(1);
+        }
+        out.reverse()
+    }
+
+    // from the end down: (1..4).rev() is [3, 2, 1]
+    pub fn rev(self) -> List<Int> {
+        let mut out = Nil;
+        let mut i = self.start;
+        while i < self.end {
+            out = Cons(i, out);
+            i = i + 1;
+        }
+        out
+    }
+
+    pub fn each<'e>(self, f: fn(Int) -> () with 'e) with 'e {
+        let mut i = self.start;
+        while i < self.end {
+            f(i);
+            i = i + 1;
+        }
+    }
+
+    pub fn fold<B, 'e>(self, init: B, f: fn(B, Int) -> B with 'e) -> B with 'e {
+        let mut acc = init;
+        let mut i = self.start;
+        while i < self.end {
+            acc = f(acc, i);
+            i = i + 1;
+        }
+        acc
+    }
+
+    pub fn map<B, 'e>(self, f: fn(Int) -> B with 'e) -> List<B> with 'e { self.to_list().map(f) }
+    pub fn filter<'e>(self, keep: fn(Int) -> Bool with 'e) -> List<Int> with 'e { self.to_list().filter(keep) }
+}
+
+// "1..11"
+impl Show for Range {
+    fn show(self) -> String { self.start.show() ++ ".." ++ self.end.show() }
+}
+
+// ---- Option and Result
+
+#[derive(Eq, Ord, Show)]
+pub enum Option<T> { None, Some(T) }
+
+impl<T> Option<T> {
+    pub fn is_some(self) -> Bool { match self { Some(_) => true, None => false } }
+    pub fn is_none(self) -> Bool { !self.is_some() }
+
+    pub fn unwrap_or(self, default: T) -> T { match self { Some(x) => x, None => default } }
+
+    // what's in it, or the program stops
+    pub fn unwrap(self) -> T { match self { Some(x) => x, None => panic("unwrap of None\n") } }
+    pub fn expect(self, why: String) -> T { match self { Some(x) => x, None => panic(why ++ "\n") } }
+
+    pub fn map<B, 'e>(self, f: fn(T) -> B with 'e) -> Option<B> with 'e {
+        match self { Some(x) => Some(f(x)), None => None }
+    }
+
+    // f of what's in it, if there's something (f may find nothing too)
+    pub fn and_then<B, 'e>(self, f: fn(T) -> Option<B> with 'e) -> Option<B> with 'e {
+        match self { Some(x) => f(x), None => None }
+    }
+
+    // this if it has something, else other
+    pub fn or(self, other: Option<T>) -> Option<T> { match self { Some(_) => self, None => other } }
+
+    // Ok of what's in it, or Err(why)
+    pub fn ok_or<E>(self, why: E) -> Result<T, E> { match self { Some(x) => Ok(x), None => Err(why) } }
+
+    pub fn to_list(self) -> List<T> { match self { Some(x) => [x], None => [] } }
+}
+
+#[derive(Eq, Show)]
+pub enum Result<T, E> { Ok(T), Err(E) }
+
+impl<T, E> Result<T, E> {
+    pub fn is_ok(self) -> Bool { match self { Ok(_) => true, Err(_) => false } }
+    pub fn is_err(self) -> Bool { !self.is_ok() }
+
+    // what an Ok has, as an Option
+    pub fn ok(self) -> Option<T> { match self { Ok(x) => Some(x), Err(_) => None } }
+
+    pub fn unwrap_or(self, default: T) -> T { match self { Ok(x) => x, Err(_) => default } }
+    pub fn unwrap(self) -> T { match self { Ok(x) => x, Err(_) => panic("unwrap of Err\n") } }
+
+    pub fn map<B, 'e>(self, f: fn(T) -> B with 'e) -> Result<B, E> with 'e {
+        match self { Ok(x) => Ok(f(x)), Err(e) => Err(e) }
+    }
+
+    pub fn map_err<F, 'e>(self, f: fn(E) -> F with 'e) -> Result<T, F> with 'e {
+        match self { Ok(x) => Ok(x), Err(e) => Err(f(e)) }
+    }
+
+    pub fn and_then<B, 'e>(self, f: fn(T) -> Result<B, E> with 'e) -> Result<B, E> with 'e {
+        match self { Ok(x) => f(x), Err(e) => Err(e) }
+    }
+}
+
+// ---- pairs
+
+pub fn fst<A, B>(p: (A, B)) -> A { let (a, _) = p; a }
+pub fn snd<A, B>(p: (A, B)) -> B { let (_, b) = p; b }
+pub fn swap<A, B>(p: (A, B)) -> (B, A) { let (a, b) = p; (b, a) }
+
+// ---- lists
+
+#[derive(Eq, Ord)]
+pub enum List<T> { Nil, Cons(T, List<T>) }
+
+impl<T: Show> Show for List<T> {
+    fn show(self) -> String { "[" ++ self.map(|x| x.show()).join(", ") ++ "]" }
+}
+
+// n of x
+pub fn repeat<T>(x: T, n: Int) -> List<T> {
+    let mut out = Nil;
+    let mut k = 0;
+    while k < n {
+        out = Cons(x, out);
+        k = k + 1;
+    }
+    out
+}
+
+impl<T> List<T> {
+    pub fn is_empty(self) -> Bool { match self { Nil => true, Cons(_, _) => false } }
+
+    pub fn len(self) -> Int {
+        let mut n = 0;
+        let mut rest = self;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(_, tail) => { n = n + 1; rest = tail; }
+            }
+        }
+        n
+    }
+
+    pub fn head(self) -> Option<T> { match self { Nil => None, Cons(x, _) => Some(x) } }
+
+    // all but the first (nothing, for nothing)
+    pub fn tail(self) -> List<T> { match self { Nil => Nil, Cons(_, rest) => rest } }
+
+    pub fn last(self) -> Option<T> {
+        let mut found = None;
+        let mut rest = self;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(x, more) => { found = Some(x); rest = more; }
+            }
+        }
+        found
+    }
+
+    // the element at index i (from 0)
+    pub fn get(self, i: Int) -> Option<T> { if i < 0 { None } else { self.drop(i).head() } }
+
+    pub fn map<B, 'e>(self, f: fn(T) -> B with 'e) -> List<B> with 'e {
+        match self { Nil => Nil, Cons(x, rest) => Cons(f(x), rest.map(f)) }
+    }
+
+    pub fn filter<'e>(self, keep: fn(T) -> Bool with 'e) -> List<T> with 'e {
+        match self {
+            Nil => Nil,
+            Cons(x, rest) => if keep(x) { Cons(x, rest.filter(keep)) } else { rest.filter(keep) },
+        }
+    }
+
+    // f(...f(f(init, x1), x2)..., xn): from the left
+    pub fn fold<B, 'e>(self, init: B, f: fn(B, T) -> B with 'e) -> B with 'e {
+        match self { Nil => init, Cons(x, rest) => rest.fold(f(init, x), f) }
+    }
+
+    // f(x1, f(x2, ...f(xn, init))): from the right
+    pub fn fold_right<B, 'e>(self, init: B, f: fn(T, B) -> B with 'e) -> B with 'e {
+        self.reverse().fold(init, |acc, x| f(x, acc))
+    }
+
+    // folding with the first element as the start, if there is one
+    pub fn reduce<'e>(self, f: fn(T, T) -> T with 'e) -> Option<T> with 'e {
+        match self { Nil => None, Cons(x, rest) => Some(rest.fold(x, f)) }
+    }
+
+    pub fn each<'e>(self, f: fn(T) -> () with 'e) with 'e {
+        match self { Nil => (), Cons(x, rest) => { f(x); rest.each(f) } }
+    }
+
+    pub fn reverse(self) -> List<T> {
+        let mut out = Nil;
+        let mut rest = self;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(x, more) => { out = Cons(x, out); rest = more; }
+            }
+        }
+        out
+    }
+
+    // this list, then that one
+    pub fn append(self, ys: List<T>) -> List<T> {
+        let mut out = ys;
+        let mut rest = self.reverse();
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(x, more) => { out = Cons(x, out); rest = more; }
+            }
+        }
+        out
+    }
+
+    pub fn flat_map<B, 'e>(self, f: fn(T) -> List<B> with 'e) -> List<B> with 'e { self.map(f).flatten() }
+
+    // the first element that passes, if one does
+    pub fn find<'e>(self, test: fn(T) -> Bool with 'e) -> Option<T> with 'e {
+        match self { Nil => None, Cons(x, rest) => if test(x) { Some(x) } else { rest.find(test) } }
+    }
+
+    // where the first that passes is, if one does
+    pub fn position<'e>(self, test: fn(T) -> Bool with 'e) -> Option<Int> with 'e { self.position_from(test, 0) }
+
+    fn position_from<'e>(self, test: fn(T) -> Bool with 'e, i: Int) -> Option<Int> with 'e {
+        match self { Nil => None, Cons(x, rest) => if test(x) { Some(i) } else { rest.position_from(test, i + 1) } }
+    }
+
+    pub fn any<'e>(self, test: fn(T) -> Bool with 'e) -> Bool with 'e {
+        match self { Nil => false, Cons(x, rest) => test(x) || rest.any(test) }
+    }
+
+    pub fn all<'e>(self, test: fn(T) -> Bool with 'e) -> Bool with 'e {
+        match self { Nil => true, Cons(x, rest) => test(x) && rest.all(test) }
+    }
+
+    // how many pass
+    pub fn count<'e>(self, test: fn(T) -> Bool with 'e) -> Int with 'e {
+        self.fold(0, |n, x| if test(x) { n + 1 } else { n })
+    }
+
+    // those that pass, and those that don't
+    pub fn partition<'e>(self, test: fn(T) -> Bool with 'e) -> (List<T>, List<T>) with 'e {
+        let (yes, no) = self.fold((Nil, Nil), |acc, x| {
+            let (y, n) = acc;
+            if test(x) { (Cons(x, y), n) } else { (y, Cons(x, n)) }
+        });
+        (yes.reverse(), no.reverse())
+    }
+
+    // the first n (or all of them, if there are fewer)
+    pub fn take(self, n: Int) -> List<T> {
+        let mut out = Nil;
+        let mut rest = self;
+        let mut k = 0;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(x, more) => {
+                    if k >= n { break; }
+                    out = Cons(x, out);
+                    rest = more;
+                    k = k + 1;
+                }
+            }
+        }
+        out.reverse()
+    }
+
+    // all but the first n
+    pub fn drop(self, n: Int) -> List<T> {
+        let mut rest = self;
+        let mut k = 0;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(_, more) => {
+                    if k >= n { break; }
+                    rest = more;
+                    k = k + 1;
+                }
+            }
+        }
+        rest
+    }
+
+    pub fn split_at(self, n: Int) -> (List<T>, List<T>) { (self.take(n), self.drop(n)) }
+
+    // the elements before the first that fails, and the rest
+    pub fn take_while<'e>(self, test: fn(T) -> Bool with 'e) -> List<T> with 'e {
+        match self { Nil => Nil, Cons(x, rest) => if test(x) { Cons(x, rest.take_while(test)) } else { Nil } }
+    }
+
+    pub fn drop_while<'e>(self, test: fn(T) -> Bool with 'e) -> List<T> with 'e {
+        match self { Nil => Nil, Cons(x, rest) => if test(x) { rest.drop_while(test) } else { self } }
+    }
+
+    // pairs of the elements at the same places (as many as the shorter has)
+    pub fn zip<B>(self, ys: List<B>) -> List<(T, B)> {
+        let mut out = Nil;
+        let mut a = self;
+        let mut b = ys;
+        loop {
+            match (a, b) {
+                (Cons(x, more_a), Cons(y, more_b)) => {
+                    out = Cons((x, y), out);
+                    a = more_a;
+                    b = more_b;
+                }
+                _ => { break; }
+            }
+        }
+        out.reverse()
+    }
+
+    pub fn zip_with<B, C, 'e>(self, ys: List<B>, f: fn(T, B) -> C with 'e) -> List<C> with 'e {
+        self.zip(ys).map(|p| {
+            let (x, y) = p;
+            f(x, y)
+        })
+    }
+
+    // each element with its index: [(0, a), (1, b), ...]
+    pub fn enumerate(self) -> List<(Int, T)> { (0..self.len()).to_list().zip(self) }
+
+    // sep between each two
+    pub fn intersperse(self, sep: T) -> List<T> {
+        match self {
+            Nil => Nil,
+            Cons(x, rest) => Cons(x, rest.flat_map(|y| [sep, y])),
+        }
+    }
+
+    // in lists of n (the last may have fewer)
+    pub fn chunks(self, n: Int) -> List<List<T>> {
+        if self.is_empty() || n < 1 { Nil } else { Cons(self.take(n), self.drop(n).chunks(n)) }
+    }
+
+    // sorted by cmp (negative, 0 or positive, as a goes before, with, or
+    // after b): a merge sort, so equal elements keep their order
+    pub fn sort_by<'e>(self, cmp: fn(T, T) -> Int with 'e) -> List<T> with 'e {
+        let n = self.len();
+        if n < 2 {
+            self
+        } else {
+            let (a, b) = self.split_at(n / 2);
+            a.sort_by(cmp).merge(b.sort_by(cmp), cmp)
+        }
+    }
+
+    // the two sorted lists, merged in order
+    fn merge<'e>(self, ys: List<T>, cmp: fn(T, T) -> Int with 'e) -> List<T> with 'e {
+        match (self, ys) {
+            (Nil, _) => ys,
+            (_, Nil) => self,
+            (Cons(x, xr), Cons(y, yr)) => if cmp(x, y) <= 0 { Cons(x, xr.merge(ys, cmp)) } else { Cons(y, self.merge(yr, cmp)) },
+        }
+    }
+
+    // sorted by a key of each
+    pub fn sort_on<K: Ord, 'e>(self, key: fn(T) -> K with 'e) -> List<T> with 'e {
+        self.sort_by(|a, b| key(a).cmp(key(b)))
+    }
+}
+
+impl<T: Eq> List<T> {
+    pub fn contains(self, x: T) -> Bool {
+        match self { Nil => false, Cons(y, rest) => y == x || rest.contains(x) }
+    }
+
+    // where x first is, if it is
+    pub fn index_of(self, x: T) -> Option<Int> { self.position(|y| y == x) }
+
+    // the first of each run of equal elements next to each other
+    pub fn dedup(self) -> List<T> {
+        match self {
+            Cons(x, Cons(y, rest)) => if x == y { Cons(y, rest).dedup() } else { Cons(x, Cons(y, rest).dedup()) },
+            _ => self,
+        }
+    }
+
+    // each element once, where it first is
+    pub fn unique(self) -> List<T> {
+        self.fold(Nil, |seen, x| if seen.contains(x) { seen } else { Cons(x, seen) }).reverse()
+    }
+
+    // without the first x
+    pub fn remove(self, x: T) -> List<T> {
+        match self { Nil => Nil, Cons(y, rest) => if y == x { rest } else { Cons(y, rest.remove(x)) } }
+    }
+}
+
+impl<T: Ord> List<T> {
+    // sorted, smallest first (see sort_by)
+    pub fn sort(self) -> List<T> { self.sort_by(|a, b| a.cmp(b)) }
+
+    pub fn maximum(self) -> Option<T> { self.reduce(|a, b| a.max(b)) }
+    pub fn minimum(self) -> Option<T> { self.reduce(|a, b| a.min(b)) }
+}
+
+impl List<Int> {
+    pub fn sum(self) -> Int { self.fold(0, |a, b| a + b) }
+    pub fn product(self) -> Int { self.fold(1, |a, b| a * b) }
+}
+
+impl<T> List<List<T>> {
+    // the lists one after another
+    pub fn flatten(self) -> List<T> {
+        let mut out = Nil;
+        let mut rest = self.reverse();
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(xs, more) => { out = xs.append(out); rest = more; }
+            }
+        }
+        out
+    }
+}
+
+impl<K: Eq, V> List<(K, V)> {
+    // the value of the first pair with key k (a list of pairs as a small map)
+    pub fn lookup(self, k: K) -> Option<V> {
+        match self {
+            Nil => None,
+            Cons((key, v), rest) => if key == k { Some(v) } else { rest.lookup(k) },
+        }
+    }
+}
+
+impl<A, B> List<(A, B)> {
+    pub fn unzip(self) -> (List<A>, List<B>) {
+        let mut xs = Nil;
+        let mut ys = Nil;
+        let mut rest = self.reverse();
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons((x, y), more) => {
+                    xs = Cons(x, xs);
+                    ys = Cons(y, ys);
+                    rest = more;
+                }
+            }
+        }
+        (xs, ys)
+    }
+}
+
+// ---- strings
+
+impl List<String> {
+    // the strings one after another (in halves, so each character is
+    // copied about log n times, not n)
+    pub fn concat(self) -> String {
+        let n = self.len();
+        if n == 0 {
+            ""
+        } else if n == 1 {
+            self.head().unwrap()
+        } else {
+            let (a, b) = self.split_at(n / 2);
+            a.concat() ++ b.concat()
+        }
+    }
+
+    // the strings one after another, with sep between each two
+    pub fn join(self, sep: String) -> String { self.intersperse(sep).concat() }
+}
+
+impl String {
+    // the string of these characters
+    pub fn from_chars(cs: List<Int>) -> String { cs.map(char_to_string).concat() }
+
+    pub fn len(self) -> Int { string_length(self) }
+    pub fn is_empty(self) -> Bool { string_length(self) == 0 }
+
+    // the code of the character at index i
+    pub fn char_at(self, i: Int) -> Int { char_at(self, i) }
+
+    // the characters' codes
+    pub fn chars(self) -> List<Int> {
+        let mut out = Nil;
+        let mut i = string_length(self) - 1;
+        while i >= 0 {
+            out = Cons(char_at(self, i), out);
+            i = i - 1;
+        }
+        out
+    }
+
+    // the characters from index from up to (not including) to, as much of
+    // that as there is
+    pub fn substring(self, from: Int, to: Int) -> String {
+        self.slice(from.max(0), to.min(string_length(self)))
+    }
+
+    pub fn starts_with(self, prefix: String) -> Bool {
+        string_length(prefix) <= string_length(self) && self.matches_at(prefix, 0)
+    }
+
+    pub fn ends_with(self, suffix: String) -> Bool {
+        let at = string_length(self) - string_length(suffix);
+        at >= 0 && self.matches_at(suffix, at)
+    }
+
+    // where `part` first is, if it is
+    pub fn find(self, part: String) -> Option<Int> { self.find_from(part, 0) }
+
+    // where `part` first is from index from on, if it is
+    pub fn find_from(self, part: String, from: Int) -> Option<Int> {
+        let last = string_length(self) - string_length(part);
+        let mut i = from.max(0);
+        let mut found = -1;
+        while found < 0 && i <= last {
+            if self.matches_at(part, i) { found = i }
+            i = i + 1;
+        }
+        if found < 0 { None } else { Some(found) }
+    }
+
+    pub fn contains(self, part: String) -> Bool { self.find(part).is_some() }
+
+    // the pieces between the seps: "a,b,,c".split(",") is ["a", "b", "", "c"]
+    // (with sep "", the characters)
+    pub fn split(self, sep: String) -> List<String> {
+        if string_length(sep) == 0 {
+            self.chars().map(char_to_string)
+        } else {
+            let mut pieces = Nil;
+            let mut start = 0;
+            loop {
+                match self.find_from(sep, start) {
+                    Some(at) => {
+                        pieces = Cons(self.substring(start, at), pieces);
+                        start = at + string_length(sep);
+                    }
+                    None => {
+                        pieces = Cons(self.substring(start, string_length(self)), pieces);
+                        break;
+                    }
+                }
+            }
+            pieces.reverse()
+        }
+    }
+
+    // the lines (without a last, empty one after a final newline)
+    pub fn lines(self) -> List<String> {
+        let all = self.split("\n");
+        if self.ends_with("\n") { all.take(all.len() - 1) } else { all }
+    }
+
+    // the pieces between runs of spaces (none empty)
+    pub fn words(self) -> List<String> {
+        let mut out = Nil;
+        let mut i = 0;
+        let n = string_length(self);
+        while i < n {
+            while i < n && char_at(self, i).is_space() {
+                i = i + 1;
+            }
+            let start = i;
+            while i < n && !char_at(self, i).is_space() {
+                i = i + 1;
+            }
+            if i > start { out = Cons(self.substring(start, i), out) }
+        }
+        out.reverse()
+    }
+
+    // without spaces at the start, the end, or both
+    pub fn trim_start(self) -> String {
+        let mut i = 0;
+        while i < string_length(self) && char_at(self, i).is_space() {
+            i = i + 1;
+        }
+        self.substring(i, string_length(self))
+    }
+
+    pub fn trim_end(self) -> String {
+        let mut i = string_length(self);
+        while i > 0 && char_at(self, i - 1).is_space() {
+            i = i - 1;
+        }
+        self.substring(0, i)
+    }
+
+    pub fn trim(self) -> String { self.trim_start().trim_end() }
+
+    pub fn to_upper(self) -> String { String::from_chars(self.chars().map(|c| c.to_upper())) }
+    pub fn to_lower(self) -> String { String::from_chars(self.chars().map(|c| c.to_lower())) }
+
+    pub fn reverse(self) -> String { String::from_chars(self.chars().reverse()) }
+
+    // the string n times over (doubling, so it's log n joins)
+    pub fn repeat(self, n: Int) -> String {
+        if n <= 0 {
+            ""
+        } else if n == 1 {
+            self
+        } else {
+            let half = self.repeat(n / 2);
+            if n % 2 == 0 { half ++ half } else { half ++ half ++ self }
+        }
+    }
+
+    // with `fill` (a character) before or after it, to at least width
+    pub fn pad_left(self, width: Int, fill: String) -> String { fill.repeat(width - string_length(self)) ++ self }
+    pub fn pad_right(self, width: Int, fill: String) -> String { self ++ fill.repeat(width - string_length(self)) }
+
+    // every `from` in it made `to`
+    pub fn replace(self, from: String, to: String) -> String { self.split(from).join(to) }
+
+    // the characters from a to b, both in it (in halves, so each character
+    // is copied about log n times, not n)
+    fn slice(self, a: Int, b: Int) -> String {
+        if b - a <= 0 {
+            ""
+        } else if b - a == 1 {
+            char_to_string(char_at(self, a))
+        } else {
+            let m = (a + b) / 2;
+            self.slice(a, m) ++ self.slice(m, b)
+        }
+    }
+
+    // whether `part` is in it at index at
+    fn matches_at(self, part: String, at: Int) -> Bool {
+        let mut i = 0;
+        let n = string_length(part);
+        while i < n && char_at(self, at + i) == char_at(part, i) {
+            i = i + 1;
+        }
+        i == n
+    }
+
+    // the number it's written as (in base 10, maybe with a sign), if it's one
+    pub fn parse_int(self) -> Option<Int> { self.parse_base(10) }
+
+    // the number it's written as in base 2 to 36, if it's one
+    pub fn parse_base(self, base: Int) -> Option<Int> {
+        let n = string_length(self);
+        let negative = n > 0 && char_at(self, 0) == 45;
+        let start = if n > 0 && (negative || char_at(self, 0) == 43) { 1 } else { 0 };
+        if start >= n {
+            None
+        } else {
+            let mut value = 0;
+            let mut ok = true;
+            let mut i = start;
+            while ok && i < n {
+                match char_at(self, i).digit_value(base) {
+                    Some(d) => { value = value * base + d; }
+                    None => { ok = false; }
+                }
+                i = i + 1;
+            }
+            if !ok { None } else if negative { Some(-value) } else { Some(value) }
+        }
+    }
+}
+
+
+// ---- arrays
+
+impl<T: Show> Show for Array<T> {
+    fn show(self) -> String { "#" ++ self.to_list().show() }
+}
+
+impl<T> Array<T> {
+    // n of x
+    pub fn new(n: Int, x: T) -> Array<T> { array(n, x) }
+
+    // the list's elements (fill is only there for an empty list: an array
+    // has to be made of something)
+    pub fn from_list(xs: List<T>, fill: T) -> Array<T> {
+        let a = array(xs.len(), fill);
+        let mut i = 0;
+        let mut rest = xs;
+        loop {
+            match rest {
+                Nil => { break; }
+                Cons(x, more) => {
+                    array_set(a, i, x);
+                    i = i + 1;
+                    rest = more;
+                }
+            }
+        }
+        a
+    }
+
+    pub fn len(self) -> Int { array_length(self) }
+    pub fn get(self, i: Int) -> T { array_get(self, i) }
+    pub fn set(self, i: Int, x: T) { array_set(self, i, x) }
+
+    pub fn to_list(self) -> List<T> {
+        let mut out = Nil;
+        let mut i = array_length(self) - 1;
+        while i >= 0 {
+            out = Cons(array_get(self, i), out);
+            i = i - 1;
+        }
+        out
+    }
+
+    // a new array, of the elements from index from up to (not including) to
+    pub fn slice(self, from: Int, to: Int) -> Array<T> {
+        let lo = from.max(0);
+        let hi = to.min(array_length(self));
+        if hi <= lo {
+            // (an empty array can be shared: nothing can change in it)
+            if array_length(self) == 0 { self } else { array(0, array_get(self, 0)) }
+        } else {
+            let b = array(hi - lo, array_get(self, lo));
+            let mut i = lo;
+            while i < hi {
+                array_set(b, i - lo, array_get(self, i));
+                i = i + 1;
+            }
+            b
+        }
+    }
+
+    pub fn copy(self) -> Array<T> { self.slice(0, array_length(self)) }
+
+    pub fn fill(self, x: T) {
+        let mut i = 0;
+        while i < array_length(self) {
+            array_set(self, i, x);
+            i = i + 1;
+        }
+    }
+
+    pub fn swap(self, i: Int, j: Int) {
+        let t = array_get(self, i);
+        array_set(self, i, array_get(self, j));
+        array_set(self, j, t);
+    }
+
+    // turned back to front, where it is
+    pub fn reverse(self) {
+        let mut i = 0;
+        let mut j = array_length(self) - 1;
+        while i < j {
+            self.swap(i, j);
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+
+    // each element made f of it, where it is
+    pub fn update<'e>(self, f: fn(T) -> T with 'e) with 'e {
+        let mut i = 0;
+        while i < array_length(self) {
+            array_set(self, i, f(array_get(self, i)));
+            i = i + 1;
+        }
+    }
+
+    pub fn each<'e>(self, f: fn(T) -> () with 'e) with 'e {
+        let mut i = 0;
+        while i < array_length(self) {
+            f(array_get(self, i));
+            i = i + 1;
+        }
+    }
+
+    pub fn fold<B, 'e>(self, init: B, f: fn(B, T) -> B with 'e) -> B with 'e {
+        let mut acc = init;
+        let mut i = 0;
+        while i < array_length(self) {
+            acc = f(acc, array_get(self, i));
+            i = i + 1;
+        }
+        acc
+    }
+
+    // sorted where it is, by cmp (a heap sort: no more room needed, and
+    // n log n steps however it starts)
+    pub fn sort_by<'e>(self, cmp: fn(T, T) -> Int with 'e) with 'e {
+        let n = array_length(self);
+        // a heap, the largest on top: each element no smaller than the two below it
+        let mut start = n / 2 - 1;
+        while start >= 0 {
+            self.sift_down(start, n, cmp);
+            start = start - 1;
+        }
+        // the top to the end, then the heap without it fixed up
+        let mut end = n - 1;
+        while end > 0 {
+            self.swap(0, end);
+            self.sift_down(0, end, cmp);
+            end = end - 1;
+        }
+    }
+
+    // moves self[i] down the heap self[..n] until it's no smaller than
+    // what's below it
+    fn sift_down<'e>(self, i: Int, n: Int, cmp: fn(T, T) -> Int with 'e) with 'e {
+        let mut at = i;
+        loop {
+            let left = 2 * at + 1;
+            if left >= n { break; }
+            let right = left + 1;
+            let bigger = if right < n && cmp(array_get(self, right), array_get(self, left)) > 0 { right } else { left };
+            if cmp(array_get(self, bigger), array_get(self, at)) <= 0 { break; }
+            self.swap(at, bigger);
+            at = bigger;
+        }
+    }
+}
+
+impl<T: Eq> Array<T> {
+    pub fn index_of(self, x: T) -> Option<Int> {
+        let mut i = 0;
+        let mut found = -1;
+        while found < 0 && i < array_length(self) {
+            if array_get(self, i) == x { found = i }
+            i = i + 1;
+        }
+        if found < 0 { None } else { Some(found) }
+    }
+
+    pub fn contains(self, x: T) -> Bool { self.index_of(x).is_some() }
+}
+
+impl<T: Ord> Array<T> {
+    // sorted where it is, smallest first (see sort_by)
+    pub fn sort(self) { self.sort_by(|x, y| x.cmp(y)) }
+
+    // where x is, if the array's sorted and has it (halving the range each step)
+    pub fn binary_search(self, x: T) -> Option<Int> {
+        let mut lo = 0;
+        let mut hi = array_length(self);
+        let mut found = -1;
+        while found < 0 && lo < hi {
+            let mid = (lo + hi) / 2;
+            let c = array_get(self, mid).cmp(x);
+            if c == 0 { found = mid } else if c < 0 { lo = mid + 1 } else { hi = mid }
+        }
+        if found < 0 { None } else { Some(found) }
+    }
+}
+
+// ---- maps and sets
+
+// A map from keys to values, kept in key order: an AVL tree, a binary
+// search tree where the two sides of every node differ in height by at
+// most one, so finding, adding and removing take log n steps. Maps don't
+// change: adding gives a new map, which shares most of the old one.
+pub struct Map<K, V> { root: Tree<K, V>, size: Int }
+
+// a node's left side, key, value, right side, and height
+enum Tree<K, V> { Leaf, Node(Tree<K, V>, K, V, Tree<K, V>, Int) }
+
+impl<K, V> Map<K, V> {
+    pub fn new() -> Map<K, V> { Map { root: Leaf, size: 0 } }
+
+    pub fn len(self) -> Int { self.size }
+    pub fn is_empty(self) -> Bool { self.size == 0 }
+
+    // the pairs, in key order
+    pub fn to_list(self) -> List<(K, V)> { self.root.pairs(Nil) }
+
+    pub fn keys(self) -> List<K> { self.to_list().map(fst) }
+    pub fn values(self) -> List<V> { self.to_list().map(snd) }
+
+    // the values, each made f of it
+    pub fn map<B, 'e>(self, f: fn(V) -> B with 'e) -> Map<K, B> with 'e {
+        Map { root: self.root.map(f), size: self.size }
+    }
+}
+
+impl<K: Ord, V> Map<K, V> {
+    // a map of the pairs (a later pair with the same key wins)
+    pub fn from_list(pairs: List<(K, V)>) -> Map<K, V> {
+        pairs.fold(Map::new(), |m, p| {
+            let (k, v) = p;
+            m.insert(k, v)
+        })
+    }
+
+    pub fn get(self, k: K) -> Option<V> { self.root.get(k) }
+    pub fn contains(self, k: K) -> Bool { self.get(k).is_some() }
+
+    // the map with k's value v (whether or not it had k)
+    pub fn insert(self, k: K, v: V) -> Map<K, V> {
+        let size = if self.contains(k) { self.size } else { self.size + 1 };
+        Map { root: self.root.insert(k, v), size: size }
+    }
+
+    // the map without k
+    pub fn remove(self, k: K) -> Map<K, V> {
+        if self.contains(k) { Map { root: self.root.remove(k), size: self.size - 1 } } else { self }
+    }
+
+    // the map with k's value f of what it was (None if it had none; and if
+    // f gives None, without k)
+    pub fn update<'e>(self, k: K, f: fn(Option<V>) -> Option<V> with 'e) -> Map<K, V> with 'e {
+        match f(self.get(k)) {
+            Some(v) => self.insert(k, v),
+            None => self.remove(k),
+        }
+    }
+}
+
+impl<K: Show, V: Show> Show for Map<K, V> {
+    fn show(self) -> String {
+        "{" ++ self.to_list().map(|p| {
+            let (k, v) = p;
+            k.show() ++ ": " ++ v.show()
+        }).join(", ") ++ "}"
+    }
+}
+
+impl<K: Eq, V: Eq> Eq for Map<K, V> {
+    fn eq(self, other: Map<K, V>) -> Bool { self.to_list() == other.to_list() }
+}
+
+impl<K, V> Tree<K, V> {
+    fn height(self) -> Int { match self { Leaf => 0, Node(_, _, _, _, h) => h } }
+
+    fn node(l: Tree<K, V>, k: K, v: V, r: Tree<K, V>) -> Tree<K, V> {
+        Node(l, k, v, r, 1 + l.height().max(r.height()))
+    }
+
+    // a node of these, rotated to keep it balanced if one side has got two
+    // taller than the other (after adding or removing one element)
+    fn balance(l: Tree<K, V>, k: K, v: V, r: Tree<K, V>) -> Tree<K, V> {
+        let hl = l.height();
+        let hr = r.height();
+        if hl > hr + 1 {
+            match l {
+                Node(ll, lk, lv, lr, _) => {
+                    if ll.height() >= lr.height() {
+                        Tree::node(ll, lk, lv, Tree::node(lr, k, v, r))
+                    } else {
+                        match lr {
+                            Node(lrl, lrk, lrv, lrr, _) => Tree::node(Tree::node(ll, lk, lv, lrl), lrk, lrv, Tree::node(lrr, k, v, r)),
+                            Leaf => Tree::node(l, k, v, r),
+                        }
+                    }
+                }
+                Leaf => Tree::node(l, k, v, r),
+            }
+        } else if hr > hl + 1 {
+            match r {
+                Node(rl, rk, rv, rr, _) => {
+                    if rr.height() >= rl.height() {
+                        Tree::node(Tree::node(l, k, v, rl), rk, rv, rr)
+                    } else {
+                        match rl {
+                            Node(rll, rlk, rlv, rlr, _) => Tree::node(Tree::node(l, k, v, rll), rlk, rlv, Tree::node(rlr, rk, rv, rr)),
+                            Leaf => Tree::node(l, k, v, r),
+                        }
+                    }
+                }
+                Leaf => Tree::node(l, k, v, r),
+            }
+        } else {
+            Tree::node(l, k, v, r)
+        }
+    }
+
+    // the smallest key, its value, and the tree without it
+    fn remove_min(self) -> (K, V, Tree<K, V>) {
+        match self {
+            Node(Leaf, k, v, r, _) => (k, v, r),
+            Node(l, k, v, r, _) => {
+                let (mk, mv, rest) = l.remove_min();
+                (mk, mv, Tree::balance(rest, k, v, r))
+            }
+            Leaf => panic("remove_min of an empty tree\n"),
+        }
+    }
+
+    // the pairs in order, in front of `after`
+    fn pairs(self, after: List<(K, V)>) -> List<(K, V)> {
+        match self {
+            Leaf => after,
+            Node(l, k, v, r, _) => l.pairs(Cons((k, v), r.pairs(after))),
+        }
+    }
+
+    fn map<B, 'e>(self, f: fn(V) -> B with 'e) -> Tree<K, B> with 'e {
+        match self {
+            Leaf => Leaf,
+            Node(l, k, v, r, h) => {
+                let l2 = l.map(f);
+                let v2 = f(v);
+                Node(l2, k, v2, r.map(f), h)
+            }
+        }
+    }
+}
+
+impl<K: Ord, V> Tree<K, V> {
+    fn get(self, k: K) -> Option<V> {
+        match self {
+            Leaf => None,
+            Node(l, nk, nv, r, _) => {
+                let c = k.cmp(nk);
+                if c < 0 { l.get(k) } else if c > 0 { r.get(k) } else { Some(nv) }
+            }
+        }
+    }
+
+    fn insert(self, k: K, v: V) -> Tree<K, V> {
+        match self {
+            Leaf => Node(Leaf, k, v, Leaf, 1),
+            Node(l, nk, nv, r, h) => {
+                let c = k.cmp(nk);
+                if c < 0 {
+                    Tree::balance(l.insert(k, v), nk, nv, r)
+                } else if c > 0 {
+                    Tree::balance(l, nk, nv, r.insert(k, v))
+                } else {
+                    Node(l, k, v, r, h)
+                }
+            }
+        }
+    }
+
+    fn remove(self, k: K) -> Tree<K, V> {
+        match self {
+            Leaf => Leaf,
+            Node(l, nk, nv, r, _) => {
+                let c = k.cmp(nk);
+                if c < 0 {
+                    Tree::balance(l.remove(k), nk, nv, r)
+                } else if c > 0 {
+                    Tree::balance(l, nk, nv, r.remove(k))
+                } else {
+                    match r {
+                        Leaf => l,
+                        Node(_, _, _, _, _) => {
+                            // (the right side's smallest takes its place)
+                            let (mk, mv, rest) = r.remove_min();
+                            Tree::balance(l, mk, mv, rest)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A set: a map from its elements to nothing.
+pub struct Set<T> { map: Map<T, ()> }
+
+impl<T> Set<T> {
+    pub fn new() -> Set<T> { Set { map: Map::new() } }
+    pub fn len(self) -> Int { self.map.len() }
+    pub fn is_empty(self) -> Bool { self.map.is_empty() }
+
+    // the elements, in order
+    pub fn to_list(self) -> List<T> { self.map.keys() }
+}
+
+impl<T: Ord> Set<T> {
+    pub fn from_list(xs: List<T>) -> Set<T> { xs.fold(Set::new(), |s, x| s.insert(x)) }
+
+    pub fn contains(self, x: T) -> Bool { self.map.contains(x) }
+    pub fn insert(self, x: T) -> Set<T> { Set { map: self.map.insert(x, ()) } }
+    pub fn remove(self, x: T) -> Set<T> { Set { map: self.map.remove(x) } }
+
+    pub fn union(self, other: Set<T>) -> Set<T> { other.to_list().fold(self, |s, x| s.insert(x)) }
+    pub fn intersection(self, other: Set<T>) -> Set<T> { Set::from_list(self.to_list().filter(|x| other.contains(x))) }
+    pub fn difference(self, other: Set<T>) -> Set<T> { Set::from_list(self.to_list().filter(|x| !other.contains(x))) }
+}
+
+impl<T: Show> Show for Set<T> {
+    fn show(self) -> String { "{" ++ self.to_list().map(|x| x.show()).join(", ") ++ "}" }
+}
+
+impl<T: Eq> Eq for Set<T> {
+    fn eq(self, other: Set<T>) -> Bool { self.to_list() == other.to_list() }
+}
+
+// ---- effects
+
+// fail stops what's running, out to the nearest handler (see attempt)
+pub effect Fail {
+    fn fail<A>(msg: String) -> A;
+}
+
+// what f gives back, or why it failed
+pub fn attempt<T, 'e>(f: fn() -> T with {Fail, 'e}) -> Result<T, String> with 'e {
+    handle f() {
+        return(v) => Ok(v),
+        fail(msg) => Err(msg),
+    }
+}
+
+// what f gives back, or `default` if it fails
+pub fn or_default<T, 'e>(f: fn() -> T with {Fail, 'e}, default: T) -> T with 'e {
+    handle f() {
+        return(v) => v,
+        fail(msg) => default,
+    }
+}
+
+// what's in o, or a failure
+pub fn need<T>(o: Option<T>, why: String) -> T with {Fail} {
+    match o { Some(x) => x, None => fail(why) }
+}
+
+// State: a value that code can read and change, without passing it around
+pub effect State<S> {
+    fn get() -> S;
+    fn put(value: S);
+}
+
+// what f gives back, and the state it leaves, starting from `start`
+// (each operation's clause gives a function of the state then)
+pub fn run_state<S, T, 'e>(start: S, f: fn() -> T with {State<S>, 'e}) -> (T, S) with 'e {
+    let run = handle f() {
+        return(v) => |s| (v, s),
+        get() => |s| resume(s)(s),
+        put(v) => |s| resume(())(v),
+    };
+    run(start)
+}
+
+// changes the state by f
+pub fn modify<S>(f: fn(S) -> S) with {State<S>} {
+    put(f(get()))
+}
+
+// Yield: a generator gives values one at a time as it goes
+pub effect Yield<T> {
+    fn yield(value: T);
+}
+
+// what a generator yields, in a list
+pub fn collect<T, 'e>(gen: fn() -> () with {Yield<T>, 'e}) -> List<T> with 'e {
+    handle gen() {
+        return(u) => Nil,
+        yield(x) => Cons(x, resume(())),
+    }
+}
+
+// f of each value a generator yields, as it yields it
+pub fn for_each<T, 'e>(gen: fn() -> () with {Yield<T>, 'e}, f: fn(T) -> () with 'e) with 'e {
+    handle gen() {
+        return(u) => (),
+        yield(x) => {
+            f(x);
+            resume(())
+        }
+    }
+}
+
+// Choose: search written as if it always guessed right. choose(r) picks a
+// number in range r (`choose(0..10)`), and give_up says that guess was
+// wrong; the handler says which guesses are tried (see all_ways and
+// first_way).
+pub effect Choose {
+    fn choose(r: Range) -> Int;
+    fn give_up<A>() -> A;
+}
+
+// every way the search can come out: each choice tried in turn, by
+// resuming the search once for each
+pub fn all_ways<T, 'e>(f: fn() -> T with {Choose, 'e}) -> List<T> with 'e {
+    handle f() {
+        return(x) => [x],
+        choose(r) => r.map(|i| resume(i)).flatten(),
+        give_up() => [],
+    }
+}
+
+// the first way it comes out, trying choices in order
+pub fn first_way<T, 'e>(f: fn() -> T with {Choose, 'e}) -> Option<T> with 'e {
+    handle f() {
+        return(x) => Some(x),
+        choose(r) => first_of(r.end, r.start, |i| resume(i)),
+        give_up() => None,
+    }
+}
+
+fn first_of<T, 'e>(n: Int, i: Int, go: fn(Int) -> Option<T> with 'e) -> Option<T> with 'e {
+    if i >= n {
+        None
+    } else {
+        match go(i) {
+            Some(x) => Some(x),
+            None => first_of(n, i + 1, go),
+        }
+    }
+}
+
+// one of the list's elements (a choice)
+pub fn choose_from<T>(xs: List<T>) -> T with {Choose} {
+    match xs.get(choose(0..xs.len())) { Some(x) => x, None => give_up() }
+}
+
+// gives up unless b
+pub fn guard(b: Bool) with {Choose} {
+    if !b { give_up() }
+}

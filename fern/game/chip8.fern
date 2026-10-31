@@ -1,0 +1,354 @@
+// A CHIP-8 emulator. CHIP-8 is the little virtual machine Joseph Weisbecker
+// made for the COSMAC VIP in 1977, and people still write games for it: 35
+// instructions, 4 KB of memory, sixteen 8-bit registers V0 to VF (VF is
+// also the flag), a 64 x 32 screen of pixels that are on or off, a hex
+// keypad, and two timers that count down 60 times a second.
+//
+//   fern/game/build.sh fern/game/chip8.fern
+//   fern/game/chip8 GAME.ch8
+//
+// The keypad is the left of the keyboard:
+//
+//   1 2 3 4        1 2 3 C
+//   Q W E R   is   4 5 6 D
+//   A S D F        7 8 9 E
+//   Z X C V        A 0 B F
+//
+// It does what the VIP's interpreter did where later ones differ (the
+// "quirks"): AND, OR and XOR clear VF; 8XY6 and 8XYE shift VY into VX;
+// FX55 and FX65 leave I past what they stored or loaded; BNNN adds V0;
+// sprites are cut off at the screen's edges; and drawing waits for the
+// next frame, so a frame draws at most once.
+
+mod screen;
+
+use screen::*;
+
+fn width() -> Int { 64 }
+fn height() -> Int { 32 }
+// instructions a frame, at most: about 700 a second
+fn speed() -> Int { 12 }
+// where programs and the font start
+fn program_start() -> Int { 0x200 }
+fn font_start() -> Int { 0x50 }
+
+struct Chip8 {
+    memory: Array<Int>,
+    // V0 to VF
+    v: Array<Int>,
+    stack: Array<Int>,
+    // the other registers, by the numbers below
+    regs: Array<Int>,
+    // a cell a pixel, 1 if it's on
+    display: Array<Int>,
+    // which keys are held down, and which were the frame before
+    keys: Array<Bool>,
+    was: Array<Bool>,
+}
+
+fn pc() -> Int { 0 }
+fn index() -> Int { 1 }
+fn sp() -> Int { 2 }
+fn delay() -> Int { 3 }
+fn sound() -> Int { 4 }
+// the random numbers' state
+fn seed() -> Int { 5 }
+// set when the frame's instructions are done (it drew, or is waiting for a key)
+fn done() -> Int { 6 }
+
+fn get(m: Chip8, r: Int) -> Int { array_get(m.regs, r) }
+fn put(m: Chip8, r: Int, x: Int) { array_set(m.regs, r, x) }
+fn vx(m: Chip8, x: Int) -> Int { array_get(m.v, x) }
+fn set_v(m: Chip8, x: Int, n: Int) { array_set(m.v, x, n & 0xff) }
+fn byte(m: Chip8, a: Int) -> Int { array_get(m.memory, a & 0xfff) }
+fn set_byte(m: Chip8, a: Int, n: Int) { array_set(m.memory, a & 0xfff, n & 0xff) }
+
+fn main() {
+    let m = Chip8 {
+        memory: array(4096, 0),
+        v: array(16, 0),
+        stack: array(16, 0),
+        regs: array(7, 0),
+        display: array(width() * height(), 0),
+        keys: array(16, false),
+        was: array(16, false),
+    };
+    store(m, font_start(), font());
+    if load_arg_file(1, m.memory, program_start()) < 0 {
+        println("usage: chip8 GAME.ch8 (a CHIP-8 program, of at most 3584 bytes)");
+    } else if !screen_open(width(), height(), 12, "fern chip-8") {
+        println("couldn't open a window");
+    } else {
+        put(m, pc(), program_start());
+        put(m, seed(), screen_ticks());
+        run(m);
+    }
+}
+
+fn run(m: Chip8) with Io {
+    let pixels = array(width() * height(), 0);
+    let glow = array(width() * height(), 0);
+    loop {
+        read_keys(m);
+        put(m, done(), 0);
+        let mut n = 0;
+        while n < speed() && get(m, done()) == 0 {
+            step(m);
+            n = n + 1;
+        }
+        if get(m, delay()) > 0 { put(m, delay(), get(m, delay()) - 1) }
+        if get(m, sound()) > 0 { put(m, sound(), get(m, sound()) - 1) }
+        screen_beep(get(m, sound()) > 0);
+        paint(m, pixels, glow);
+        if !screen_show(pixels) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+    screen_beep(false);
+}
+
+// ---- the instructions
+
+// runs the instruction at PC
+fn step(m: Chip8) {
+    let at = get(m, pc());
+    let op = byte(m, at) << 8 | byte(m, at + 1);
+    put(m, pc(), at + 2);
+    // the instruction's parts: its hex digits are op, x, y, n
+    let x = op >> 8 & 0xf;
+    let y = op >> 4 & 0xf;
+    let n = op & 0xf;
+    let nn = op & 0xff;
+    let nnn = op & 0xfff;
+    match op >> 12 {
+        0x0 => {
+            // 00E0 clears the screen, 00EE returns (and 0NNN, the VIP's
+            // machine code, does nothing here)
+            if op == 0x00e0 { clear(m) }
+            if op == 0x00ee {
+                put(m, sp(), get(m, sp()) - 1);
+                put(m, pc(), array_get(m.stack, get(m, sp())));
+            }
+        }
+        // 1NNN jumps to NNN, 2NNN calls it
+        0x1 => put(m, pc(), nnn),
+        0x2 => {
+            array_set(m.stack, get(m, sp()), at + 2);
+            put(m, sp(), get(m, sp()) + 1);
+            put(m, pc(), nnn);
+        }
+        // skips: 3XNN if VX is NN, 4XNN if it isn't, 5XY0 if VX is VY
+        0x3 => if vx(m, x) == nn { skip(m) },
+        0x4 => if vx(m, x) != nn { skip(m) },
+        0x5 => if vx(m, x) == vx(m, y) { skip(m) },
+        // 6XNN sets VX to NN, 7XNN adds NN (without touching VF)
+        0x6 => set_v(m, x, nn),
+        0x7 => set_v(m, x, vx(m, x) + nn),
+        0x8 => arithmetic(m, x, y, n),
+        // 9XY0 skips if VX isn't VY
+        0x9 => if vx(m, x) != vx(m, y) { skip(m) },
+        // ANNN sets I, BNNN jumps to NNN + V0, CXNN sets VX to a random byte AND NN
+        0xa => put(m, index(), nnn),
+        0xb => put(m, pc(), nnn + vx(m, 0)),
+        0xc => set_v(m, x, random(m) & nn),
+        // DXYN draws
+        0xd => draw(m, vx(m, x), vx(m, y), n),
+        // EX9E skips if key VX is down, EXA1 if it isn't
+        0xe => {
+            let down = array_get(m.keys, vx(m, x) & 0xf);
+            if nn == 0x9e && down { skip(m) }
+            if nn == 0xa1 && !down { skip(m) }
+        }
+        _ => misc(m, x, nn),
+    }
+}
+
+fn skip(m: Chip8) {
+    put(m, pc(), get(m, pc()) + 2)
+}
+
+// 8XYN: arithmetic and logic on VX and VY, with VF the flag (set last, so
+// it's the flag even when X is F)
+fn arithmetic(m: Chip8, x: Int, y: Int, n: Int) {
+    let a = vx(m, x);
+    let b = vx(m, y);
+    match n {
+        0x0 => set_v(m, x, b),
+        0x1 => { set_v(m, x, a | b); set_v(m, 0xf, 0) }
+        0x2 => { set_v(m, x, a & b); set_v(m, 0xf, 0) }
+        0x3 => { set_v(m, x, a ^ b); set_v(m, 0xf, 0) }
+        // VF: whether it carried, or for subtracting, whether it didn't borrow
+        0x4 => { set_v(m, x, a + b); set_v(m, 0xf, flag(a + b > 0xff)) }
+        0x5 => { set_v(m, x, a - b); set_v(m, 0xf, flag(a >= b)) }
+        0x7 => { set_v(m, x, b - a); set_v(m, 0xf, flag(b >= a)) }
+        // VF: the bit shifted out
+        0x6 => { set_v(m, x, b >> 1); set_v(m, 0xf, b & 1) }
+        0xe => { set_v(m, x, b << 1); set_v(m, 0xf, b >> 7) }
+        _ => (),
+    }
+}
+
+fn flag(b: Bool) -> Int { if b { 1 } else { 0 } }
+
+// FXNN: timers, keys, I, and memory
+fn misc(m: Chip8, x: Int, nn: Int) {
+    let i = get(m, index());
+    match nn {
+        0x07 => set_v(m, x, get(m, delay())),
+        0x0a => wait_for_key(m, x),
+        0x15 => put(m, delay(), vx(m, x)),
+        0x18 => put(m, sound(), vx(m, x)),
+        0x1e => put(m, index(), i + vx(m, x) & 0xfff),
+        // where the font has the glyph of VX's low digit
+        0x29 => put(m, index(), font_start() + (vx(m, x) & 0xf) * 5),
+        // VX's decimal digits, at I
+        0x33 => {
+            let v = vx(m, x);
+            set_byte(m, i, v / 100);
+            set_byte(m, i + 1, v / 10 % 10);
+            set_byte(m, i + 2, v % 10);
+        }
+        // V0 to VX, stored at I, and loaded from it
+        0x55 => {
+            let mut k = 0;
+            while k <= x {
+                set_byte(m, i + k, vx(m, k));
+                k = k + 1;
+            }
+            put(m, index(), i + x + 1);
+        }
+        0x65 => {
+            let mut k = 0;
+            while k <= x {
+                set_v(m, k, byte(m, i + k));
+                k = k + 1;
+            }
+            put(m, index(), i + x + 1);
+        }
+        _ => (),
+    }
+}
+
+// FX0A: waits until a key's pressed and let go, and puts it in VX
+fn wait_for_key(m: Chip8, x: Int) {
+    let mut key = -1;
+    let mut k = 0;
+    while k < 16 {
+        if key < 0 && array_get(m.was, k) && !array_get(m.keys, k) { key = k }
+        k = k + 1;
+    }
+    if key >= 0 {
+        set_v(m, x, key);
+        // (so that another FX0A this frame waits for another)
+        array_set(m.was, key, false);
+    } else {
+        put(m, pc(), get(m, pc()) - 2);
+        put(m, done(), 1);
+    }
+}
+
+// a pseudo-random byte
+fn random(m: Chip8) -> Int {
+    let s = get(m, seed()) * 1103515245 + 12345 & 0x7fffffff;
+    put(m, seed(), s);
+    s >> 16 & 0xff
+}
+
+// ---- the screen
+
+// DXYN: the N-row sprite at I, at (x, y), each of its bits turning a pixel
+// on or off; VF says whether any went off. Where it starts wraps around
+// the screen, and what goes past an edge is cut off.
+fn draw(m: Chip8, x0: Int, y0: Int, n: Int) {
+    let x = x0 % width();
+    let y = y0 % height();
+    let i = get(m, index());
+    let mut off = 0;
+    let mut row = 0;
+    while row < n && y + row < height() {
+        let bits = byte(m, i + row);
+        let mut col = 0;
+        while col < 8 && x + col < width() {
+            if bits >> (7 - col) & 1 == 1 {
+                let p = (y + row) * width() + x + col;
+                if array_get(m.display, p) == 1 { off = 1 }
+                array_set(m.display, p, array_get(m.display, p) ^ 1);
+            }
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    set_v(m, 0xf, off);
+    put(m, done(), 1);
+}
+
+fn clear(m: Chip8) {
+    let mut p = 0;
+    while p < width() * height() {
+        array_set(m.display, p, 0);
+        p = p + 1;
+    }
+}
+
+// the display into the framebuffer. Pixels fade out over a few frames
+// rather than going off at once, as on a TV, since CHIP-8 games draw by
+// turning sprites off and on again, which flickers.
+fn paint(m: Chip8, pixels: Array<Int>, glow: Array<Int>) {
+    let mut p = 0;
+    while p < width() * height() {
+        let g = if array_get(m.display, p) == 1 { 256 } else { array_get(glow, p) * 5 / 8 };
+        array_set(glow, p, g);
+        array_set(pixels, p, mix(rgb(20, 24, 36), rgb(150, 255, 170), g));
+        p = p + 1;
+    }
+}
+
+// from color a (amount 0) to b (256)
+fn mix(a: Int, b: Int, amount: Int) -> Int {
+    let r = channel(a >> 16, b >> 16, amount);
+    let g = channel(a >> 8 & 0xff, b >> 8 & 0xff, amount);
+    let bl = channel(a & 0xff, b & 0xff, amount);
+    rgb(r, g, bl)
+}
+
+fn channel(a: Int, b: Int, amount: Int) -> Int {
+    a + (b - a) * amount / 256
+}
+
+// ---- the keypad and the font
+
+// which keyboard key is each of the keypad's keys, 0 to F
+fn layout() -> String { "x123qweasdzc4rfv" }
+
+fn read_keys(m: Chip8) with Io {
+    let mut k = 0;
+    while k < 16 {
+        array_set(m.was, k, array_get(m.keys, k));
+        array_set(m.keys, k, key_down(char_at(layout(), k)));
+        k = k + 1;
+    }
+}
+
+// the digits 0 to F, 4 x 5 pixels, a byte a row
+fn font() -> List<Int> {
+    [0xf0, 0x90, 0x90, 0x90, 0xf0, 0x20, 0x60, 0x20, 0x20, 0x70, 0xf0, 0x10, 0xf0, 0x80, 0xf0, 0xf0, 0x10, 0xf0, 0x10, 0xf0,
+     0x90, 0x90, 0xf0, 0x10, 0x10, 0xf0, 0x80, 0xf0, 0x10, 0xf0, 0xf0, 0x80, 0xf0, 0x90, 0xf0, 0xf0, 0x10, 0x20, 0x40, 0x40,
+     0xf0, 0x90, 0xf0, 0x90, 0xf0, 0xf0, 0x90, 0xf0, 0x10, 0xf0, 0xf0, 0x90, 0xf0, 0x90, 0x90, 0xe0, 0x90, 0xe0, 0x90, 0xe0,
+     0xf0, 0x80, 0x80, 0x80, 0xf0, 0xe0, 0x90, 0x90, 0x90, 0xe0, 0xf0, 0x80, 0xf0, 0x80, 0xf0, 0xf0, 0x80, 0xf0, 0x80, 0x80]
+}
+
+// bytes into memory, from address at
+fn store(m: Chip8, at: Int, bytes: List<Int>) {
+    let mut a = at;
+    let mut rest = bytes;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(b, tail) => {
+                set_byte(m, a, b);
+                a = a + 1;
+                rest = tail;
+            }
+        }
+    }
+}

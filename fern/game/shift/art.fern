@@ -1,0 +1,243 @@
+// The pictures: the font, the creatures (pixel art written as text), and
+// the colors, the deck's for each region and the creatures' everywhere.
+
+use super::gfx::{Gfx, Font, Sprite, font, sprite, rgb, set_color, mix};
+
+// ---- the font
+
+pub fn letters() -> Font {
+    font([
+        ("A", ".###. #...# #...# ##### #...# #...# #...#"),
+        ("B", "####. #...# #...# ####. #...# #...# ####."),
+        ("C", ".###. #...# #.... #.... #.... #...# .###."),
+        ("D", "####. #...# #...# #...# #...# #...# ####."),
+        ("E", "##### #.... #.... ####. #.... #.... #####"),
+        ("F", "##### #.... #.... ####. #.... #.... #...."),
+        ("G", ".###. #...# #.... #.### #...# #...# .####"),
+        ("H", "#...# #...# #...# ##### #...# #...# #...#"),
+        ("I", "### .#. .#. .#. .#. .#. ###"),
+        ("J", "..### ...#. ...#. ...#. #..#. #..#. .##.."),
+        ("K", "#...# #..#. #.#.. ##... #.#.. #..#. #...#"),
+        ("L", "#.... #.... #.... #.... #.... #.... #####"),
+        ("M", "#...# ##.## #.#.# #.#.# #...# #...# #...#"),
+        ("N", "#...# ##..# #.#.# #..## #...# #...# #...#"),
+        ("O", ".###. #...# #...# #...# #...# #...# .###."),
+        ("P", "####. #...# #...# ####. #.... #.... #...."),
+        ("Q", ".###. #...# #...# #...# #.#.# #..#. .##.#"),
+        ("R", "####. #...# #...# ####. #.#.. #..#. #...#"),
+        ("S", ".#### #.... #.... .###. ....# ....# ####."),
+        ("T", "##### ..#.. ..#.. ..#.. ..#.. ..#.. ..#.."),
+        ("U", "#...# #...# #...# #...# #...# #...# .###."),
+        ("V", "#...# #...# #...# #...# #...# .#.#. ..#.."),
+        ("W", "#...# #...# #...# #.#.# #.#.# #.#.# .#.#."),
+        ("X", "#...# #...# .#.#. ..#.. .#.#. #...# #...#"),
+        ("Y", "#...# #...# .#.#. ..#.. ..#.. ..#.. ..#.."),
+        ("Z", "##### ....# ...#. ..#.. .#... #.... #####"),
+        ("0", ".###. #...# #..## #.#.# ##..# #...# .###."),
+        ("1", ".#. ##. .#. .#. .#. .#. ###"),
+        ("2", ".###. #...# ....# ...#. ..#.. .#... #####"),
+        ("3", "####. ....# ....# .###. ....# ....# ####."),
+        ("4", "...#. ..##. .#.#. #..#. ##### ...#. ...#."),
+        ("5", "##### #.... ####. ....# ....# #...# .###."),
+        ("6", ".###. #.... #.... ####. #...# #...# .###."),
+        ("7", "##### ....# ...#. ..#.. .#... .#... .#..."),
+        ("8", ".###. #...# #...# .###. #...# #...# .###."),
+        ("9", ".###. #...# #...# .#### ....# ....# .###."),
+        (".", ". . . . . . #"),
+        (",", ".. .. .. .. .. .# #."),
+        (":", ". . # . . # ."),
+        (";", ".. .. .# .. .. .# #."),
+        ("!", "# # # # # . #"),
+        ("?", ".###. #...# ....# ...#. ..#.. ..... ..#.."),
+        ("'", "# # . . . . ."),
+        ("-", ".... .... .... #### .... .... ...."),
+        ("+", "..... ..#.. ..#.. ##### ..#.. ..#.. ....."),
+        ("/", "....# ...#. ...#. ..#.. .#... .#... #...."),
+        ("%", "##..# ##..# ...#. ..#.. .#... #..## #..##"),
+        ("(", ".# #. #. #. #. #. .#"),
+        (")", "#. .# .# .# .# .# #."),
+        (">", "#... .#.. ..#. ...# ..#. .#.. #..."),
+        ("<", "...# ..#. .#.. #... .#.. ..#. ...#"),
+        ("=", ".... .... #### .... #### .... ...."),
+        ("*", "..... #.#.# .###. ##### .###. #.#.# ....."),
+        ("#", ".#.#. ##### .#.#. .#.#. .#.#. ##### .#.#."),
+        ("_", "..... ..... ..... ..... ..... ..... #####"),
+        ("[", "## #. #. #. #. #. ##"),
+        ("]", "## .# .# .# .# .# ##"),
+        ("^", "..#.. .#.#. #...# ..... ..... ..... ....."),
+        ("@", ".#.#. ##### ##### ##### .###. ..#.. ....."),
+    ])
+}
+
+// ---- the creatures' colors (64 to 127) and the emissive ones
+
+pub fn creature_colors(g: Gfx) {
+    let ramps = [
+        // 64 the sporeling: fungal violet
+        (rgb(44, 12, 40), rgb(232, 112, 204)),
+        // 68 the flicker: a jelly you can see through
+        (rgb(18, 48, 58), rgb(160, 240, 228)),
+        // 72 the bloater: swollen, pale
+        (rgb(58, 30, 40), rgb(226, 160, 168)),
+        // 76 the drifter: dusty spore-wings
+        (rgb(34, 26, 40), rgb(172, 152, 192)),
+        // 80 the spitter: toxic green
+        (rgb(20, 40, 26), rgb(150, 232, 110)),
+        // 84 the chewer: a beetle's shell
+        (rgb(18, 34, 40), rgb(110, 182, 172)),
+        // 88 the stalker: deep crimson
+        (rgb(36, 10, 30), rgb(204, 92, 160)),
+        // 92 the robots' white plastic
+        (rgb(104, 110, 118), rgb(246, 248, 250)),
+        // 96 metal
+        (rgb(32, 36, 42), rgb(162, 172, 182)),
+        // 100 hazard yellow
+        (rgb(118, 88, 10), rgb(255, 222, 64)),
+        // 104 cargo orange
+        (rgb(90, 44, 18), rgb(242, 152, 62)),
+        // 108 steel
+        (rgb(48, 54, 62), rgb(182, 192, 202)),
+        // 112 red
+        (rgb(88, 18, 24), rgb(250, 102, 92)),
+        // 116 cyan
+        (rgb(14, 50, 64), rgb(162, 240, 250)),
+        // 120 black to white
+        (rgb(8, 8, 12), rgb(255, 255, 255)),
+        // 124 the bloom's heart: flesh
+        (rgb(20, 6, 22), rgb(142, 52, 122)),
+    ];
+    let mut i = 64;
+    ramps.each(|r| {
+        let (dark, light) = r;
+        let mut k = 0;
+        while k < 4 {
+            set_color(g, i + k, mix(dark, light, k * 256 / 3));
+            k = k + 1;
+        }
+        i = i + 4;
+    });
+    let emit = [
+        rgb(250, 255, 255),  // 128 white-hot
+        rgb(236, 255, 170),  // 129 eyes, pale lime
+        rgb(255, 64, 56),    // 130 eyes, red
+        rgb(120, 240, 255),  // 131 lenses and lights, cyan
+        rgb(255, 196, 96),   // 132 sparks
+        rgb(255, 236, 120),  // 133 yellow light
+        rgb(255, 96, 220),   // 134 the bloom's glow
+        rgb(150, 255, 130),  // 135 green glow
+        rgb(255, 214, 80),   // 136 hazard light
+        rgb(40, 60, 70),     // 137 a light that's off
+    ];
+    let mut j = 0;
+    emit.each(|c| {
+        g.emit.set(j, c);
+        j = j + 1;
+    });
+}
+
+// ---- the deck's colors (0 to 63), by region: eight ramps of eight, dark
+// to light (see world.fern for what each is)
+
+pub fn land_colors(g: Gfx, region: Int) {
+    let ramps = if region == 0 {
+        // hydroponics: plating, soil, grating, leaves, machinery, -, the pads, water
+        [(rgb(16, 22, 24), rgb(122, 136, 134)), (rgb(16, 20, 12), rgb(84, 96, 52)), (rgb(20, 24, 28), rgb(132, 142, 150)),
+         (rgb(8, 22, 14), rgb(72, 152, 82)), (rgb(26, 28, 34), rgb(152, 156, 166)), (rgb(0, 0, 0), rgb(0, 0, 0)),
+         (rgb(38, 42, 46), rgb(172, 178, 182)), (rgb(8, 24, 34), rgb(72, 142, 162))]
+    } else if region == 1 {
+        // the cryo deck: plating, frost, grating, pods' glass, machinery, -, the pads, slush
+        [(rgb(18, 24, 32), rgb(132, 150, 172)), (rgb(32, 42, 56), rgb(206, 228, 244)), (rgb(18, 22, 30), rgb(122, 132, 148)),
+         (rgb(12, 28, 42), rgb(126, 206, 236)), (rgb(28, 36, 46), rgb(176, 196, 214)), (rgb(0, 0, 0), rgb(0, 0, 0)),
+         (rgb(38, 42, 50), rgb(172, 182, 192)), (rgb(16, 30, 44), rgb(124, 182, 212))]
+    } else {
+        // the reactor: plating, tiles, grating, bulkheads, machinery, -, the pads, coolant
+        [(rgb(18, 18, 22), rgb(110, 106, 112)), (rgb(22, 22, 28), rgb(124, 120, 128)), (rgb(20, 18, 18), rgb(112, 102, 98)),
+         (rgb(26, 28, 34), rgb(154, 154, 164)), (rgb(28, 26, 30), rgb(142, 134, 130)), (rgb(0, 0, 0), rgb(0, 0, 0)),
+         (rgb(42, 40, 44), rgb(178, 166, 158)), (rgb(8, 26, 14), rgb(64, 184, 94))]
+    };
+    let mut i = 0;
+    ramps.each(|r| {
+        let (dark, light) = r;
+        let mut k = 0;
+        while k < 8 {
+            set_color(g, i + k, mix(dark, light, k * 256 / 7));
+            k = k + 1;
+        }
+        i = i + 8;
+    });
+    // (40 to 47 are spots of color, not a ramp: two accents, hazard yellow,
+    // white, the fungus and its glow, a third accent, black)
+    let spots = if region == 0 {
+        [rgb(220, 82, 200), rgb(82, 220, 200), rgb(232, 196, 52), rgb(240, 248, 255), rgb(170, 84, 210), rgb(255, 160, 250), rgb(96, 170, 72), rgb(22, 20, 24)]
+    } else if region == 1 {
+        [rgb(222, 240, 255), rgb(168, 216, 255), rgb(232, 196, 52), rgb(246, 252, 255), rgb(150, 84, 180), rgb(240, 160, 240), rgb(90, 150, 200), rgb(20, 22, 28)]
+    } else {
+        [rgb(120, 255, 140), rgb(210, 255, 190), rgb(232, 196, 52), rgb(236, 236, 240), rgb(160, 60, 140), rgb(250, 140, 230), rgb(200, 44, 44), rgb(18, 18, 20)]
+    };
+    let mut j = 40;
+    spots.each(|c| {
+        set_color(g, j, c);
+        j = j + 1;
+    });
+}
+
+// ---- the creatures
+
+pub struct Art {
+    sporeling: Sprite, sporeling2: Sprite, flicker: Sprite, bloater: Sprite, drifter: Sprite, drifter2: Sprite,
+    spitter: Sprite, chewer: Sprite, stalker: Sprite, relay: Sprite, crate: Sprite,
+}
+
+pub fn art() -> Art {
+    let spore = [64, 65, 66, 67, 129];
+    let wings = [76, 77, 78, 79, 130];
+    Art {
+        sporeling: sprite([
+            "....bbbb....", "..bbccccbb..", ".bccddccccb.", ".bcdccccccb.", "bccceccecccb",
+            "bccccccccccb", "bbccccccccbb", "abbccccccbba", ".abbbbbbbba.", "..aa.aa.aa.."], "abcde", spore),
+        sporeling2: sprite([
+            "............", "...bbbbbb...", ".bbccccccbb.", "bccddccccccb", "bcdceccecccb",
+            "bccccccccccb", "bbccccccccbb", "abbbccccbbba", "aabbbbbbbbaa", ".aa.aa.aa.a."], "abcde", spore),
+        flicker: sprite([
+            "....tttt....", "..ttuuuutt..", ".tuuvvvvuut.", ".tuveuuevut.", "tuuuuuuuuuut", "tuuvuuuuvuut",
+            ".tuuuuuuuut.", ".ttuuuuuutt.", "..tuuttuut..", "..t.tu.ut.t.", "...t.t..t...", "....t....t.."],
+            "tuve", [68, 69, 70, 131]),
+        bloater: sprite([
+            ".....llllll.....", "...llmmmmmmll...", "..lmmnnmmmmmml..", ".lmmnnmmmmmmmml.",
+            ".lmmmmmmmmkmmml.", "lmmmeemmmmeemmml", "lmmmmmmmmmmmmmml", "lmmkmmmmmmmmmkml",
+            "lmmmmmmkkmmmmmml", ".lmmmmmmmmmmmml.", ".llmmmmmmmmmmll.", "..llmmmmmmmmll..",
+            "...lllmmmmlll...", "..ll.l.ll.l.ll..", ".l...l....l...l.", "................"],
+            "lmnke", [72, 73, 75, 134, 129]),
+        drifter: sprite([
+            "o............o", "oo..........oo", "opo...pp...opo", ".ppo.pqqp.opp.",
+            "..pppqeeqppp..", "...pppqqppp...", "....p.pp.p....", ".......p......"], "opqe", wings),
+        drifter2: sprite([
+            "..............", "......pp......", ".....pqqp.....", "..ppppeepppp..",
+            ".pppppqqppppp.", "opo.pppppp.opo", "oo...p..p...oo", "o............o"], "opqe", wings),
+        spitter: sprite([
+            "....gggggg....", "..gghhhhhhgg..", ".ghhiiiiiihhg.", ".ghiijjiiiihg.",
+            "ghhieiiiieihhg", "ghiiiiiiiiiihg", "ghiimmmmmmiihg", "ghhimmmmmmihhg",
+            ".ghhiiiiiihhg.", "..gghhhhhhgg..", "...g.g..g.g...", "..g..g..g..g.."],
+            "ghijme", [80, 81, 82, 83, 135, 129]),
+        chewer: sprite([
+            ".a........a.", "..a.aaaa.a..", "...abbbba...", "..abecceba..", ".aabbbbbbaa.",
+            "a.abccccba.a", "..abccccba..", "a.abccccba.a", "..abbccbba..", ".a.abbbba.a.",
+            "....abba....", "............"],
+            "abce", [84, 85, 86, 131]),
+        stalker: sprite([
+            ".....wwww.....", "....wxxxxw....", "...wxyyyyxw...", "...wxeyyexw...",
+            "...wxyyyyxw...", "....wxyyxw....", "..wwxxyyxxww..", ".wxxyyzzyyxxw.",
+            "wxx.wyzzyw.xxw", "wx..wyyyyw..xw", "w...wxyyxw...w", "....wxyyxw....",
+            "...wxxyyxxw...", "...wx.xx.xw...", "..w.w.x.w.w...", "..w...w...w..."],
+            "wxyze", [88, 89, 90, 91, 130]),
+        relay: sprite([
+            "..vvvvvvvv..", "..vuuuuuuv..", "..vuLLLLuv..", "..vuuuuuuv..", "...vvvvvv...",
+            ".....uu.....", ".....tu.....", "....ttuu....", "....tuuu....", "...ttuuuu...",
+            "..ssssssss..", ".sqqqyyqqqs.", ".ssssssssss."],
+            "tuvsqyL", [96, 98, 97, 97, 108, 101, 120]),
+        crate: sprite([
+            "oooooooooooo", "oppppppppppo", "opyypyypyypo", "oppppppppppo",
+            "opppcccppppo", "oppppppppppo", "opyypyypyypo", "oooooooooooo"],
+            "opyc", [104, 106, 101, 131]),
+    }
+}

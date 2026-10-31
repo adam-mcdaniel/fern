@@ -1,0 +1,14 @@
+// The Fibonacci numbers, recursively.
+fn fib(n) {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn main() {
+    let i = 0;
+    while i <= 20 {
+        print(fib(i), " ");
+        i = i + 1;
+    }
+    print("\n");
+}

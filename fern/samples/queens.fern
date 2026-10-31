@@ -1,0 +1,108 @@
+// Backtracking search as an effect. `pick(n)` chooses a number below n,
+// and `reject()` says a choice was wrong; the search itself is written as
+// if it always guessed right. What a search means is up to the handler:
+// `all` resumes each pick once for every choice and collects every
+// success, and `first` stops at the first.
+
+effect Search {
+    fn pick(n: Int) -> Int;
+    fn reject<A>() -> A;
+}
+
+// every way the search can come out
+fn all<T>(search: fn() -> T with {Search}) -> List<T> {
+    handle search() {
+        return(x) => [x],
+        pick(n) => (0..n).map(|i| resume(i)).flatten(),
+        reject() => [],
+    }
+}
+
+// the first way it comes out, trying choices in order
+fn first<T>(search: fn() -> T with {Search}) -> Option<T> {
+    handle search() {
+        return(x) => Some(x),
+        pick(n) => first_of(n, 0, |i| resume(i)),
+        reject() => None,
+    }
+}
+
+fn first_of<T>(n: Int, i: Int, go: fn(Int) -> Option<T>) -> Option<T> {
+    if i == n {
+        None
+    } else {
+        match go(i) {
+            Some(x) => Some(x),
+            None => first_of(n, i + 1, go),
+        }
+    }
+}
+
+// ---- the queens
+
+// n queens on an n x n board, none attacking another: the column of the
+// queen in each row (the last row first)
+fn queens(n: Int) -> List<Int> with {Search} {
+    place(n, 0, [])
+}
+
+fn place(n: Int, row: Int, placed: List<Int>) -> List<Int> with {Search} {
+    if row == n {
+        placed
+    } else {
+        let col = pick(n);
+        if safe(col, 1, placed) { place(n, row + 1, Cons(col, placed)) } else { reject() }
+    }
+}
+
+// whether a queen in column col is safe from those placed, the nearest
+// (d rows up) first
+fn safe(col: Int, d: Int, placed: List<Int>) -> Bool {
+    match placed {
+        Nil => true,
+        Cons(c, rest) => c != col && c - col != d && col - c != d && safe(col, d + 1, rest),
+    }
+}
+
+fn board(n: Int, cols: List<Int>) {
+    match cols {
+        Nil => (),
+        Cons(c, rest) => {
+            let mut line = "";
+            let mut i = 0;
+            while i < n {
+                line = line ++ (if i == c { " Q" } else { " ." });
+                i = i + 1;
+            }
+            println(line);
+            board(n, rest);
+        }
+    }
+}
+
+// ---- another search: Pythagorean triples
+
+fn triple(limit: Int) -> (Int, Int, Int) with {Search} {
+    let a = pick(limit) + 1;
+    let b = pick(limit) + 1;
+    let c = pick(limit) + 1;
+    if a < b && a * a + b * b == c * c { (a, b, c) } else { reject() }
+}
+
+fn main() {
+    let counts = (1..8).map(|n| all(|| queens(n)).len());
+    println("solutions for 1 to 7 queens: " ++ counts.show());
+    match first(|| queens(6)) {
+        Some(cols) => board(6, cols),
+        None => println("none"),
+    }
+    println(all(|| triple(20)).show());
+}
+// expect: solutions for 1 to 7 queens: [1, 0, 0, 2, 10, 4, 40]
+// expect:  . . . . Q .
+// expect:  . . Q . . .
+// expect:  Q . . . . .
+// expect:  . . . . . Q
+// expect:  . . . Q . .
+// expect:  . Q . . . .
+// expect: [(3, 4, 5), (5, 12, 13), (6, 8, 10), (8, 15, 17), (9, 12, 15), (12, 16, 20)]

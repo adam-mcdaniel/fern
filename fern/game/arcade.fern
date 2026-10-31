@@ -1,0 +1,166 @@
+// The fern arcade: a menu of the other programs here, over a starfield.
+// Up and down (or the mouse) choose, enter (or a click) plays, escape
+// quits. Build everything first: fern/game/build.sh all
+
+mod screen;
+mod draw;
+mod math;
+
+use screen::*;
+use draw::{Canvas, canvas, clear, fill_rect, pixel, show, text, text_width};
+use math::{rng, random};
+
+fn width() -> Int { 160 }
+fn height() -> Int { 140 }
+
+struct Entry { title: String, program: String, about: String }
+
+fn entries() -> List<Entry> {
+    [Entry { title: "BUMPER CROP", program: "bumpercrop", about: "PINBALL ON A FARM. SHIFT FLIPS" },
+     Entry { title: "TUNNEL VISION", program: "tunnelvision", about: "AN ANT FARM. DIG; THE ANTS DO THE REST" },
+     Entry { title: "THE AMAZING STELLA", program: "stella", about: "TRAPEZE. HOLD TO GRAB, LET GO TO FLY" },
+     Entry { title: "BREAKOUT", program: "breakout", about: "BREAK EVERY BRICK. MOUSE OR KEYS" },
+     Entry { title: "TETRIS", program: "tetris", about: "SEVEN PIECES, TEN COLUMNS" },
+     Entry { title: "ASTEROIDS", program: "asteroids", about: "VECTOR ROCKS. ARROWS AND SPACE" },
+     Entry { title: "MINES", program: "mines", about: "MINESWEEPER. RIGHT CLICK FLAGS" },
+     Entry { title: "MAZE", program: "maze", about: "3D RAYCASTING. FIND THE GREEN DOOR" },
+     Entry { title: "RAYTRACER", program: "raytrace", about: "SPHERES, MIRRORS AND SHADOWS" },
+     Entry { title: "GRAVITY", program: "nbody", about: "TWO GALAXIES COLLIDE, IN 3D" },
+     Entry { title: "PERIHELION", program: "perihelion", about: "CATCH THE CRYSTALS. LET GRAVITY WORK" },
+     Entry { title: "UPDRAFT", program: "updraft", about: "GLIDE ON RISING AIR TILL SUNSET" },
+     Entry { title: "WILD LINKS", program: "links", about: "GOLF, NINE HOLES ACROSS WILD COUNTRY" },
+     Entry { title: "DELVE", program: "delve", about: "8 FLOORS DOWN BY TORCHLIGHT. ARROWS, P" },
+     Entry { title: "UMBRA", program: "umbra", about: "A THIEF IN THE DARK. STAY IN SHADOW" },
+     Entry { title: "MANDELBROT", program: "mandelbrot", about: "CLICK TO ZOOM IN, X TO ZOOM OUT" },
+     Entry { title: "SAND", program: "sand", about: "POUR SAND, WATER, PLANTS, FIRE" },
+     Entry { title: "LIFE", program: "life", about: "CONWAY'S GAME OF LIFE" },
+     Entry { title: "FIRE", program: "fire", about: "THE DOOM FIRE. MOUSE IS THE WIND" }]
+}
+
+fn nth(es: List<Entry>, i: Int) -> Entry {
+    match es {
+        Nil => panic("no such entry"),
+        Cons(e, rest) => if i == 0 { e } else { nth(rest, i - 1) },
+    }
+}
+
+fn top() -> Int { 17 }
+fn row() -> Int { 6 }
+
+// the stars: x and y around the middle, and how far away (they come closer)
+struct Stars { x: Array<Int>, y: Array<Int>, z: Array<Int>, r: Array<Int> }
+
+fn main() {
+    if !screen_open(width(), height(), 5, "fern arcade") {
+        panic("couldn't open a window\n");
+    }
+    let c = canvas(width(), height());
+    let es = entries();
+    let n = es.len();
+    let stars = Stars { x: array(80, 0), y: array(80, 0), z: array(80, 0), r: rng(screen_ticks() + 3) };
+    let mut i = 0;
+    while i < 80 {
+        place_star(stars, i, 1 + random(stars.r, 255));
+        i = i + 1;
+    }
+    let mut chosen = 0;
+    let mut mouse = (mouse_x(), mouse_y());
+    let mut frame = 0;
+    let mut message = "";
+    loop {
+        frame = frame + 1;
+        if key_pressed(key_down_arrow()) { chosen = (chosen + 1) % n }
+        if key_pressed(key_up()) { chosen = (chosen + n - 1) % n }
+        let now = (mouse_x(), mouse_y());
+        let (mx, my) = now;
+        let over = (my - top()) / row();
+        let on_list = my >= top() && over < n;
+        if now != mouse && on_list { chosen = over }
+        mouse = now;
+        if key_pressed(key_enter()) || key_pressed(key_space()) || mouse_clicked() && on_list {
+            let e = nth(es, chosen);
+            let status = screen_run(e.program);
+            message = if status != 0 { "COULDN'T RUN " ++ e.program ++ ": BUILD IT?" } else { "" };
+        }
+        fly(stars);
+        render(c, stars, es, chosen, frame, message);
+        if !show(c) || key_pressed(key_escape()) {
+            break;
+        }
+    }
+}
+
+fn place_star(s: Stars, i: Int, z: Int) {
+    array_set(s.x, i, random(s.r, 4000) - 2000);
+    array_set(s.y, i, random(s.r, 3000) - 1500);
+    array_set(s.z, i, z);
+}
+
+fn fly(s: Stars) {
+    let mut i = 0;
+    while i < 80 {
+        let z = array_get(s.z, i) - 2;
+        if z <= 1 { place_star(s, i, 255) } else { array_set(s.z, i, z) }
+        i = i + 1;
+    }
+}
+
+fn render(c: Canvas, s: Stars, es: List<Entry>, chosen: Int, frame: Int, message: String) {
+    clear(c, rgb(4, 4, 14));
+    // the stars, in perspective: brighter as they come nearer
+    let mut i = 0;
+    while i < 80 {
+        let z = array_get(s.z, i);
+        let x = width() / 2 + array_get(s.x, i) * 8 / z;
+        let y = height() / 2 + array_get(s.y, i) * 8 / z;
+        let b = 255 - z;
+        pixel(c, x, y, rgb(b, b, b.min(200) + 55));
+        i = i + 1;
+    }
+    title(c, "FERN ARCADE", 6, frame);
+    let mut k = 0;
+    let mut rest = es;
+    loop {
+        match rest {
+            Nil => { break; }
+            Cons(e, more) => {
+                let y = top() + k * row();
+                if k == chosen {
+                    fill_rect(c, 30, y - 2, 100, row(), rgb(40, 50, 110));
+                    text(c, ">", 34 + frame / 8 % 2, y, 1, rgb(255, 220, 90));
+                }
+                text(c, e.title, 42, y, 1, if k == chosen { rgb(255, 255, 255) } else { rgb(150, 155, 190) });
+                k = k + 1;
+                rest = more;
+            }
+        }
+    }
+    let about = if message == "" { nth(es, chosen).about } else { message };
+    text(c, about, (width() - text_width(about, 1)) / 2, height() - 8, 1, if message == "" { rgb(140, 200, 255) } else { rgb(255, 120, 120) });
+}
+
+// the title, each letter its own color, the colors going round
+fn title(c: Canvas, s: String, y: Int, frame: Int) {
+    let x0 = (width() - text_width(s, 2)) / 2;
+    let mut i = 0;
+    while i < string_length(s) {
+        let color = hue((i * 24 + frame * 3) % 256);
+        text(c, char_to_string(char_at(s, i)), x0 + i * 8, y, 2, color);
+        i = i + 1;
+    }
+}
+
+// a bright color around the wheel: 0 red, then yellow, green, cyan, blue,
+// magenta, and back to red at 256
+fn hue(h: Int) -> Int {
+    let part = h * 6 / 256;
+    let t = h * 6 % 256;
+    match part {
+        0 => rgb(255, t, 60),
+        1 => rgb(255 - t, 255, 60),
+        2 => rgb(60, 255, t),
+        3 => rgb(60, 255 - t, 255),
+        4 => rgb(t, 60, 255),
+        _ => rgb(255, 60, 255 - t),
+    }
+}

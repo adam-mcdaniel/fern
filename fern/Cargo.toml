@@ -1,0 +1,9 @@
+[package]
+name = "fern"
+version = "0.1.0"
+edition = "2024"
+description = "A language with Rust's syntax and an ML's type system (inference, traits, row-polymorphic records, algebraic effects), compiled to native code through bf's IR"
+
+[dependencies]
+bf = { path = ".." }
+clap = { version = "4", features = ["derive"] }

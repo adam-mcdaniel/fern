@@ -1,0 +1,267 @@
+// The flourishes: particles (dirt, sparks, petals, confetti), crumbs
+// flying to the score, numbers and words popping up, the screen shaking,
+// the game stopping for a moment on a big moment (hit-stop), and the
+// sounds the play asks for each frame (played by the main loop, which can
+// make noise; the play itself can't).
+//
+// Particles are kept in arrays of numbers, a slot each, reused oldest
+// first. Positions are in 256ths of a screen pixel.
+
+pub fn max_parts() -> Int { 500 }
+pub fn max_flies() -> Int { 48 }
+pub fn max_pops() -> Int { 24 }
+
+// particle kinds
+pub fn p_dot() -> Int { 0 }       // a speck that falls
+pub fn p_spark() -> Int { 1 }     // a bright speck, added as light, that doesn't
+pub fn p_petal() -> Int { 2 }     // drifts and sways
+pub fn p_confetti() -> Int { 3 }  // tumbles, two colors
+pub fn p_ring() -> Int { 4 }      // a ring growing outward
+pub fn p_dust() -> Int { 5 }      // a puff that grows and fades
+pub fn p_star() -> Int { 6 }      // a twinkle
+
+pub struct Fx {
+    x: Array<Int>, y: Array<Int>, vx: Array<Int>, vy: Array<Int>,
+    life: Array<Int>, full: Array<Int>, color: Array<Int>, kind: Array<Int>,
+    next: Int,
+    // crumbs flying to the score: from (sx, sy) to (tx, ty) in pixels,
+    // t of dur frames, worth val, of a color
+    fsx: Array<Int>, fsy: Array<Int>, ftx: Array<Int>, fty: Array<Int>,
+    ft: Array<Int>, fdur: Array<Int>, fval: Array<Int>, fcolor: Array<Int>,
+    fnext: Int,
+    // what arrived this frame (worth, for the score to count up)
+    arrived: Int,
+    // popping numbers and words: screen pixels; big ones grow in
+    pop_text: Array<String>, pop_x: Array<Int>, pop_y: Array<Int>, pop_life: Array<Int>,
+    pop_color: Array<Int>, pop_size: Array<Int>,
+    pop_next: Int,
+    // the shaking (pixels, decaying), the hit-stop (frames), a flash of the
+    // whole screen (frames, and its color)
+    shake: Int,
+    hitstop: Int,
+    flash: Int,
+    flash_color: Int,
+    // a banner across the screen: its words, a second line, how long it's
+    // been up, its color
+    banner: String,
+    banner2: String,
+    banner_t: Int,
+    banner_color: Int,
+    // a tip for a new player: its words, and how long it's been up
+    tip: String,
+    tip_t: Int,
+    // the sounds asked for this frame: what, a number, the pan; three each
+    sounds: Array<Int>,
+    n_sounds: Int,
+    seed: Int,
+}
+
+pub fn fx() -> Fx {
+    let n = max_parts();
+    Fx {
+        x: array(n, 0), y: array(n, 0), vx: array(n, 0), vy: array(n, 0),
+        life: array(n, 0), full: array(n, 1), color: array(n, 0), kind: array(n, 0),
+        next: 0,
+        fsx: array(max_flies(), 0), fsy: array(max_flies(), 0), ftx: array(max_flies(), 0), fty: array(max_flies(), 0),
+        ft: array(max_flies(), 0), fdur: array(max_flies(), 0), fval: array(max_flies(), 0), fcolor: array(max_flies(), 0),
+        fnext: 0, arrived: 0,
+        pop_text: array(max_pops(), ""), pop_x: array(max_pops(), 0), pop_y: array(max_pops(), 0),
+        pop_life: array(max_pops(), 0), pop_color: array(max_pops(), 0), pop_size: array(max_pops(), 1),
+        pop_next: 0,
+        shake: 0, hitstop: 0, flash: 0, flash_color: 0xffffff,
+        banner: "", banner2: "", banner_t: -1, banner_color: 0xffffff,
+        tip: "", tip_t: -1,
+        sounds: array(96, 0), n_sounds: 0, seed: 99,
+    }
+}
+
+pub fn rand(f: Fx, n: Int) -> Int {
+    f.seed = (f.seed * 1103515245 + 12345) & 0x7fffffff;
+    (f.seed >> 16) % n.max(1)
+}
+
+// a particle at (x, y) pixels, moving (vx, vy) in 256ths a frame
+pub fn part(f: Fx, kind: Int, x: Int, y: Int, vx: Int, vy: Int, life: Int, color: Int) {
+    let i = f.next;
+    f.x.set(i, x * 256);
+    f.y.set(i, y * 256);
+    f.vx.set(i, vx);
+    f.vy.set(i, vy);
+    f.life.set(i, life);
+    f.full.set(i, life.max(1));
+    f.color.set(i, color);
+    f.kind.set(i, kind);
+    f.next = (i + 1) % max_parts();
+}
+
+// n particles bursting from (x, y) at up to `speed` (256ths), of a color
+pub fn burst(f: Fx, kind: Int, x: Int, y: Int, n: Int, speed: Int, life: Int, color: Int) {
+    let mut i = 0;
+    while i < n {
+        let vx = rand(f, speed * 2 + 1) - speed;
+        let vy = rand(f, speed * 2 + 1) - speed - (if kind == p_dot() || kind == p_confetti() { speed / 2 } else { 0 });
+        part(f, kind, x, y, vx, vy, life / 2 + rand(f, life / 2 + 1), color);
+        i = i + 1;
+    }
+}
+
+// a crumb flying from (sx, sy) to (tx, ty), worth val
+pub fn fly(f: Fx, sx: Int, sy: Int, tx: Int, ty: Int, val: Int, color: Int, delay: Int) {
+    let i = f.fnext;
+    f.fsx.set(i, sx);
+    f.fsy.set(i, sy);
+    f.ftx.set(i, tx);
+    f.fty.set(i, ty);
+    f.ft.set(i, -delay);
+    f.fdur.set(i, 30 + rand(f, 12));
+    f.fval.set(i, val);
+    f.fcolor.set(i, color);
+    f.fnext = (i + 1) % max_flies();
+}
+
+// words popping up at (x, y), screen pixels
+pub fn pop(f: Fx, s: String, x: Int, y: Int, color: Int, size: Int) {
+    let i = f.pop_next;
+    f.pop_text.set(i, s);
+    f.pop_x.set(i, x);
+    f.pop_y.set(i, y);
+    f.pop_life.set(i, if size > 1 { 80 } else { 50 });
+    f.pop_color.set(i, color);
+    f.pop_size.set(i, size);
+    f.pop_next = (i + 1) % max_pops();
+}
+
+pub fn shake(f: Fx, n: Int) { f.shake = f.shake.max(n) }
+pub fn stop(f: Fx, n: Int) { f.hitstop = f.hitstop.max(n) }
+pub fn flash(f: Fx, n: Int, color: Int) {
+    f.flash = n;
+    f.flash_color = color;
+}
+
+pub fn banner(f: Fx, s: String, s2: String, color: Int) {
+    f.banner = s;
+    f.banner2 = s2;
+    f.banner_t = 0;
+    f.banner_color = color;
+}
+
+// a tip shown to a new player
+pub fn tip(f: Fx, s: String) {
+    f.tip = s;
+    f.tip_t = 0;
+}
+
+// a sound for the main loop to play: what, a number, where (-100 left to 100 right)
+pub fn sound(f: Fx, what: Int, k: Int, pan: Int) {
+    let n = f.n_sounds;
+    if n < 32 {
+        f.sounds.set(n * 3, what);
+        f.sounds.set(n * 3 + 1, k);
+        f.sounds.set(n * 3 + 2, pan);
+        f.n_sounds = n + 1;
+    }
+}
+
+// the pan for something at screen x
+pub fn pan_at(x: Int) -> Int { (x - 240) * 100 / 240 }
+
+// a frame of it all: particles move, fliers fly, words rise
+pub fn tick_fx(f: Fx) {
+    f.arrived = 0;
+    let mut i = 0;
+    while i < max_parts() {
+        let l = f.life.get(i);
+        if l > 0 {
+            let k = f.kind.get(i);
+            f.life.set(i, l - 1);
+            let mut vx = f.vx.get(i);
+            let mut vy = f.vy.get(i);
+            if k == p_dot() || k == p_confetti() {
+                vy = vy + 14;
+                vx = vx * 250 / 256;
+            } else if k == p_petal() {
+                vy = (vy + 3).min(90);
+                vx = vx + (if (l / 12) % 2 == 0 { 6 } else { -6 });
+                vx = vx * 245 / 256;
+            } else if k == p_spark() || k == p_star() {
+                vx = vx * 235 / 256;
+                vy = vy * 235 / 256;
+            } else if k == p_dust() {
+                vx = vx * 230 / 256;
+                vy = vy * 230 / 256 - 2;
+            }
+            f.vx.set(i, vx);
+            f.vy.set(i, vy);
+            f.x.set(i, f.x.get(i) + vx);
+            f.y.set(i, f.y.get(i) + vy);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_flies() {
+        let t = f.ft.get(i);
+        let d = f.fdur.get(i);
+        if f.fval.get(i) != 0 {
+            if t >= d {
+                f.arrived = f.arrived + f.fval.get(i);
+                f.fval.set(i, 0);
+            } else {
+                f.ft.set(i, t + 1);
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < max_pops() {
+        if f.pop_life.get(i) > 0 {
+            f.pop_life.set(i, f.pop_life.get(i) - 1);
+            if f.pop_life.get(i) % 2 == 0 && f.pop_size.get(i) == 1 { f.pop_y.set(i, f.pop_y.get(i) - 1) }
+        }
+        i = i + 1;
+    }
+    if f.shake > 0 { f.shake = f.shake - 1 }
+    if f.flash > 0 { f.flash = f.flash - 1 }
+    if f.tip_t >= 0 {
+        f.tip_t = f.tip_t + 1;
+        if f.tip_t > 300 { f.tip_t = -1 }
+    }
+    if f.banner_t >= 0 {
+        f.banner_t = f.banner_t + 1;
+        if f.banner_t > 150 { f.banner_t = -1 }
+    }
+}
+
+// where a flier is now (pixels): eased along an arc, slow to start,
+// quick to land
+pub fn fly_x(f: Fx, i: Int) -> Int {
+    let t = (f.ft.get(i).max(0) * 256 / f.fdur.get(i).max(1)).min(256);
+    let e = t * t >> 8;
+    f.fsx.get(i) + (f.ftx.get(i) - f.fsx.get(i)) * e / 256
+}
+
+pub fn fly_y(f: Fx, i: Int) -> Int {
+    let t = (f.ft.get(i).max(0) * 256 / f.fdur.get(i).max(1)).min(256);
+    let e = t * t >> 8;
+    let lift = (t * (256 - t)) >> 9;
+    f.fsy.get(i) + (f.fty.get(i) - f.fsy.get(i)) * e / 256 - lift * 40 / 64
+}
+
+// ---- the sounds' names
+
+pub fn sn_dig() -> Int { 0 }
+pub fn sn_fill() -> Int { 1 }
+pub fn sn_deliver() -> Int { 2 }
+pub fn sn_hatch() -> Int { 3 }
+pub fn sn_food() -> Int { 4 }
+pub fn sn_warn() -> Int { 5 }
+pub fn sn_week() -> Int { 6 }
+pub fn sn_pick() -> Int { 7 }
+pub fn sn_tick() -> Int { 8 }
+pub fn sn_blocked() -> Int { 9 }
+pub fn sn_trinket() -> Int { 10 }
+pub fn sn_rain() -> Int { 11 }
+pub fn sn_lost() -> Int { 12 }
+pub fn sn_place() -> Int { 13 }
+pub fn sn_no() -> Int { 14 }
+pub fn sn_beetle() -> Int { 15 }
+pub fn sn_fight() -> Int { 16 }

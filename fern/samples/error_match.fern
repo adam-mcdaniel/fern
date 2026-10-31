@@ -1,0 +1,6 @@
+// Matches have to handle every case.
+fn get(o: Option<Int>) -> Int {
+    match o { Some(x) => x }
+}
+fn main() { println(get(Some(1)).show()); }
+// error: doesn't handle every case: for example None

@@ -1,0 +1,88 @@
+// Methods: functions of a type, called on its values as x.name(..), or as
+// Type::name(..) (the only way, for those without self).
+
+struct Point { x: Int, y: Int }
+
+impl Point {
+    pub fn new(x: Int, y: Int) -> Point { Point { x: x, y: y } }
+    pub fn origin() -> Self { Point::new(0, 0) }
+    pub fn plus(self, other: Point) -> Point { Point::new(self.x + other.x, self.y + other.y) }
+    pub fn scaled(self, k: Int) -> Self {
+        let p: Self = Point::new(self.x * k, self.y * k);
+        p
+    }
+    // the distance, in blocks, from the origin
+    pub fn blocks(self) -> Int { abs(self.x) + abs(self.y) }
+    // moved, in place (see fields.fern)
+    pub fn move_by(self, dx: Int, dy: Int) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+}
+
+fn abs(n: Int) -> Int { if n < 0 { -n } else { n } }
+
+// generic: a stack of anything, and more for stacks of numbers
+struct Stack<T> { items: List<T> }
+
+impl<T> Stack<T> {
+    pub fn new() -> Stack<T> { Stack { items: Nil } }
+    pub fn push(self, x: T) -> Stack<T> { Stack { items: Cons(x, self.items) } }
+    pub fn top(self) -> Option<T> { match self.items { Nil => None, Cons(x, _) => Some(x) } }
+    pub fn depth(self) -> Int { count(self.items) }
+}
+
+impl Stack<Int> {
+    pub fn total(self) -> Int { add_up(self.items) }
+}
+
+fn count<T>(xs: List<T>) -> Int { match xs { Nil => 0, Cons(_, rest) => 1 + count(rest) } }
+fn add_up(xs: List<Int>) -> Int { match xs { Nil => 0, Cons(x, rest) => x + add_up(rest) } }
+
+// on an enum
+enum Shape { Square(Int), Rect(Int, Int) }
+
+impl Shape {
+    pub fn area(self) -> Int {
+        match self { Square(s) => s * s, Rect(w, h) => w * h }
+    }
+}
+
+// p's type isn't known at p.blocks(), but is by the end of the function
+// (from `twice`), and so is q's at q.x
+fn far(p, q) -> Bool {
+    let d = p.blocks();
+    let x = q.x;
+    twice(p);
+    twice(q);
+    d > 5 && x > 0
+}
+
+fn twice(p: Point) -> Point { p.scaled(2) }
+
+// a trait's method is still found by its name, whatever the type
+fn describe(x) -> String { "<" ++ x.show() ++ ">" }
+
+fn main() {
+    let p = Point::new(3, 4).plus(Point::origin().plus(Point::new(1, -1))).scaled(2);
+    println(p.x.show() ++ " " ++ p.y.show() ++ " " ++ p.blocks().show());
+    let s = Stack::new().push(1).push(2).push(39);
+    println(s.depth().show() ++ " " ++ s.top().show() ++ " " ++ s.total().show());
+    let words = Stack::new().push("a");
+    println(words.top().show());
+    println((Square(3).area() + Rect(2, 5).area()).show());
+    println(far(Point::new(4, 3), Point::new(1, 0)).show() ++ " " ++ describe(42) ++ " " ++ describe([true]));
+    let area = Shape::area;
+    println(area(Rect(6, 7)).show());
+    let m = Point::origin();
+    m.move_by(2, 3);
+    m.move_by(1, 1);
+    println(m.x.show() ++ " " ++ m.y.show());
+}
+// expect: 8 6 14
+// expect: 3 Some(39) 42
+// expect: Some("a")
+// expect: 19
+// expect: true <42> <[true]>
+// expect: 42
+// expect: 3 4

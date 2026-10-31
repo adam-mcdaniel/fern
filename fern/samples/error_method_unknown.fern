@@ -1,0 +1,16 @@
+// A method of a type is found by the type: here nothing says what s is.
+
+struct Square { side: Int }
+
+impl Square {
+    pub fn area(self) -> Int { self.side * self.side }
+}
+
+fn area_of(s) -> Int {
+    s.area()
+}
+
+fn main() {
+    println(area_of(Square { side: 2 }).show());
+}
+// error: can't tell what type this is, to find its method area: annotate it
